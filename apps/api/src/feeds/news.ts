@@ -488,7 +488,10 @@ export async function runNewsFanout(env: Env): Promise<{
   const portfolios = portfoliosData as PortfolioRow[];
 
   // published_after = 48h ago
-  const publishedAfter = new Date(Date.now() - CLUSTER_TTL_HOURS * 3_600_000).toISOString();
+  // Marketaux expects "YYYY-MM-DDTHH:MM:SS" — no milliseconds, no Z suffix.
+  const publishedAfter = new Date(Date.now() - CLUSTER_TTL_HOURS * 3_600_000)
+    .toISOString()
+    .replace(/\.\d{3}Z$/, "");
 
   let portfoliosProcessed = 0;
   let portfoliosSkipped = 0;
