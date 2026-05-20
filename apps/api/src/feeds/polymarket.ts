@@ -291,7 +291,7 @@ async function fetchCandidateMarkets(env: Env): Promise<Map<string, FlatMarket>>
   for (const [tagName, tagId] of Object.entries(TAG_IDS)) {
     try {
       const events = await fetchGammaJson<GammaEvent[]>(
-        `${base}/events?tag_id=${tagId}&active=true&closed=false&limit=100`,
+        `${base}/events?tag_id=${tagId}&active=true&closed=false&limit=25`,
       );
       let added = 0;
       for (const event of events) {
@@ -390,8 +390,10 @@ async function upsertMarkets(
     fetched_at: new Date().toISOString(),
   }));
 
-  // Batch upsert in chunks to avoid payload limits
-  const CHUNK = 100;
+  // Batch upsert in chunks to avoid payload limits.
+  // Keep chunk large (500) to minimise subrequest count — Cloudflare Workers
+  // has a per-invocation subrequest limit (50 on free, 1000 on paid).
+  const CHUNK = 500;
   for (let i = 0; i < rows.length; i += CHUNK) {
     const chunk = rows.slice(i, i + CHUNK);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
