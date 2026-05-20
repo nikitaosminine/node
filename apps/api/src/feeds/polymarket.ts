@@ -111,12 +111,12 @@ export const TAG_IDS = {
 
 // Slugs of Polymarket events to always pin (highest volume_24hr market from
 // each event gets is_pinned=true across all portfolios). Update as needed.
+// Keep this list short and current — expired/resolved slugs are silently skipped.
 export const PINNED_MARKET_SLUGS: string[] = [
-  "will-donald-trump-be-impeached",
-  "will-there-be-a-us-recession-in-2025",
-  "will-the-federal-reserve-cut-rates-in-2025",
-  "will-bitcoin-hit-100k-before-january-1-2026",
-  "will-the-sp-500-be-higher-on-december-31-2025",
+  "will-the-fed-cut-rates-in-2026",
+  "will-there-be-a-us-recession-in-2026",
+  "us-midterm-elections-2026",
+  "will-bitcoin-reach-200k-in-2026",
 ];
 
 const ROTATING_BATCH_SIZE = 50; // max candidate markets sent to Grok per portfolio
@@ -634,20 +634,30 @@ export async function runPolymarketFanout(env: Env): Promise<{
         }
       }
 
-      // 6b. Score rotating candidates via Grok (skip if no LLM key)
-      if (!env.GROK_SUB_API_KEY && !env.GROK_NORMALIZATION_API_KEY) {
-        portfoliosProcessed++;
-        continue;
-      }
+      // 6b. Score rotating candidates via Grok, or fall back to top-N by volume
+      const hasGrokKey = !!(env.GROK_SUB_API_KEY || env.GROK_NORMALIZATION_API_KEY);
+      let scored: Array<{ condition_id: string; score: number; reason: string | null }>;
 
-      const profile = await buildPortfolioProfile(client, portfolioId);
-      if (profile.tickers.length === 0 && profile.sectors.length === 0 && profile.countries.length === 0) {
-        // Portfolio has no holdings — skip LLM scoring
-        portfoliosProcessed++;
-        continue;
+      if (!hasGrokKey) {
+        // No LLM key — just take the top 10 by volume as unscored rotating picks
+        scored = rotatingCandidates.slice(0, 10).map((m) => ({
+          condition_id: m.condition_id,
+          score: 0,
+          reason: null,
+        }));
+      } else {
+        const profile = await buildPortfolioProfile(client, portfolioId);
+        if (profile.tickers.length === 0 && profile.sectors.length === 0 && profile.countries.length === 0) {
+          // Portfolio has no holdings — fall back to top-10 by volume
+          scored = rotatingCandidates.slice(0, 10).map((m) => ({
+            condition_id: m.condition_id,
+            score: 0,
+            reason: null,
+          }));
+        } else {
+          scored = await scoreRotatingCandidates(env, profile, rotatingCandidates);
+        }
       }
-
-      const scored = await scoreRotatingCandidates(env, profile, rotatingCandidates);
 
       if (scored.length > 0) {
         const rotatingRows = scored.map((item) => ({

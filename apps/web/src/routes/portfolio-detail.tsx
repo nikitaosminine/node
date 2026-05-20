@@ -39,8 +39,6 @@ import { AddHoldingModal } from "@/components/add-holding-modal";
 import { ImportTransactionsModal } from "@/components/import-transactions-modal";
 import { ManualTransactionModal } from "@/components/manual-transaction-modal";
 import { AnimatedCopyButton } from "@/components/lightswind/animated-copy-button";
-import { PortfolioChart } from "@/components/portfolio-chart";
-import { PrimaryTabs } from "@/components/primary-tabs";
 import { OrbitRing } from "@/components/loading-ui/orbit-ring";
 import { TransactionDateRange, TransactionHistoryTab } from "@/components/transaction-history-tab";
 import { AllocationCard } from "@/components/portfolio/AllocationCard";
@@ -1635,54 +1633,10 @@ export default function PortfolioDetailPage() {
       </div>
     );
 
-  const ROW_HEIGHT = 560;
 
-  const KPIS = [
-    {
-      label: "Total value",
-      value: fmtMoney(totalValue, portfolioCurrency),
-      loading: !marketReady,
-    },
-    {
-      label: "Unrealized P/L",
-      value: unrealizedPL === 0 ? "—" : fmtMoney(unrealizedPL, portfolioCurrency),
-      detail: unrealizedPL === 0 ? undefined : `${fmtPct(unrealizedPct)} · open`,
-      tone: unrealizedPL > 0 ? "positive" : unrealizedPL < 0 ? "negative" : undefined,
-      muted: unrealizedPL === 0,
-      loading: !marketReady,
-      emphasis: true,
-    },
-    {
-      label: "Realized P/L",
-      value: hasRealizedPnL ? fmtMoney(realizedMetrics.realizedPnL, portfolioCurrency) : "—",
-      detail: hasRealizedPnL ? `${fmtPct(realizedMetrics.realizedPct)} · closed` : undefined,
-      tone:
-        realizedMetrics.realizedPnL > 0
-          ? "positive"
-          : realizedMetrics.realizedPnL < 0
-            ? "negative"
-            : undefined,
-      muted: !hasRealizedPnL,
-      emphasis: true,
-    },
-    {
-      label: "Cost basis",
-      value: fmtMoney(totalCost, portfolioCurrency),
-      hierarchy: "secondary",
-      subtle: true,
-    },
-    {
-      label: "Cash",
-      value: fmtMoney(cashValue, portfolioCurrency),
-      muted: cashValue === 0,
-      subtle: cashValue !== 0,
-    },
-  ];
 
   return (
     <div className="min-h-screen bg-background text-foreground">
-      <PrimaryTabs />
-
       <div className="mx-auto flex max-w-[1500px] flex-col gap-6 px-6 pb-8 pt-4">
         {/* Compact header */}
         <div className="flex flex-wrap items-center justify-between gap-3">
@@ -1715,82 +1669,24 @@ export default function PortfolioDetailPage() {
           </div>
         </div>
 
-        {/* Main 2-col grid: chart | allocations */}
-        <div
-          className="grid grid-cols-1 gap-6 lg:grid-cols-[minmax(0,1.7fr)_minmax(0,1fr)]"
-          style={{ gridAutoRows: "minmax(0, auto)" }}
-        >
-          {/* Left: KPI strip + chart */}
-          <div className="flex flex-col gap-6" style={{ height: ROW_HEIGHT }}>
-            {/* KPI strip */}
-            <div className="rounded-2xl border border-hairline bg-surface px-4 py-3">
-              <dl className="grid grid-cols-1 gap-x-4 gap-y-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
-                {KPIS.map((kpi, i) => (
-                  <div
-                    key={kpi.label}
-                    className={`min-w-0 ${i > 0 ? "xl:border-l xl:border-hairline xl:pl-4" : ""}`}
-                  >
-                    <dt
-                      className={`truncate text-[13px] font-medium uppercase tracking-[0.12em] ${
-                        kpi.hierarchy === "secondary"
-                          ? "text-foreground-muted/70"
-                          : "text-muted-foreground"
-                      }`}
-                    >
-                      {kpi.label}
-                    </dt>
-                    {kpi.loading ? (
-                      <dd className="mt-1 h-[22px] w-28 animate-pulse rounded bg-surface-2" />
-                    ) : (
-                      <dd
-                        className={`mt-1 flex min-w-0 flex-col gap-1 font-mono leading-none tabular-nums ${
-                          kpi.muted
-                            ? "text-foreground-muted"
-                            : kpi.tone === "positive"
-                              ? "text-positive"
-                              : kpi.tone === "negative"
-                                ? "text-negative"
-                                : kpi.subtle
-                                  ? "text-foreground-muted/85"
-                                  : "text-foreground"
-                        }`}
-                      >
-                        <span className="truncate text-[clamp(18px,1.35vw,22px)] font-medium">
-                          {kpi.value}
-                        </span>
-                        {kpi.detail && (
-                          <span className="truncate text-[clamp(12px,0.95vw,15px)] font-medium">
-                            {kpi.detail}
-                          </span>
-                        )}
-                      </dd>
-                    )}
-                  </div>
-                ))}
-              </dl>
-            </div>
-
-            {/* Chart card */}
-            <div className="flex min-h-0 flex-1 flex-col rounded-2xl border border-hairline bg-surface p-5">
-              <div className="shrink-0 text-[11px] uppercase tracking-widest text-foreground-muted">
-                Portfolio value
-              </div>
-              <div className="h-1 shrink-0" />
-              <div className="min-h-0 flex-1">
-                <PortfolioChart portfolioId={portfolioId} currency={portfolioCurrency} />
-              </div>
-            </div>
-          </div>
-
-          {/* Right: allocation charts */}
-          <div className="min-h-0" style={{ height: ROW_HEIGHT }}>
-            <AllocationCard
-              portfolioId={portfolioId!}
-              sectorData={sectorData}
-              assetTypeData={assetTypeData}
-              currency={portfolioCurrency}
-            />
-          </div>
+        {/* Allocation + Geography 2-col grid */}
+        <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+          <AllocationCard
+            portfolioId={portfolioId!}
+            sectorData={sectorData}
+            assetTypeData={assetTypeData}
+            currency={portfolioCurrency}
+            initialView="classic"
+            hideViewToggle
+          />
+          <AllocationCard
+            portfolioId={portfolioId!}
+            sectorData={sectorData}
+            assetTypeData={assetTypeData}
+            currency={portfolioCurrency}
+            initialView="geography"
+            hideViewToggle
+          />
         </div>
 
         {/* 1px divider above holdings table */}

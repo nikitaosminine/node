@@ -52,12 +52,12 @@ max_retries = 3
 [triggers]
 # Hourly cron for scheduled fanout. Actual per-portfolio run times are selected
 # in code based on user timezone + effective runs/day setting.
-# */30 * * * * drives the news + Polymarket feed fanouts (every 30 min).
+# News + Polymarket fanouts piggyback on these same crons (no separate entry
+# needed — they fire on every scheduled() invocation). Free plan cap: 5 crons.
 crons = [
   "5 * * * *",
   "30 6 * * 2-6",
   "30 16 * * 1-5",
   "30 17 * * 1-5",
   "0 21 * * 1-5",
-  "*/30 * * * *",
 ]

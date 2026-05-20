@@ -1,9 +1,9 @@
 "use client";
 
 import { useState, useEffect, useCallback, Suspense } from "react";
-import { useSearchParams, useRouter } from "next/navigation";
+import { useSearchParams } from "next/navigation";
 import Link from "next/link";
-import { BarChart3, Briefcase, ExternalLink } from "lucide-react";
+import { BarChart3, Briefcase } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { PortfolioChart } from "@/components/portfolio-chart";
 import { NewsFeed } from "@/components/feed/news-feed";
@@ -17,7 +17,6 @@ import {
   DEFAULT_PORTFOLIO_CURRENCY,
 } from "@/lib/currency";
 import {
-  MARKET_CACHE_MAX_AGE_MS,
   getCachedFxRates,
   getCachedQuotes,
   getFxRateKeys,
@@ -63,7 +62,7 @@ const API_BASE_URL =
 // Helpers
 // ---------------------------------------------------------------------------
 
-function holdingsValue(
+function calcHoldingsValue(
   holdings: Holding[],
   portfolioCurrency: string,
   quotes: Record<string, LiveQuote>,
@@ -77,7 +76,7 @@ function holdingsValue(
   }, 0);
 }
 
-function holdingsCost(
+function calcHoldingsCost(
   holdings: Holding[],
   portfolioCurrency: string,
   fxRates: Record<string, number>,
@@ -96,39 +95,6 @@ function holdingsCost(
 }
 
 // ---------------------------------------------------------------------------
-// StatCard (same design as portfolios.tsx)
-// ---------------------------------------------------------------------------
-
-function StatCard({
-  label,
-  value,
-  tone = "neutral",
-  loading = false,
-}: {
-  label: string;
-  value: string;
-  tone?: "positive" | "negative" | "neutral";
-  loading?: boolean;
-}) {
-  const cls =
-    tone === "positive"
-      ? "text-positive"
-      : tone === "negative"
-        ? "text-negative"
-        : "text-foreground";
-  return (
-    <div className="rounded-lg border border-border/50 bg-card p-4">
-      <div className="text-[10px] uppercase tracking-widest text-muted-foreground">{label}</div>
-      {loading ? (
-        <div className="mt-2 h-5 w-24 animate-pulse rounded bg-surface-2" />
-      ) : (
-        <div className={`mt-1.5 font-mono text-lg font-semibold tabular-nums ${cls}`}>{value}</div>
-      )}
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------------------
 // No-portfolio empty state
 // ---------------------------------------------------------------------------
 
@@ -139,7 +105,7 @@ function NoPortfolioSelected() {
       <div className="flex flex-col gap-1">
         <p className="font-semibold text-foreground-muted">Select a portfolio</p>
         <p className="text-sm text-foreground-muted/70">
-          Use the portfolio picker in the sidebar to get started.
+          Choose a portfolio from the sidebar to get started.
         </p>
       </div>
       <Link
@@ -160,6 +126,7 @@ function NoPortfolioSelected() {
 function OverviewContent({ portfolioId }: { portfolioId: string }) {
   const [portfolio, setPortfolio] = useState<Portfolio | null>(null);
   const [loading, setLoading] = useState(true);
+  const [marketReady, setMarketReady] = useState(false);
   const [quotes, setQuotes] = useState<Record<string, LiveQuote>>({});
   const [fxRates, setFxRates] = useState<Record<string, number>>({});
 
@@ -168,7 +135,9 @@ function OverviewContent({ portfolioId }: { portfolioId: string }) {
   const fetchPortfolio = useCallback(async () => {
     const { data, error } = await supabase
       .from("portfolios")
-      .select("id,name,description,currency,cash_value,holdings(id,ticker,quantity,purchase_price,currency,fees)")
+      .select(
+        "id,name,description,currency,cash_value,holdings(id,ticker,quantity,purchase_price,currency,fees)",
+      )
       .eq("id", portfolioId)
       .maybeSingle();
 
@@ -180,9 +149,11 @@ function OverviewContent({ portfolioId }: { portfolioId: string }) {
     setLoading(false);
   }, [portfolioId]);
 
-  // Fetch quotes from API
   const fetchQuotes = useCallback(async () => {
-    if (!portfolio?.holdings?.length) return;
+    if (!portfolio?.holdings?.length) {
+      setMarketReady(true);
+      return;
+    }
 
     const tickers = [...new Set(portfolio.holdings.map((h) => h.ticker.toUpperCase()))];
     const cacheResult = getCachedQuotes(tickers);
@@ -204,12 +175,16 @@ function OverviewContent({ portfolioId }: { portfolioId: string }) {
           headers: token ? { Authorization: `Bearer ${token}` } : {},
         });
         if (res.ok) {
-          const fresh = await res.json() as LiveQuote[];
+          const fresh = (await res.json()) as LiveQuote[];
           const freshMap: Record<string, LiveQuote> = {};
           for (const q of fresh) freshMap[q.ticker.toUpperCase()] = q;
           setQuotes((prev) => ({ ...prev, ...freshMap }));
           upsertCachedQuotes(
-            fresh.map((q) => ({ ticker: q.ticker, currentPrice: q.currentPrice, currency: q.currency })),
+            fresh.map((q) => ({
+              ticker: q.ticker,
+              currentPrice: q.currentPrice,
+              currency: q.currency,
+            })),
           );
         }
       } catch {
@@ -227,8 +202,14 @@ function OverviewContent({ portfolioId }: { portfolioId: string }) {
       }
       if (cachedRates.shouldRefetch) {
         try {
-          const holdingCurrenciesForFetch = portfolio.holdings.map((h) => h.currency ?? portfolioCurrency);
-          const freshRates = await fetchFxRates(API_BASE_URL, holdingCurrenciesForFetch, portfolioCurrency);
+          const holdingCurrenciesForFetch = portfolio.holdings.map(
+            (h) => h.currency ?? portfolioCurrency,
+          );
+          const freshRates = await fetchFxRates(
+            API_BASE_URL,
+            holdingCurrenciesForFetch,
+            portfolioCurrency,
+          );
           setFxRates((r) => ({ ...r, ...freshRates }));
           upsertCachedFxRates(freshRates);
         } catch {
@@ -236,6 +217,8 @@ function OverviewContent({ portfolioId }: { portfolioId: string }) {
         }
       }
     }
+
+    setMarketReady(true);
   }, [portfolio, portfolioCurrency]);
 
   useEffect(() => {
@@ -248,13 +231,10 @@ function OverviewContent({ portfolioId }: { portfolioId: string }) {
 
   if (loading) {
     return (
-      <div className="flex flex-col gap-6 p-6 pt-14">
-        <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-          {Array.from({ length: 4 }).map((_, i) => (
-            <div key={i} className="h-20 animate-pulse rounded-lg bg-surface-2" />
-          ))}
-        </div>
-        <div className="h-56 animate-pulse rounded-xl bg-surface-2" />
+      <div className="mx-auto flex w-full max-w-[1500px] flex-col gap-6 px-6 pb-8 pt-4">
+        <div className="h-8 w-48 animate-pulse rounded bg-surface-2" />
+        <div className="h-16 animate-pulse rounded-2xl bg-surface-2" />
+        <div className="h-[480px] animate-pulse rounded-2xl bg-surface-2" />
         <div className="grid grid-cols-1 gap-6 md:grid-cols-2">
           <div className="h-64 animate-pulse rounded-xl bg-surface-2" />
           <div className="h-64 animate-pulse rounded-xl bg-surface-2" />
@@ -275,61 +255,109 @@ function OverviewContent({ portfolioId }: { portfolioId: string }) {
   }
 
   const holdings = portfolio.holdings ?? [];
-  const securitiesValue = holdingsValue(holdings, portfolioCurrency, quotes, fxRates);
-  const cashValue = convertCurrency(portfolio.cash_value ?? 0, portfolioCurrency, portfolioCurrency, fxRates);
+  const securitiesValue = calcHoldingsValue(holdings, portfolioCurrency, quotes, fxRates);
+  const cashValue = convertCurrency(
+    portfolio.cash_value ?? 0,
+    portfolioCurrency,
+    portfolioCurrency,
+    fxRates,
+  );
   const totalValue = securitiesValue + cashValue;
-  const costBasis = holdingsCost(holdings, portfolioCurrency, fxRates);
+  const costBasis = calcHoldingsCost(holdings, portfolioCurrency, fxRates);
   const gainLoss = totalValue - costBasis;
   const gainLossPct = costBasis > 0 ? (gainLoss / costBasis) * 100 : 0;
 
+  const KPIS = [
+    {
+      label: "Total value",
+      value: formatCurrency(totalValue, portfolioCurrency),
+    },
+    {
+      label: "Securities",
+      value: formatCurrency(securitiesValue, portfolioCurrency),
+    },
+    {
+      label: "Gain / Loss",
+      value: formatSignedCurrency(gainLoss, portfolioCurrency),
+      detail: gainLoss !== 0 ? `${gainLossPct >= 0 ? "+" : ""}${gainLossPct.toFixed(2)}%` : undefined,
+      tone: gainLoss > 0 ? "positive" : gainLoss < 0 ? "negative" : undefined,
+    },
+    {
+      label: "Cost basis",
+      value: formatCurrency(costBasis, portfolioCurrency),
+      subtle: true,
+    },
+    {
+      label: "Cash",
+      value: formatCurrency(cashValue, portfolioCurrency),
+      muted: cashValue === 0,
+    },
+  ] as const;
+
   return (
-    <div className="flex flex-col gap-6 p-6 pt-14">
-      {/* Portfolio name + link to Details */}
-      <div className="flex items-start justify-between">
-        <div>
-          <h1 className="text-xl font-semibold tracking-tight">{portfolio.name}</h1>
-          {portfolio.description && (
-            <p className="mt-0.5 text-sm text-foreground-muted">{portfolio.description}</p>
-          )}
+    <div className="mx-auto flex w-full max-w-[1500px] flex-col gap-6 px-6 pb-8 pt-4">
+      {/* Portfolio name */}
+      <div>
+        <h1 className="text-xl font-semibold tracking-tight">{portfolio.name}</h1>
+        {portfolio.description && (
+          <p className="mt-0.5 text-sm text-foreground-muted">{portfolio.description}</p>
+        )}
+      </div>
+
+      {/* KPI strip — matches portfolio-detail style */}
+      <div className="rounded-2xl border border-hairline bg-surface px-4 py-3">
+        <dl className="grid grid-cols-2 gap-x-4 gap-y-3 sm:grid-cols-3 xl:grid-cols-5">
+          {KPIS.map((kpi, i) => (
+            <div
+              key={kpi.label}
+              className={`min-w-0 ${i > 0 ? "xl:border-l xl:border-hairline xl:pl-4" : ""}`}
+            >
+              <dt className="truncate text-[13px] font-medium uppercase tracking-[0.12em] text-muted-foreground">
+                {kpi.label}
+              </dt>
+              {!marketReady ? (
+                <dd className="mt-1 h-[22px] w-28 animate-pulse rounded bg-surface-2" />
+              ) : (
+                <dd
+                  className={`mt-1 flex min-w-0 flex-col gap-1 font-mono leading-none tabular-nums ${
+                    "muted" in kpi && kpi.muted
+                      ? "text-foreground-muted"
+                      : "tone" in kpi && kpi.tone === "positive"
+                        ? "text-positive"
+                        : "tone" in kpi && kpi.tone === "negative"
+                          ? "text-negative"
+                          : "subtle" in kpi && kpi.subtle
+                            ? "text-foreground-muted/85"
+                            : "text-foreground"
+                  }`}
+                >
+                  <span className="truncate text-[clamp(18px,1.35vw,22px)] font-medium">
+                    {kpi.value}
+                  </span>
+                  {"detail" in kpi && kpi.detail && (
+                    <span className="truncate text-[clamp(12px,0.95vw,15px)] font-medium">
+                      {kpi.detail}
+                    </span>
+                  )}
+                </dd>
+              )}
+            </div>
+          ))}
+        </dl>
+      </div>
+
+      {/* Chart with explicit height */}
+      <div
+        className="flex flex-col rounded-2xl border border-hairline bg-surface p-5"
+        style={{ height: 480 }}
+      >
+        <div className="shrink-0 text-[11px] uppercase tracking-widest text-foreground-muted">
+          Portfolio value
         </div>
-        <Link
-          href={`/portfolios/${portfolioId}`}
-          className="flex items-center gap-1.5 rounded-lg border border-hairline px-3 py-1.5 text-xs font-medium text-foreground-muted hover:bg-surface-2 hover:text-foreground"
-        >
-          <ExternalLink className="h-3.5 w-3.5" />
-          Details
-        </Link>
-      </div>
-
-      {/* Stat cards */}
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-        <StatCard
-          label="Total value"
-          value={formatCurrency(totalValue, portfolioCurrency)}
-          loading={loading}
-        />
-        <StatCard
-          label="Securities"
-          value={formatCurrency(securitiesValue, portfolioCurrency)}
-          loading={loading}
-        />
-        <StatCard
-          label="Gain / Loss"
-          value={formatSignedCurrency(gainLoss, portfolioCurrency)}
-          tone={gainLoss > 0 ? "positive" : gainLoss < 0 ? "negative" : "neutral"}
-          loading={loading}
-        />
-        <StatCard
-          label="Return"
-          value={`${gainLossPct >= 0 ? "+" : ""}${gainLossPct.toFixed(2)}%`}
-          tone={gainLossPct > 0 ? "positive" : gainLossPct < 0 ? "negative" : "neutral"}
-          loading={loading}
-        />
-      </div>
-
-      {/* Chart */}
-      <div className="rounded-xl border border-border/50 bg-card p-4">
-        <PortfolioChart portfolioId={portfolioId} currency={portfolioCurrency} />
+        <div className="h-1 shrink-0" />
+        <div className="min-h-0 flex-1">
+          <PortfolioChart portfolioId={portfolioId} currency={portfolioCurrency} />
+        </div>
       </div>
 
       {/* Feed 2-column grid */}
@@ -355,7 +383,13 @@ function OverviewPage() {
 
 export default function Page() {
   return (
-    <Suspense fallback={<div className="flex flex-1 items-center justify-center p-8"><div className="h-8 w-8 animate-pulse rounded-full bg-surface-2" /></div>}>
+    <Suspense
+      fallback={
+        <div className="flex flex-1 items-center justify-center p-8">
+          <div className="h-8 w-8 animate-pulse rounded-full bg-surface-2" />
+        </div>
+      }
+    >
       <OverviewPage />
     </Suspense>
   );
