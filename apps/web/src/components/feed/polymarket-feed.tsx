@@ -200,6 +200,34 @@ function FeedHeader({ title, onRefresh }: { title: string; onRefresh?: () => voi
 // Main feed component
 // ---------------------------------------------------------------------------
 
+// Deduplicate matches by event_id — collapses e.g. 4 "Fed June meeting"
+// variants into 1 card. Selection priority:
+//   1. Higher Grok relevance score wins.
+//   2. On a tie: pick the market CLOSEST to 50% probability — it's the most
+//      uncertain and therefore most informative to investors (e.g. "No change:
+//      97.75% Yes" is more useful than "Rate hike 50bps: 0.25% Yes").
+function dedupeByEvent(matches: PolymarketMatch[]): PolymarketMatch[] {
+  const seen = new Map<string, PolymarketMatch>();
+  const maxProb = (m: PolymarketMatch) =>
+    Math.max(...(m.polymarket_markets.outcome_prices.length > 0
+      ? m.polymarket_markets.outcome_prices
+      : [0]));
+
+  for (const match of matches) {
+    const key = match.polymarket_markets.event_id ?? match.polymarket_markets.condition_id;
+    const existing = seen.get(key);
+    if (!existing) { seen.set(key, match); continue; }
+
+    const ms = match.score ?? 0;
+    const es = existing.score ?? 0;
+    if (ms > es) { seen.set(key, match); continue; }
+    if (ms < es) continue;
+    // Tied score — prefer the market whose top probability is lowest (closest to 50%)
+    if (maxProb(match) < maxProb(existing)) seen.set(key, match);
+  }
+  return Array.from(seen.values());
+}
+
 export function PolymarketFeed({ portfolioId }: PolymarketFeedProps) {
   const [data, setData] = useState<FeedData>({ pinned: [], rotating: [] });
   const [loading, setLoading] = useState(true);
@@ -222,8 +250,12 @@ export function PolymarketFeed({ portfolioId }: PolymarketFeedProps) {
           const body = await res.json().catch(() => ({ error: "Unknown error" }));
           throw new Error((body as { error?: string }).error ?? `HTTP ${res.status}`);
         }
-        const json = await res.json() as FeedData;
-        setData(json);
+        const raw = await res.json() as FeedData;
+        // Collapse multiple markets from the same event into the most decisive one
+        setData({
+          pinned: dedupeByEvent(raw.pinned),
+          rotating: dedupeByEvent(raw.rotating),
+        });
       } catch (err) {
         setError(err instanceof Error ? err.message : "Couldn't load markets, retrying…");
       } finally {

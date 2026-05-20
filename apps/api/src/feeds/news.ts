@@ -47,7 +47,10 @@ interface MarketauxArticle {
   image_url?: string;
   source?: string;
   published_at?: string;
-  similar?: string; // cluster key
+  // Marketaux returns `similar` as an inline array of related article objects,
+  // NOT a string cluster-key. Each top-level article in data[] is its own cluster head;
+  // its similar[] entries are the "see also" siblings.
+  similar?: MarketauxArticle[];
   entities?: MarketauxEntity[];
 }
 
@@ -91,7 +94,10 @@ interface PortfolioNewsContext {
 const MARKETAUX_BASE = "https://api.marketaux.com";
 const MAX_RETRIES = 3;
 const RETRY_BASE_MS = 1000;
-const CLUSTER_TTL_HOURS = 48;
+// 7-day window: French/European mid-caps have sparse daily coverage on Marketaux.
+// A 48h window often returns 0 articles; 7 days ensures the feed is always populated.
+// The expires_at TTL uses the same value so we don't surface stale content indefinitely.
+const CLUSTER_TTL_HOURS = 168;
 
 // Marketaux industry labels corresponding to GICS sector names (best-effort mapping)
 // Used to build the `industries` filter for ETF holdings
@@ -152,7 +158,11 @@ async function buildPortfolioNewsContext(
       etfHoldingIds.push(h.id);
     } else {
       if (h.isin) stockIsins.push(h.isin);
-      else stockTickers.push(h.ticker);
+      // Always collect the ticker for the symbols query — entity_isin is
+      // not reliably supported on all Marketaux plans and is silently ignored,
+      // whereas symbols=TICKER.EXCHANGE works correctly and disambiguates
+      // cross-listed names (e.g. SU.PA = Schneider Electric, not Suncor).
+      stockTickers.push(h.ticker);
     }
   }
 
@@ -253,21 +263,19 @@ function buildMarketauxParams(
     sort_order: "desc",
   };
 
-  const hasIsins = ctx.stockIsins.length > 0;
   const hasEntitySymbols = ctx.stockTickers.length > 0;
 
-  // Only match on direct entity identifiers (ISIN or ticker).
-  // Geography/sector filters (countries, industries) are intentionally excluded —
-  // they match any company from that country/sector, not just what the user holds,
-  // which produces irrelevant results.
-  if (hasIsins) {
-    params["entity_isin"] = ctx.stockIsins.slice(0, 10).join(",");
-  } else if (hasEntitySymbols) {
+  // Use the symbols parameter with exchange-qualified tickers (e.g. "SU.PA", "TTE.PA").
+  // entity_isin is silently ignored on Marketaux free plans (returns the full corpus —
+  // 5M+ articles — instead of filtering). Exchange-qualified symbols work correctly
+  // and also disambiguate cross-listed companies (bare "SU" → Suncor Energy, not
+  // Schneider Electric; "SU.PA" → Schneider Electric unambiguously).
+  if (hasEntitySymbols) {
     params["entity_types"] = "equity";
     params["symbols"] = ctx.stockTickers.slice(0, 10).join(",");
   } else {
-    // No direct equity identifiers — skip this portfolio rather than
-    // returning geography-scoped noise.
+    // No direct equity identifiers (e.g. ETF-only portfolio with no stock holdings).
+    // Skip rather than returning geography-scoped noise.
     return null;
   }
 
@@ -368,9 +376,13 @@ function computeMatchScore(
 async function upsertCluster(
   client: AnySupabaseClient,
   article: MarketauxArticle,
-  allArticlesInCluster: MarketauxArticle[],
-  clusterKey: string,
 ): Promise<string | null> {
+  // Marketaux returns each top-level article as a cluster head.
+  // The article's own `similar[]` array contains inline sibling articles ("see also").
+  // cluster_key = article uuid (stable, unique per cluster head).
+  const clusterKey = article.uuid ?? `solo-${article.url ?? Math.random()}`;
+  const similarArticles: MarketauxArticle[] = Array.isArray(article.similar) ? article.similar : [];
+
   const publishedAt = article.published_at ?? new Date().toISOString();
   const newExpiresAt = new Date(
     new Date(publishedAt).getTime() + CLUSTER_TTL_HOURS * 3_600_000,
@@ -386,18 +398,15 @@ async function upsertCluster(
     image: article.image_url ?? null,
   };
 
-  // Build see_also from sibling articles (all except primary)
-  const seeAlso = allArticlesInCluster
-    .filter((a) => a.uuid !== article.uuid)
-    .slice(0, 5)
-    .map((a) => ({
-      title: a.title ?? "",
-      url: a.url ?? "",
-      source: a.source ?? "",
-    }));
+  // Build see_also from similar siblings
+  const seeAlso = similarArticles.slice(0, 5).map((a) => ({
+    title: a.title ?? "",
+    url: a.url ?? "",
+    source: a.source ?? "",
+  }));
 
-  // Extract entities from all articles in the cluster
-  const entities = extractClusterEntities(allArticlesInCluster);
+  // Extract entities from primary article + all siblings
+  const entities = extractClusterEntities([article, ...similarArticles]);
 
   // Upsert with expires_at = GREATEST(existing, new)
   // We do a select first to check existing expires_at, then upsert
@@ -534,38 +543,22 @@ export async function runNewsFanout(env: Env): Promise<{
         continue;
       }
 
-      // Group articles by cluster_key (Marketaux `similar` field).
-      // Articles without a `similar` field get their own cluster keyed by uuid.
-      const clusterMap = new Map<string, MarketauxArticle[]>();
+      // Each top-level article in data[] is its own cluster head.
+      // article.similar[] contains inline sibling articles (see-also).
+      // We upsert each cluster head directly — no pre-grouping step needed.
       for (const article of articles) {
-        const key = article.similar ?? article.uuid ?? `solo-${article.url ?? Math.random()}`;
-        const existing = clusterMap.get(key) ?? [];
-        existing.push(article);
-        clusterMap.set(key, existing);
-      }
+        if (!article.uuid && !article.url) continue;
 
-      // Process each cluster
-      const clusterIdsByKey = new Map<string, string>();
-      for (const [clusterKey, clusterArticles] of clusterMap) {
-        // Use the first (most recent, per sort=published_at desc) article as primary
-        const primary = clusterArticles[0];
-        if (!primary) continue;
+        const clusterId = await upsertCluster(client, article);
+        if (!clusterId) continue;
+        clustersUpserted++;
 
-        const clusterId = await upsertCluster(client, primary, clusterArticles, clusterKey);
-        if (clusterId) {
-          clusterIdsByKey.set(clusterKey, clusterId);
-          clustersUpserted++;
-        }
-      }
-
-      // Upsert portfolio_news_matches
-      for (const [clusterKey, clusterId] of clusterIdsByKey) {
-        const clusterArticles = clusterMap.get(clusterKey) ?? [];
-        const primary = clusterArticles[0];
-        if (!primary) continue;
-
-        const clusterEntities = extractClusterEntities(clusterArticles);
-        const publishedAt = primary.published_at ?? new Date().toISOString();
+        // Compute relevance score for this cluster vs the portfolio
+        const similarArticles: MarketauxArticle[] = Array.isArray(article.similar)
+          ? article.similar
+          : [];
+        const clusterEntities = extractClusterEntities([article, ...similarArticles]);
+        const publishedAt = article.published_at ?? new Date().toISOString();
         const { score, matchReason } = computeMatchScore(clusterEntities, ctx, publishedAt);
 
         // Only store matches with non-zero score

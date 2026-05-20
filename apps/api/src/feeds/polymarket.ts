@@ -264,39 +264,45 @@ function flattenEvent(event: GammaEvent): FlatMarket[] {
 }
 
 // ---------------------------------------------------------------------------
-// Fetch broad + tagged candidate pool
+// Non-financial market filter — sports/entertainment sneak in even through
+// financial tags because Polymarket tags events broadly. We strip them here
+// so they never reach the Grok scoring step.
+// ---------------------------------------------------------------------------
+
+const NON_FINANCIAL_RE =
+  /\b(fifa|world cup|super bowl|nfl|nba|nhl|mlb|premier league|la liga|bundesliga|serie a|champions league|olympic|euro 202[0-9]|euros 202[0-9]|wimbledon|grand prix|formula.?1\b|f1 race|moto ?gp|cricket|rugby world|march madness|stanley cup|gold cup|copa am[eé]rica|esports|grammy|oscar|emmy|golden globe|box office|celebrity|reality (tv|show))\b/i;
+
+function isNonFinancialQuestion(question: string): boolean {
+  return NON_FINANCIAL_RE.test(question);
+}
+
+// ---------------------------------------------------------------------------
+// Fetch tag-filtered candidate pool (NO broad pool).
+//
+// The broad "top N by volume_24hr" pool sounds useful but is toxic: whatever
+// sport or event is culturally dominant right now (e.g. FIFA World Cup 2026)
+// dominates by volume and floods the candidate set, causing the LLM to find
+// spurious geographic connections (Japan ETF → Japan wins World Cup). Removing
+// it entirely and relying only on financially-tagged pools eliminates this.
 // ---------------------------------------------------------------------------
 
 async function fetchCandidateMarkets(env: Env): Promise<Map<string, FlatMarket>> {
   const base = gammaBase(env);
   const marketMap = new Map<string, FlatMarket>();
 
-  // 1. Broad active pool by volume
-  try {
-    const events = await fetchGammaJson<GammaEvent[]>(
-      `${base}/events?active=true&closed=false&order=volume_24hr&ascending=false&limit=200`,
-    );
-    for (const event of events) {
-      for (const market of flattenEvent(event)) {
-        if (!marketMap.has(market.condition_id)) {
-          marketMap.set(market.condition_id, market);
-        }
-      }
-    }
-    console.log(`[polymarket] broad pool fetched: ${marketMap.size} unique markets`);
-  } catch (err) {
-    console.error("[polymarket] broad pool fetch failed:", err);
-  }
-
-  // 2. Per-tag pools (dedup by condition_id)
+  // Tag-filtered pools only — no broad pool.
+  // Each tag call returns events already tagged as financial/political.
   for (const [tagName, tagId] of Object.entries(TAG_IDS)) {
     try {
       const events = await fetchGammaJson<GammaEvent[]>(
-        `${base}/events?tag_id=${tagId}&active=true&closed=false&limit=25`,
+        `${base}/events?tag_id=${tagId}&active=true&closed=false&order=volume_24hr&ascending=false&limit=30`,
       );
       let added = 0;
       for (const event of events) {
         for (const market of flattenEvent(event)) {
+          // Secondary safety net: drop any market whose question matches a
+          // known non-financial pattern even if it slipped through the tag filter.
+          if (isNonFinancialQuestion(market.question)) continue;
           if (!marketMap.has(market.condition_id)) {
             marketMap.set(market.condition_id, market);
             added++;
@@ -309,6 +315,7 @@ async function fetchCandidateMarkets(env: Env): Promise<Map<string, FlatMarket>>
     }
   }
 
+  console.log(`[polymarket] total candidate pool: ${marketMap.size} markets`);
   return marketMap;
 }
 
@@ -495,20 +502,29 @@ async function scoreRotatingCandidates(
     .map((m, i) => `${i + 1}. [${m.condition_id}] ${m.question}`)
     .join("\n");
 
-  const systemPrompt = `You are a financial relevance scoring assistant. You analyze prediction market questions and rate their relevance to a given investment portfolio.
+  const systemPrompt = `You are a financial analyst scoring prediction market relevance for an investment portfolio.
 
-Return ONLY a JSON array (no markdown, no explanation) with the top ${ROTATING_TOP_K} most relevant markets for the portfolio. Format:
-[{"condition_id": "...", "score": 0.85, "reason": "One-line reason why this matters for the portfolio"}]
+STRICT RULES — read carefully:
+1. Only include markets that have a DIRECT, MATERIAL financial connection to the portfolio's specific holdings or sectors.
+2. "Direct" means: the market outcome would move stock prices, interest rates, commodity prices, currency rates, or sector-specific regulation for specific companies held.
+3. REJECT any sports or entertainment market even if a country in the portfolio plays in it. "France wins World Cup" does NOT affect Schneider Electric's earnings. Geographic overlap is NOT relevance.
+4. REJECT markets about: sports championships, elections in countries where you hold no index ETFs, celebrity events, social media trends, weather, cultural events.
+5. SCORE HIGHLY (>0.6): Central bank rate decisions, trade tariffs/sanctions affecting specific sectors held, energy price regulation, tech regulation affecting held tech ETFs, company-specific events (earnings, mergers, regulatory approvals).
+6. SCORE MEDIUM (0.3–0.6): Broad macroeconomic outcomes (recession, inflation) that would materially affect the portfolio's sector mix.
+7. Score 0 and EXCLUDE anything else.
 
-Score range: 0.0 (not relevant) to 1.0 (highly relevant). Only include markets with score > 0.3.`;
+Return ONLY a JSON array with the top ${ROTATING_TOP_K} most relevant markets. Format:
+[{"condition_id": "...", "score": 0.85, "reason": "One specific financial mechanism connecting this to the portfolio"}]
+
+Only include markets with score >= 0.35. If fewer than 3 markets meet this bar, return only those that genuinely do.`;
 
   const userPrompt = `Portfolio profile:
 ${profileSummary}
 
-Candidate prediction markets (pick the top ${ROTATING_TOP_K} most relevant ones):
+Candidate prediction markets — pick the top ${ROTATING_TOP_K} that have a DIRECT financial connection to the holdings above:
 ${candidateList}
 
-Return JSON array only.`;
+Return JSON array only. No sports, no entertainment, no geography-as-relevance.`;
 
   // Build a set of valid condition_ids so we can reject hallucinated ones
   const validIds = new Set(candidates.slice(0, ROTATING_BATCH_SIZE).map((m) => m.condition_id));

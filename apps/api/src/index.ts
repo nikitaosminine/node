@@ -4903,18 +4903,58 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
       }
     }
 
-    // Raw Marketaux probe — returns the exact HTTP status + body from Marketaux
-    // so we can see what error they return without wading through logs.
+    // Raw Marketaux probe — tests both entity_isin and symbols filters with real portfolio ISINs.
+    // Returns exact HTTP status + body from each Marketaux variant so we can see which works.
     if (method === "GET" && pathname === "/api/_debug/test-marketaux") {
       if (!env.MARKETAUX_API_KEY) return json({ error: "MARKETAUX_API_KEY not set" }, 500);
-      const probeUrl = new URL("https://api.marketaux.com/v1/news/all");
-      probeUrl.searchParams.set("api_token", env.MARKETAUX_API_KEY);
-      probeUrl.searchParams.set("symbols", "AAPL");
-      probeUrl.searchParams.set("language", "en");
-      probeUrl.searchParams.set("limit", "1");
-      const probeRes = await fetch(probeUrl.toString());
-      const probeBody = await probeRes.text();
-      return json({ status: probeRes.status, body: probeBody }, 200);
+      const base = "https://api.marketaux.com/v1/news/all";
+
+      // Probe 1: entity_isin with French stock ISINs (TotalEnergies, Schneider, Legrand, Semco)
+      const isinUrl = new URL(base);
+      isinUrl.searchParams.set("api_token", env.MARKETAUX_API_KEY);
+      isinUrl.searchParams.set("entity_isin", "FR0000120271,FR0000121972,FR0010307819,FR0014010H01");
+      isinUrl.searchParams.set("language", "en,fr");
+      isinUrl.searchParams.set("limit", "3");
+      const isinRes = await fetch(isinUrl.toString());
+      const isinBody = await isinRes.text();
+
+      // Probe 2: symbols with raw .PA tickers
+      const symUrl = new URL(base);
+      symUrl.searchParams.set("api_token", env.MARKETAUX_API_KEY);
+      symUrl.searchParams.set("symbols", "TTE.PA,SU.PA,LR.PA");
+      symUrl.searchParams.set("language", "en,fr");
+      symUrl.searchParams.set("limit", "3");
+      const symRes = await fetch(symUrl.toString());
+      const symBody = await symRes.text();
+
+      // Probe 3: symbols with bare tickers (no exchange suffix)
+      const bareUrl = new URL(base);
+      bareUrl.searchParams.set("api_token", env.MARKETAUX_API_KEY);
+      bareUrl.searchParams.set("symbols", "TTE,SU,LR");
+      bareUrl.searchParams.set("language", "en,fr");
+      bareUrl.searchParams.set("limit", "3");
+      const bareRes = await fetch(bareUrl.toString());
+      const bareBody = await bareRes.text();
+
+      // Probe 4: .PA tickers with 7-day window (to check if 48h is too tight)
+      const sevenDayUrl = new URL(base);
+      const sevenDaysAgo = new Date(Date.now() - 7 * 86400000).toISOString().replace(/\.\d{3}Z$/, "");
+      sevenDayUrl.searchParams.set("api_token", env.MARKETAUX_API_KEY);
+      sevenDayUrl.searchParams.set("symbols", "TTE.PA,SU.PA,LR.PA,ALSEM.PA");
+      sevenDayUrl.searchParams.set("entity_types", "equity");
+      sevenDayUrl.searchParams.set("language", "en,fr");
+      sevenDayUrl.searchParams.set("published_after", sevenDaysAgo);
+      sevenDayUrl.searchParams.set("group_similar", "true");
+      sevenDayUrl.searchParams.set("limit", "5");
+      const sevenDayRes = await fetch(sevenDayUrl.toString());
+      const sevenDayBody = await sevenDayRes.text();
+
+      return json({
+        isin: { status: isinRes.status, body: isinBody },
+        dotPA: { status: symRes.status, body: symBody },
+        bare: { status: bareRes.status, body: bareBody },
+        dotPA_7d: { status: sevenDayRes.status, body: sevenDayBody },
+      }, 200);
     }
 
     if (method === "POST" && pathname === "/api/_debug/run-polymarket-fanout") {
@@ -4949,6 +4989,10 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
         )
         .eq("portfolio_id", portfolioId)
         .gt("news_clusters.expires_at", new Date().toISOString())
+        // Minimum score threshold — filters out articles where the ticker is
+        // only briefly mentioned in a listicle (score ~0.05 due to low recency
+        // decay). 0.12 keeps genuine matches while cutting weak ones.
+        .gte("score", 0.12)
         .order("score", { ascending: false })
         .limit(limit);
 

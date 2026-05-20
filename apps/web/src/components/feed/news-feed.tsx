@@ -3,7 +3,6 @@
 import { useState, useEffect, useCallback } from "react";
 import { Newspaper, RefreshCw } from "lucide-react";
 import { NewsCard, type NewsMatch } from "@/components/feed/news-card";
-import { OrbitRing } from "@/components/loading-ui/orbit-ring";
 
 const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_URL ??
