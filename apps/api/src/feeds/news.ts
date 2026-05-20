@@ -335,11 +335,15 @@ function computeMatchScore(
     }
   }
 
-  // Entity weight: prioritise direct ISIN/ticker match over sector/country match
+  // Entity weight: prioritise direct ISIN/ticker match over sector/country match.
+  // Minimum of 0.35 when no overlap detected — Marketaux already confirmed relevance
+  // by returning this article for our ISIN/ticker query, so entity format mismatches
+  // (e.g. "AAPL" vs "AAPL.NAS") should not cause the article to be discarded.
   let entityWeight = 0;
   if (matchedIsins.length > 0) entityWeight = Math.min(1, 0.5 + matchedIsins.length * 0.15);
   else if (matchedTickers.length > 0) entityWeight = Math.min(1, 0.4 + matchedTickers.length * 0.15);
   else if (matchedCountrySector.length > 0) entityWeight = Math.min(0.6, matchedCountrySector.length * 0.1);
+  else entityWeight = 0.35; // baseline: Marketaux query already confirmed relevance
 
   // Recency decay: linear from 1.0 (now) to 0.1 at 48 h
   const ageHours = (Date.now() - new Date(publishedAt).getTime()) / 3_600_000;
