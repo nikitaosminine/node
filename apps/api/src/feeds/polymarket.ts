@@ -10,6 +10,7 @@ type AnySupabaseClient = SupabaseClient<any, any, any>;
 interface Env {
   SUPABASE_URL: string;
   SUPABASE_SERVICE_KEY: string;
+  GROK_MAIN_API_KEY?: string;
   GROK_SUB_API_KEY?: string;
   GROK_NORMALIZATION_API_KEY?: string;
   GROK_API_BASE_URL?: string;
@@ -131,7 +132,7 @@ function getGrokBaseUrl(env: Env): string {
 }
 
 async function invokeGrok(env: Env, systemPrompt: string, userPrompt: string): Promise<string> {
-  const apiKey = env.GROK_SUB_API_KEY ?? env.GROK_NORMALIZATION_API_KEY;
+  const apiKey = env.GROK_MAIN_API_KEY ?? env.GROK_SUB_API_KEY ?? env.GROK_NORMALIZATION_API_KEY;
   if (!apiKey) throw new Error("[polymarket] No Grok API key available");
 
   const res = await fetch(`${getGrokBaseUrl(env)}/chat/completions`, {
@@ -141,7 +142,7 @@ async function invokeGrok(env: Env, systemPrompt: string, userPrompt: string): P
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      model: "grok-3-mini",
+      model: "grok-4.20-0309-non-reasoning",
       temperature: 0.2,
       messages: [
         { role: "system", content: systemPrompt },
@@ -637,7 +638,7 @@ export async function runPolymarketFanout(env: Env): Promise<{
       }
 
       // 6b. Score rotating candidates via Grok, or fall back to top-N by volume
-      const hasGrokKey = !!(env.GROK_SUB_API_KEY || env.GROK_NORMALIZATION_API_KEY);
+      const hasGrokKey = !!(env.GROK_MAIN_API_KEY || env.GROK_SUB_API_KEY || env.GROK_NORMALIZATION_API_KEY);
       let scored: Array<{ condition_id: string; score: number; reason: string | null }>;
 
       if (!hasGrokKey) {
@@ -658,6 +659,15 @@ export async function runPolymarketFanout(env: Env): Promise<{
           }));
         } else {
           scored = await scoreRotatingCandidates(env, profile, rotatingCandidates);
+          // If Grok returned nothing (API error, bad model, etc.) fall back to volume-ranked top-10
+          if (scored.length === 0) {
+            errors.push(`portfolio ${portfolioId}: Grok scoring returned 0 results — using volume fallback`);
+            scored = rotatingCandidates.slice(0, 10).map((m) => ({
+              condition_id: m.condition_id,
+              score: 0,
+              reason: null,
+            }));
+          }
         }
       }
 

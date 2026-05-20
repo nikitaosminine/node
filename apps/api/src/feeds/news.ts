@@ -255,27 +255,19 @@ function buildMarketauxParams(
 
   const hasIsins = ctx.stockIsins.length > 0;
   const hasEntitySymbols = ctx.stockTickers.length > 0;
-  const hasSectors = ctx.etfSectors.length > 0;
-  const hasCountries = ctx.etfCountries.length > 0;
 
+  // Only match on direct entity identifiers (ISIN or ticker).
+  // Geography/sector filters (countries, industries) are intentionally excluded —
+  // they match any company from that country/sector, not just what the user holds,
+  // which produces irrelevant results.
   if (hasIsins) {
-    // Primary: ISIN-based entity matching
     params["entity_isin"] = ctx.stockIsins.slice(0, 10).join(",");
   } else if (hasEntitySymbols) {
     params["entity_types"] = "equity";
     params["symbols"] = ctx.stockTickers.slice(0, 10).join(",");
-  }
-
-  if (hasSectors) {
-    params["industries"] = ctx.etfSectors.slice(0, 5).join(",");
-  }
-
-  if (hasCountries) {
-    params["countries"] = ctx.etfCountries.slice(0, 5).join(",");
-  }
-
-  // If we have no query signal at all, skip this portfolio
-  if (!hasIsins && !hasEntitySymbols && !hasSectors && !hasCountries) {
+  } else {
+    // No direct equity identifiers — skip this portfolio rather than
+    // returning geography-scoped noise.
     return null;
   }
 
