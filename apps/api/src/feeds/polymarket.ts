@@ -510,6 +510,9 @@ ${candidateList}
 
 Return JSON array only.`;
 
+  // Build a set of valid condition_ids so we can reject hallucinated ones
+  const validIds = new Set(candidates.slice(0, ROTATING_BATCH_SIZE).map((m) => m.condition_id));
+
   try {
     const raw = await invokeGrok(env, systemPrompt, userPrompt);
     const items = extractJsonArray(raw);
@@ -519,7 +522,9 @@ Return JSON array only.`;
           typeof item === "object" &&
           item !== null &&
           typeof (item as Record<string, unknown>).condition_id === "string" &&
-          typeof (item as Record<string, unknown>).score === "number",
+          typeof (item as Record<string, unknown>).score === "number" &&
+          // Reject any condition_id Grok hallucinated — must be in the candidate list
+          validIds.has((item as Record<string, unknown>).condition_id as string),
       )
       .map((item) => ({
         condition_id: item.condition_id,
