@@ -1,44 +1,130 @@
 "use client";
 
-import { useState, type ReactNode } from "react";
+import { useState, type ReactNode, Suspense } from "react";
 import Link from "next/link";
-import { usePathname, useRouter } from "next/navigation";
-import { BarChart3, LogOut, PanelLeftClose, PanelLeftOpen, Settings } from "lucide-react";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
+import { BarChart3, LayoutDashboard, LogOut, PanelLeftClose, PanelLeftOpen, Settings, TrendingUp } from "lucide-react";
 import { NodeLogo } from "@/components/node-logo";
 import { ThemeSwitcher } from "@/components/ThemeSwitcher";
 import { supabase } from "@/integrations/supabase/client";
+import { PortfolioPicker } from "@/components/portfolio-picker";
 
-type NavItem = {
-  to: string;
-  label: string;
-  icon: ReactNode;
-};
+// ---------------------------------------------------------------------------
+// Nav items (flat IA — Overview / Details / The Take / Settings)
+// ---------------------------------------------------------------------------
 
-type NavGroup = {
-  label: string | null;
-  items: NavItem[];
-};
+const NAV_ITEMS = [
+  { to: "/overview", label: "Overview", icon: <LayoutDashboard className="h-4 w-4" /> },
+  { to: "/details", label: "Details", icon: <BarChart3 className="h-4 w-4" /> },
+  { to: "/the-take", label: "The Take", icon: <TrendingUp className="h-4 w-4" /> },
+] as const;
 
-const GROUPS: NavGroup[] = [
-  {
-    label: null,
-    items: [{ to: "/portfolios", label: "Portfolio", icon: <BarChart3 className="h-4 w-4" /> }],
-  },
-  {
-    label: "Settings",
-    items: [{ to: "/settings", label: "Settings", icon: <Settings className="h-4 w-4" /> }],
-  },
-];
+const SETTINGS_ITEM = {
+  to: "/settings",
+  label: "Settings",
+  icon: <Settings className="h-4 w-4" />,
+} as const;
+
+// ---------------------------------------------------------------------------
+// Inner sidebar that needs search params (wrapped in Suspense)
+// ---------------------------------------------------------------------------
+
+function SidebarInner({ collapsed }: { collapsed: boolean }) {
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
+  const portfolioId = searchParams.get("portfolioId") ?? "";
+
+  function buildHref(to: string) {
+    if (!portfolioId) return to;
+    return `${to}?portfolioId=${portfolioId}`;
+  }
+
+  function isActive(to: string) {
+    // /details maps to /portfolios/[portfolioId]
+    if (to === "/details") {
+      return pathname.startsWith("/portfolios/") && pathname.includes("/");
+    }
+    return pathname.startsWith(to);
+  }
+
+  return (
+    <>
+      {/* Portfolio picker */}
+      {!collapsed && (
+        <div className="border-b border-hairline">
+          <Suspense fallback={null}>
+            <PortfolioPicker collapsed={false} />
+          </Suspense>
+        </div>
+      )}
+      {collapsed && (
+        <div className="border-b border-hairline py-1">
+          <Suspense fallback={null}>
+            <PortfolioPicker collapsed={true} />
+          </Suspense>
+        </div>
+      )}
+
+      {/* Main nav */}
+      <nav className="flex-1 overflow-y-auto px-2 py-3">
+        <ul className="flex flex-col gap-0.5">
+          {NAV_ITEMS.map((item) => {
+            const active = isActive(item.to);
+            const href =
+              item.to === "/details"
+                ? portfolioId
+                  ? `/portfolios/${portfolioId}`
+                  : "/portfolios"
+                : buildHref(item.to);
+            return (
+              <li key={item.to}>
+                <Link
+                  href={href}
+                  title={collapsed ? item.label : undefined}
+                  className={`flex items-center gap-3 rounded-lg px-2.5 py-2 text-sm font-medium transition-colors ${
+                    active
+                      ? "bg-foreground/10 text-foreground"
+                      : "text-foreground-muted hover:bg-surface-2 hover:text-foreground"
+                  } ${collapsed ? "justify-center" : ""}`}
+                >
+                  <span className="grid h-5 w-5 shrink-0 place-items-center">{item.icon}</span>
+                  {!collapsed && <span className="truncate">{item.label}</span>}
+                </Link>
+              </li>
+            );
+          })}
+        </ul>
+
+        {/* Settings divider */}
+        <div className="mx-2 my-3 border-t border-hairline" />
+        <ul>
+          <li>
+            <Link
+              href={SETTINGS_ITEM.to}
+              title={collapsed ? SETTINGS_ITEM.label : undefined}
+              className={`flex items-center gap-3 rounded-lg px-2.5 py-2 text-sm font-medium transition-colors ${
+                pathname.startsWith(SETTINGS_ITEM.to)
+                  ? "bg-foreground/10 text-foreground"
+                  : "text-foreground-muted hover:bg-surface-2 hover:text-foreground"
+              } ${collapsed ? "justify-center" : ""}`}
+            >
+              <span className="grid h-5 w-5 shrink-0 place-items-center">{SETTINGS_ITEM.icon}</span>
+              {!collapsed && <span className="truncate">{SETTINGS_ITEM.label}</span>}
+            </Link>
+          </li>
+        </ul>
+      </nav>
+    </>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// AppSidebar
+// ---------------------------------------------------------------------------
 
 export function AppSidebar({ children }: { children: ReactNode }) {
   const [collapsed, setCollapsed] = useState(false);
-  const pathname = usePathname();
   const router = useRouter();
-
-  const isActive = (to: string) =>
-    to === "/portfolios"
-      ? pathname.startsWith("/portfolios") || pathname.startsWith("/the-take")
-      : pathname.startsWith(to);
 
   const handleSignOut = async () => {
     await supabase.auth.signOut();
@@ -59,7 +145,7 @@ export function AppSidebar({ children }: { children: ReactNode }) {
           }`}
         >
           <Link
-            href="/portfolios"
+            href="/overview"
             aria-label="Node home"
             className={`flex min-w-0 items-center ${
               collapsed
@@ -74,45 +160,10 @@ export function AppSidebar({ children }: { children: ReactNode }) {
           </Link>
         </div>
 
-        {/* Nav */}
-        <nav className="flex-1 overflow-y-auto px-2 py-3">
-          {GROUPS.map((group, gi) => {
-            const showSeparator = collapsed && gi > 0;
-            return (
-              <div key={gi} className="mb-2">
-                {showSeparator && <div className="mx-2 my-2 border-t border-hairline" />}
-                {!collapsed && group.label && (
-                  <div className="px-2.5 pb-1 pt-3 text-[10px] font-semibold uppercase tracking-[0.12em] text-foreground-muted">
-                    {group.label}
-                  </div>
-                )}
-                <ul className="flex flex-col gap-0.5">
-                  {group.items.map((item) => {
-                    const active = isActive(item.to);
-                    return (
-                      <li key={item.to}>
-                        <Link
-                          href={item.to}
-                          title={collapsed ? item.label : undefined}
-                          className={`flex items-center gap-3 rounded-lg px-2.5 py-2 text-sm font-medium transition-colors ${
-                            active
-                              ? "bg-foreground/10 text-foreground"
-                              : "text-foreground-muted hover:bg-surface-2 hover:text-foreground"
-                          } ${collapsed ? "justify-center" : ""}`}
-                        >
-                          <span className="grid h-5 w-5 shrink-0 place-items-center">
-                            {item.icon}
-                          </span>
-                          {!collapsed && <span className="truncate">{item.label}</span>}
-                        </Link>
-                      </li>
-                    );
-                  })}
-                </ul>
-              </div>
-            );
-          })}
-        </nav>
+        {/* Portfolio picker + nav (needs searchParams — wrapped in Suspense) */}
+        <Suspense fallback={<div className="flex-1" />}>
+          <SidebarInner collapsed={collapsed} />
+        </Suspense>
 
         {/* Footer */}
         <div
