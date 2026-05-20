@@ -4903,6 +4903,20 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
       }
     }
 
+    // Raw Marketaux probe — returns the exact HTTP status + body from Marketaux
+    // so we can see what error they return without wading through logs.
+    if (method === "GET" && pathname === "/api/_debug/test-marketaux") {
+      if (!env.MARKETAUX_API_KEY) return json({ error: "MARKETAUX_API_KEY not set" }, 500);
+      const probeUrl = new URL("https://api.marketaux.com/v1/news/all");
+      probeUrl.searchParams.set("api_token", env.MARKETAUX_API_KEY);
+      probeUrl.searchParams.set("symbols", "AAPL");
+      probeUrl.searchParams.set("language", "en");
+      probeUrl.searchParams.set("limit", "1");
+      const probeRes = await fetch(probeUrl.toString());
+      const probeBody = await probeRes.text();
+      return json({ status: probeRes.status, body: probeBody }, 200);
+    }
+
     if (method === "POST" && pathname === "/api/_debug/run-polymarket-fanout") {
       try {
         const result = await runPolymarketFanout(env);
