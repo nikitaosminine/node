@@ -43,6 +43,10 @@ type Props = {
   sectorData: AllocationDatum[];
   assetTypeData: AllocationDatum[];
   currency: string;
+  /** Lock the card to a specific view and skip fetching the other. Default: "classic" */
+  initialView?: View;
+  /** Hide the classic/geography toggle button. Use with initialView. */
+  hideViewToggle?: boolean;
 };
 
 type View = "classic" | "geography";
@@ -576,9 +580,9 @@ function GeographyAllocation({
   );
 }
 
-export function AllocationCard({ portfolioId, sectorData, assetTypeData, currency }: Props) {
+export function AllocationCard({ portfolioId, sectorData, assetTypeData, currency, initialView, hideViewToggle }: Props) {
   const displayCurrency = normalizeCurrencyCode(currency);
-  const [view, setView] = useState<View>("classic");
+  const [view, setView] = useState<View>(initialView ?? "classic");
   const [geography, setGeography] = useState<GeographyResponse | null>(null);
   const [geoLoading, setGeoLoading] = useState(false);
   const [geoRefreshing, setGeoRefreshing] = useState(false);
@@ -671,7 +675,7 @@ export function AllocationCard({ portfolioId, sectorData, assetTypeData, currenc
       <div className="mb-3 flex shrink-0 items-center gap-3">
         <div className="min-w-0">
           <div className="text-[10px] uppercase tracking-[0.12em] text-foreground-muted">
-            Allocation
+            {initialView === "geography" ? "Geography" : "Allocation"}
           </div>
           <div className="mt-0.5 truncate text-[10px] text-foreground-muted">
             {view === "classic"
@@ -702,7 +706,7 @@ export function AllocationCard({ portfolioId, sectorData, assetTypeData, currenc
             </Tooltip>
           </TooltipProvider>
         )}
-        <div className="ml-auto flex shrink-0 items-center">
+        {!hideViewToggle && <div className="ml-auto flex shrink-0 items-center">
           <div className="flex h-9 gap-1 rounded-full border border-hairline bg-surface-2 p-1">
             <button
               type="button"
@@ -745,7 +749,7 @@ export function AllocationCard({ portfolioId, sectorData, assetTypeData, currenc
               <Globe2 className="relative z-10 h-4 w-4" />
             </button>
           </div>
-        </div>
+        </div>}
       </div>
 
       {view === "classic" ? (

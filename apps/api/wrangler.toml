@@ -13,11 +13,13 @@ SUPABASE_URL = "https://sfqowvpuzsqgmwlecgdx.supabase.co"
 # wrangler secret put GROK_SUB_API_KEY
 # wrangler secret put GROK_NORMALIZATION_API_KEY
 # wrangler secret put FRED_API_KEY
+# wrangler secret put MARKETAUX_API_KEY
 # Optional:
 # wrangler secret put MAIN_AGENT_SYSTEM_PROMPT
 # wrangler secret put SUB_AGENT_SYSTEM_PROMPT
 # wrangler secret put SUB_AGENT_PLANNING_SYSTEM_PROMPT
 # wrangler secret put GROK_WEB_SEARCH_MODEL
+# wrangler secret put POLYMARKET_GAMMA_BASE_URL  (default: https://gamma-api.polymarket.com)
 
 [[queues.producers]]
 binding = "AGENT_RUNS_QUEUE"
@@ -50,6 +52,8 @@ max_retries = 3
 [triggers]
 # Hourly cron for scheduled fanout. Actual per-portfolio run times are selected
 # in code based on user timezone + effective runs/day setting.
+# News + Polymarket fanouts piggyback on these same crons (no separate entry
+# needed — they fire on every scheduled() invocation). Free plan cap: 5 crons.
 crons = [
   "5 * * * *",
   "30 6 * * 2-6",

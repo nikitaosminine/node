@@ -12,6 +12,13 @@ import {
   type NormalizedGeographyAllocation,
   type GeographySource,
 } from "./geography";
+import {
+  etfConstituentsPromptExtension,
+  extractAndNormalizeConstituents,
+  upsertEtfConstituents,
+} from "./feeds/etf-constituents";
+import { runNewsFanout } from "./feeds/news";
+import { runPolymarketFanout } from "./feeds/polymarket";
 
 export interface Env {
   SUPABASE_URL: string;
@@ -29,6 +36,8 @@ export interface Env {
   SUB_AGENT_SYSTEM_PROMPT?: string;
   SUB_AGENT_PLANNING_SYSTEM_PROMPT?: string;
   FRED_API_KEY?: string;
+  MARKETAUX_API_KEY?: string;
+  POLYMARKET_GAMMA_BASE_URL?: string;
 }
 
 const CORS_HEADERS = {
@@ -882,7 +891,23 @@ async function researchEtfGeography(
     60_000,
     `ETF geography web research for ${holding.ticker}`,
   );
-  const normalized = normalizeEtfExtraction(extractJsonObject(raw.outputText));
+  const rawJson = extractJsonObject(raw.outputText);
+  const normalized = normalizeEtfExtraction(rawJson);
+  const webSearchModel = env.GROK_WEB_SEARCH_MODEL || "grok-4-1-fast-reasoning";
+
+  // Side-effect: populate central ETF constituents registry (fire-and-forget)
+  if (holding.isin) {
+    const constituentsData = extractAndNormalizeConstituents(rawJson, {
+      responseId: raw.responseId,
+      webSearchModel,
+    });
+    if (constituentsData) {
+      void upsertEtfConstituents(db(env), holding.isin, constituentsData).catch((err: unknown) => {
+        console.error(`[etf-constituents] side-effect upsert failed for ${holding.isin}:`, err);
+      });
+    }
+  }
+
   return {
     allocations: normalized.allocations,
     source: normalized.allocations.length > 0 ? "llm_web" : "unknown",
@@ -890,7 +915,7 @@ async function researchEtfGeography(
     evidence: {
       ...normalized.evidence,
       responseId: raw.responseId,
-      webSearchModel: env.GROK_WEB_SEARCH_MODEL || "grok-4-1-fast-reasoning",
+      webSearchModel,
       citations: raw.citations,
     },
   };
@@ -900,12 +925,13 @@ async function invokeGrokWebGeographyResearch(
   env: Env,
   holding: HoldingGeographyRow,
 ): Promise<{ outputText: string; responseId: string | null; citations: unknown[] }> {
-  const prompt = buildEtfGeographyResearchPrompt({
-    ticker: holding.ticker,
-    name: holding.name,
-    isin: holding.isin,
-    assetType: holding.asset_type,
-  });
+  const prompt =
+    buildEtfGeographyResearchPrompt({
+      ticker: holding.ticker,
+      name: holding.name,
+      isin: holding.isin,
+      assetType: holding.asset_type,
+    }) + etfConstituentsPromptExtension();
   const body = {
     model: env.GROK_WEB_SEARCH_MODEL || "grok-4-1-fast-reasoning",
     input: [
@@ -914,7 +940,7 @@ async function invokeGrokWebGeographyResearch(
         content: [
           {
             type: "input_text",
-            text: "You are a careful ETF geography research agent. Use web search to find actual country allocation. Return strict JSON only.",
+            text: "You are a careful ETF geography and constituents research agent. Use web search to find actual country allocation and top holdings. Return strict JSON only.",
           },
         ],
       },
@@ -4864,6 +4890,147 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
       return json(data);
     }
 
+    // ---------------------------------------------------------------------------
+    // Debug endpoints (no auth — intended for local wrangler dev only)
+    // ---------------------------------------------------------------------------
+
+    if (method === "POST" && pathname === "/api/_debug/run-news-fanout") {
+      try {
+        const result = await runNewsFanout(env);
+        return json(result, 200);
+      } catch (err) {
+        return json({ error: err instanceof Error ? err.message : String(err) }, 500);
+      }
+    }
+
+    // Raw Marketaux probe — tests both entity_isin and symbols filters with real portfolio ISINs.
+    // Returns exact HTTP status + body from each Marketaux variant so we can see which works.
+    if (method === "GET" && pathname === "/api/_debug/test-marketaux") {
+      if (!env.MARKETAUX_API_KEY) return json({ error: "MARKETAUX_API_KEY not set" }, 500);
+      const base = "https://api.marketaux.com/v1/news/all";
+
+      // Probe 1: entity_isin with French stock ISINs (TotalEnergies, Schneider, Legrand, Semco)
+      const isinUrl = new URL(base);
+      isinUrl.searchParams.set("api_token", env.MARKETAUX_API_KEY);
+      isinUrl.searchParams.set("entity_isin", "FR0000120271,FR0000121972,FR0010307819,FR0014010H01");
+      isinUrl.searchParams.set("language", "en,fr");
+      isinUrl.searchParams.set("limit", "3");
+      const isinRes = await fetch(isinUrl.toString());
+      const isinBody = await isinRes.text();
+
+      // Probe 2: symbols with raw .PA tickers
+      const symUrl = new URL(base);
+      symUrl.searchParams.set("api_token", env.MARKETAUX_API_KEY);
+      symUrl.searchParams.set("symbols", "TTE.PA,SU.PA,LR.PA");
+      symUrl.searchParams.set("language", "en,fr");
+      symUrl.searchParams.set("limit", "3");
+      const symRes = await fetch(symUrl.toString());
+      const symBody = await symRes.text();
+
+      // Probe 3: symbols with bare tickers (no exchange suffix)
+      const bareUrl = new URL(base);
+      bareUrl.searchParams.set("api_token", env.MARKETAUX_API_KEY);
+      bareUrl.searchParams.set("symbols", "TTE,SU,LR");
+      bareUrl.searchParams.set("language", "en,fr");
+      bareUrl.searchParams.set("limit", "3");
+      const bareRes = await fetch(bareUrl.toString());
+      const bareBody = await bareRes.text();
+
+      // Probe 4: .PA tickers with 7-day window (to check if 48h is too tight)
+      const sevenDayUrl = new URL(base);
+      const sevenDaysAgo = new Date(Date.now() - 7 * 86400000).toISOString().replace(/\.\d{3}Z$/, "");
+      sevenDayUrl.searchParams.set("api_token", env.MARKETAUX_API_KEY);
+      sevenDayUrl.searchParams.set("symbols", "TTE.PA,SU.PA,LR.PA,ALSEM.PA");
+      sevenDayUrl.searchParams.set("entity_types", "equity");
+      sevenDayUrl.searchParams.set("language", "en,fr");
+      sevenDayUrl.searchParams.set("published_after", sevenDaysAgo);
+      sevenDayUrl.searchParams.set("group_similar", "true");
+      sevenDayUrl.searchParams.set("limit", "5");
+      const sevenDayRes = await fetch(sevenDayUrl.toString());
+      const sevenDayBody = await sevenDayRes.text();
+
+      return json({
+        isin: { status: isinRes.status, body: isinBody },
+        dotPA: { status: symRes.status, body: symBody },
+        bare: { status: bareRes.status, body: bareBody },
+        dotPA_7d: { status: sevenDayRes.status, body: sevenDayBody },
+      }, 200);
+    }
+
+    if (method === "POST" && pathname === "/api/_debug/run-polymarket-fanout") {
+      try {
+        const result = await runPolymarketFanout(env);
+        return json(result, 200);
+      } catch (err) {
+        return json({ error: err instanceof Error ? err.message : String(err) }, 500);
+      }
+    }
+
+    // ---------------------------------------------------------------------------
+    // Feed read endpoints
+    // ---------------------------------------------------------------------------
+
+    // GET /api/feed/news?portfolio_id=...&limit=20
+    if (method === "GET" && pathname === "/api/feed/news") {
+      const portfolioId = url.searchParams.get("portfolio_id") ?? "";
+      if (!portfolioId) return json({ error: "portfolio_id is required" }, 400);
+      const accessError = await requirePortfolioAccess(request, env, portfolioId);
+      if (accessError) return accessError;
+
+      const limit = Math.min(50, Math.max(1, Number(url.searchParams.get("limit") ?? "20")));
+
+      const { data, error } = await db(env)
+        .from("portfolio_news_matches")
+        .select(
+          `score, match_reason,
+           news_clusters!inner(
+             id, cluster_key, primary_article, see_also, entities, published_at, expires_at
+           )`,
+        )
+        .eq("portfolio_id", portfolioId)
+        .gt("news_clusters.expires_at", new Date().toISOString())
+        // Minimum score threshold — filters out articles where the ticker is
+        // only briefly mentioned in a listicle (score ~0.05 due to low recency
+        // decay). 0.12 keeps genuine matches while cutting weak ones.
+        .gte("score", 0.12)
+        .order("score", { ascending: false })
+        .limit(limit);
+
+      if (error) return json({ error: error.message }, 500);
+      return json(data ?? [], 200);
+    }
+
+    // GET /api/feed/polymarket?portfolio_id=...
+    if (method === "GET" && pathname === "/api/feed/polymarket") {
+      const portfolioId = url.searchParams.get("portfolio_id") ?? "";
+      if (!portfolioId) return json({ error: "portfolio_id is required" }, 400);
+      const accessError = await requirePortfolioAccess(request, env, portfolioId);
+      if (accessError) return accessError;
+
+      const { data, error } = await db(env)
+        .from("portfolio_polymarket_matches")
+        .select(
+          `is_pinned, score, reason,
+           polymarket_markets!inner(
+             condition_id, event_id, event_slug, event_title, market_slug,
+             question, tags, outcomes, outcome_prices, liquidity, volume_24hr,
+             end_date, image, active, fetched_at
+           )`,
+        )
+        .eq("portfolio_id", portfolioId)
+        .eq("polymarket_markets.active", true)
+        .order("is_pinned", { ascending: false })
+        .order("score", { ascending: false, nullsFirst: false })
+        .limit(30);
+
+      if (error) return json({ error: error.message }, 500);
+
+      const rows = data ?? [];
+      const pinned = rows.filter((r) => r.is_pinned);
+      const rotating = rows.filter((r) => !r.is_pinned);
+      return json({ pinned, rotating }, 200);
+    }
+
     return json({ error: "Not found" }, 404);
   },
   async scheduled(controller: ScheduledController, env: Env, _ctx: ExecutionContext): Promise<void> {
@@ -4879,6 +5046,17 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
       await enqueueDailySnapshotsForClosedMarkets(env, controller.scheduledTime);
     } catch (error) {
       console.error("daily snapshot fanout failed", error);
+    }
+    // News + Polymarket feed fanout — runs every 30 minutes
+    try {
+      await runNewsFanout(env);
+    } catch (error) {
+      console.error("news fanout failed", error);
+    }
+    try {
+      await runPolymarketFanout(env);
+    } catch (error) {
+      console.error("polymarket fanout failed", error);
     }
   },
   async queue(batch: MessageBatch<WorkerQueueMessage>, env: Env): Promise<void> {
