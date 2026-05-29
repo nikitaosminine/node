@@ -50,6 +50,11 @@ import {
   normalizeCurrencyCode,
 } from "@/lib/currency";
 import {
+  type TransactionApiRow,
+  toFiniteNumber,
+  computeRealizedSellPnL,
+} from "@/lib/portfolio-math";
+import {
   type CachedMarketQuote,
   MARKET_CACHE_MAX_AGE_MS,
   getCachedFxRates,
@@ -311,16 +316,7 @@ interface GeographyResponse {
   countries?: GeographyCountry[];
 }
 
-interface TransactionApiRow {
-  date: string;
-  symbol: string;
-  isin: string | null;
-  yahoo_ticker: string | null;
-  side: string;
-  quantity: number | null;
-  net_amount: number | null;
-  commission: number;
-}
+// TransactionApiRow, toFiniteNumber, computeRealizedSellPnL imported from @/lib/portfolio-math
 
 interface ExportDataset {
   portfolioRows: ExportRow[];
@@ -543,49 +539,6 @@ function isWithinDateRange(date: string, range: ExportDateRange) {
   return matchesFrom && matchesTo;
 }
 
-function toFiniteNumber(value: number | null | undefined) {
-  const numericValue = Number(value ?? 0);
-  return Number.isFinite(numericValue) ? numericValue : 0;
-}
-
-function computeRealizedSellPnL(transactions: TransactionApiRow[]) {
-  const lots = new Map<string, { quantity: number; cost: number }>();
-  let realizedPnL = 0;
-  let realizedCostBasis = 0;
-
-  const chronologicalTransactions = [...transactions].sort((a, b) => a.date.localeCompare(b.date));
-
-  for (const transaction of chronologicalTransactions) {
-    if (!transaction.isin || (transaction.side !== "BUY" && transaction.side !== "SELL")) continue;
-
-    const quantity = toFiniteNumber(transaction.quantity);
-    if (quantity <= 0) continue;
-
-    const lot = lots.get(transaction.isin) ?? { quantity: 0, cost: 0 };
-    if (transaction.side === "BUY") {
-      lot.quantity += quantity;
-      lot.cost += Math.abs(toFiniteNumber(transaction.net_amount));
-      lots.set(transaction.isin, lot);
-      continue;
-    }
-
-    const averageCost = lot.quantity > 0 ? lot.cost / lot.quantity : 0;
-    const soldCostBasis = averageCost * quantity;
-    realizedPnL += toFiniteNumber(transaction.net_amount) - soldCostBasis;
-    realizedCostBasis += soldCostBasis;
-    lot.quantity -= quantity;
-    lot.cost = Math.max(0, lot.cost - soldCostBasis);
-
-    if (lot.quantity > 0.000001) lots.set(transaction.isin, lot);
-    else lots.delete(transaction.isin);
-  }
-
-  return {
-    realizedPnL,
-    realizedCostBasis,
-    realizedPct: realizedCostBasis > 0 ? (realizedPnL / realizedCostBasis) * 100 : 0,
-  };
-}
 
 function activeBenchmarksStorageKey(portfolioId: string) {
   return `${ACTIVE_BENCHMARKS_STORAGE_PREFIX}:${portfolioId}`;

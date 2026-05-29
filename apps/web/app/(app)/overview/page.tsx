@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback, Suspense } from "react";
+import { useState, useEffect, useCallback, useMemo, Suspense } from "react";
 import { useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { BarChart3, Briefcase } from "lucide-react";
@@ -23,6 +23,10 @@ import {
   upsertCachedFxRates,
   upsertCachedQuotes,
 } from "@/lib/market-cache";
+import {
+  type TransactionApiRow,
+  computeRealizedSellPnL,
+} from "@/lib/portfolio-math";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -129,6 +133,13 @@ function OverviewContent({ portfolioId }: { portfolioId: string }) {
   const [marketReady, setMarketReady] = useState(false);
   const [quotes, setQuotes] = useState<Record<string, LiveQuote>>({});
   const [fxRates, setFxRates] = useState<Record<string, number>>({});
+  const [transactionRows, setTransactionRows] = useState<TransactionApiRow[]>([]);
+
+  // useMemo must be unconditional — before any early returns
+  const realizedMetrics = useMemo(
+    () => computeRealizedSellPnL(transactionRows),
+    [transactionRows],
+  );
 
   const portfolioCurrency = normalizeCurrencyCode(portfolio?.currency) ?? DEFAULT_PORTFOLIO_CURRENCY;
 
@@ -147,6 +158,22 @@ function OverviewContent({ portfolioId }: { portfolioId: string }) {
     }
     setPortfolio(data as unknown as Portfolio);
     setLoading(false);
+
+    // Fetch transactions for realized P/L calculation (non-blocking)
+    try {
+      const { data: sessionData } = await supabase.auth.getSession();
+      const token = sessionData?.session?.access_token;
+      const txRes = await fetch(
+        `${API_BASE_URL}/api/portfolios/${portfolioId}/transactions`,
+        token ? { headers: { Authorization: `Bearer ${token}` } } : {},
+      );
+      if (txRes.ok) {
+        const txBody = await txRes.json() as { transactions?: TransactionApiRow[] };
+        setTransactionRows(txBody.transactions ?? []);
+      }
+    } catch {
+      // non-critical — realized P/L will show "—"
+    }
   }, [portfolioId]);
 
   const fetchQuotes = useCallback(async () => {
@@ -264,8 +291,12 @@ function OverviewContent({ portfolioId }: { portfolioId: string }) {
   );
   const totalValue = securitiesValue + cashValue;
   const costBasis = calcHoldingsCost(holdings, portfolioCurrency, fxRates);
-  const gainLoss = totalValue - costBasis;
-  const gainLossPct = costBasis > 0 ? (gainLoss / costBasis) * 100 : 0;
+
+  // Unrealized P/L = current securities value minus open-position cost basis
+  const unrealizedPL = securitiesValue - costBasis;
+  const unrealizedPct = costBasis > 0 ? (unrealizedPL / costBasis) * 100 : 0;
+
+  const hasRealizedPnL = realizedMetrics.realizedCostBasis > 0;
 
   const KPIS = [
     {
@@ -273,14 +304,26 @@ function OverviewContent({ portfolioId }: { portfolioId: string }) {
       value: formatCurrency(totalValue, portfolioCurrency),
     },
     {
-      label: "Securities",
-      value: formatCurrency(securitiesValue, portfolioCurrency),
+      label: "Unrealized P/L",
+      value: formatSignedCurrency(unrealizedPL, portfolioCurrency),
+      detail: `${unrealizedPct >= 0 ? "+" : ""}${unrealizedPct.toFixed(2)}%`,
+      badge: "open" as const,
+      tone: unrealizedPL > 0 ? ("positive" as const) : unrealizedPL < 0 ? ("negative" as const) : undefined,
     },
     {
-      label: "Gain / Loss",
-      value: formatSignedCurrency(gainLoss, portfolioCurrency),
-      detail: gainLoss !== 0 ? `${gainLossPct >= 0 ? "+" : ""}${gainLossPct.toFixed(2)}%` : undefined,
-      tone: gainLoss > 0 ? "positive" : gainLoss < 0 ? "negative" : undefined,
+      label: "Realized P/L",
+      value: hasRealizedPnL
+        ? formatSignedCurrency(realizedMetrics.realizedPnL, portfolioCurrency)
+        : "—",
+      detail: hasRealizedPnL
+        ? `${realizedMetrics.realizedPct >= 0 ? "+" : ""}${realizedMetrics.realizedPct.toFixed(2)}%`
+        : undefined,
+      badge: "closed" as const,
+      tone: hasRealizedPnL
+        ? realizedMetrics.realizedPnL > 0
+          ? ("positive" as const)
+          : ("negative" as const)
+        : undefined,
     },
     {
       label: "Cost basis",
@@ -292,7 +335,7 @@ function OverviewContent({ portfolioId }: { portfolioId: string }) {
       value: formatCurrency(cashValue, portfolioCurrency),
       muted: cashValue === 0,
     },
-  ] as const;
+  ];
 
   return (
     <div className="mx-auto flex w-full max-w-[1500px] flex-col gap-6 px-6 pb-8 pt-4">
@@ -335,8 +378,13 @@ function OverviewContent({ portfolioId }: { portfolioId: string }) {
                     {kpi.value}
                   </span>
                   {"detail" in kpi && kpi.detail && (
-                    <span className="truncate text-[clamp(12px,0.95vw,15px)] font-medium">
-                      {kpi.detail}
+                    <span className="flex items-baseline gap-1 text-[clamp(12px,0.95vw,15px)] font-medium">
+                      <span className="truncate">{kpi.detail}</span>
+                      {"badge" in kpi && kpi.badge && (
+                        <span className="shrink-0 font-normal text-foreground-muted">
+                          · {kpi.badge}
+                        </span>
+                      )}
                     </span>
                   )}
                 </dd>
@@ -361,7 +409,7 @@ function OverviewContent({ portfolioId }: { portfolioId: string }) {
       </div>
 
       {/* Feed 2-column grid */}
-      <div className="grid grid-cols-1 gap-6 md:grid-cols-2">
+      <div className="grid grid-cols-1 items-start gap-6 md:grid-cols-2">
         <NewsFeed portfolioId={portfolioId} />
         <PolymarketFeed portfolioId={portfolioId} />
       </div>

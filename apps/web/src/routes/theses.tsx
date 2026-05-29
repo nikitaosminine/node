@@ -12,7 +12,6 @@ import { TakeToolbar, FilterTab } from "@/components/take/take-toolbar";
 import { TakeThesisCard } from "@/components/take/take-thesis-card";
 import { TakeInsightCard } from "@/components/take/take-insight-card";
 import { TakeKpiSummary } from "@/components/take/take-kpi-summary";
-import { PrimaryTabs } from "@/components/primary-tabs";
 import {
   BUCKET_ORDER,
   DateBucket,
@@ -184,8 +183,7 @@ export default function ThesesPage() {
 
   return (
     <div className="flex h-screen flex-col overflow-hidden bg-background text-foreground">
-      <PrimaryTabs />
-      <div className="flex min-h-0 flex-1 flex-col px-6 pt-4">
+      <div className="flex min-h-0 flex-1 flex-col px-6 pt-14">
         <div className="flex min-h-0 flex-1 flex-col gap-4">
           <div className="grid shrink-0 grid-cols-1 items-end border-b border-hairline pb-3 xl:grid-cols-[minmax(0,1fr)_minmax(0,2fr)]">
             <div className="space-y-4">

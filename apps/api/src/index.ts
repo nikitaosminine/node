@@ -18,7 +18,7 @@ import {
   upsertEtfConstituents,
 } from "./feeds/etf-constituents";
 import { runNewsFanout } from "./feeds/news";
-import { runPolymarketFanout } from "./feeds/polymarket";
+import { runPolymarketFanout, NON_FINANCIAL_RE, TAG_IDS, isShortTermMarket } from "./feeds/polymarket";
 
 export interface Env {
   SUPABASE_URL: string;
@@ -5029,6 +5029,51 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
       const pinned = rows.filter((r) => r.is_pinned);
       const rotating = rows.filter((r) => !r.is_pinned);
       return json({ pinned, rotating }, 200);
+    }
+
+    // GET /api/polymarket/category?tag=finance|geopolitics|tech|economy&limit=30
+    // Returns volume-ranked markets for a given category tag, filtered by
+    // NON_FINANCIAL_RE. No portfolio context or LLM call — suitable for browsing.
+    if (method === "GET" && pathname === "/api/polymarket/category") {
+      const userId = await getAuthenticatedUserId(request, env);
+      if (!userId) return json({ error: "Unauthorized" }, 401);
+
+      const tagName = url.searchParams.get("tag") ?? "";
+      const TAG_BY_NAME: Record<string, number> = {
+        finance: TAG_IDS.finance,
+        geopolitics: TAG_IDS.geopolitics,
+        tech: TAG_IDS.tech,
+        economy: TAG_IDS.economy,
+        crypto: TAG_IDS.crypto,
+      };
+      const tagId = TAG_BY_NAME[tagName];
+      if (!tagId) {
+        return json(
+          { error: `Unknown tag "${tagName}". Valid: ${Object.keys(TAG_BY_NAME).join(", ")}` },
+          400,
+        );
+      }
+
+      const limit = Math.min(Number(url.searchParams.get("limit") ?? "30"), 60);
+
+      const { data, error } = await db(env)
+        .from("polymarket_markets")
+        .select(
+          "condition_id, event_id, event_slug, event_title, market_slug, question, tags, outcomes, outcome_prices, liquidity, volume_24hr, end_date, image, active, fetched_at",
+        )
+        .contains("tags", JSON.stringify([{ id: tagId }]))
+        .eq("active", true)
+        .order("volume_24hr", { ascending: false })
+        .limit(limit * 2); // fetch extra to have room after client-side filter
+
+      if (error) return json({ error: error.message }, 500);
+
+      // Apply NON_FINANCIAL_RE filter client-side (regex can't run in SQL)
+      const filtered = (data ?? [])
+        .filter((m) => !NON_FINANCIAL_RE.test(m.question ?? ""))
+        .slice(0, limit);
+
+      return json(filtered, 200);
     }
 
     return json({ error: "Not found" }, 404);
