@@ -56,7 +56,7 @@ I am building Node as a personal product initiative combining:
 
 The project started from an observation that incubents in France offer a subpar user experience and lack some simple features. 
 
-For example, my bank app lacks a unified UX direction and at times feels a bit messy. Another popular app, Finary, boasts hundreds of different bank integrations as a main value proposition (which is irrelevant to an average person in France or Europe. What am I, Pablo Escobar?), indirectly shills crypto as an investment vehicle and offers suggestions about your portfolio based on wrong metrics. 
+I saw that some apps lacked UX, some other were too bloated and didn't even have features I wanted.
 
 I think the market could use a better tool.
 
