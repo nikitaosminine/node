@@ -1,14 +1,11 @@
 "use client";
 
-import { useState } from "react";
-import { ChevronDown, ChevronUp, ExternalLink } from "lucide-react";
+import { Newspaper } from "lucide-react";
 import { formatDistanceToNow } from "date-fns";
 
-interface SeeAlsoItem {
-  title: string;
-  url: string;
-  source: string;
-}
+// ---------------------------------------------------------------------------
+// Types (unchanged — consumed by news-feed.tsx)
+// ---------------------------------------------------------------------------
 
 interface PrimaryArticle {
   title: string;
@@ -23,7 +20,7 @@ export interface NewsCluster {
   id: string;
   cluster_key: string;
   primary_article: PrimaryArticle;
-  see_also: SeeAlsoItem[];
+  see_also: Array<{ title: string; url: string; source: string }>;
   entities: {
     isins: string[];
     tickers: string[];
@@ -39,13 +36,17 @@ export interface NewsMatch {
   match_reason: {
     matched_isins?: string[];
     matched_tickers?: string[];
+    matched_etfs?: string[];
     matched_country_sector?: string[];
   };
   news_clusters: NewsCluster;
 }
 
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
 function getFaviconUrl(source: string): string {
-  // Best-effort: use a known favicon service
   try {
     const cleaned = source.replace(/^https?:\/\//i, "").replace(/\/.*$/, "");
     return `https://www.google.com/s2/favicons?domain=${cleaned}&sz=16`;
@@ -62,100 +63,88 @@ function relativeTime(iso: string): string {
   }
 }
 
+/** Derive a short "via" label from the match_reason for display */
+function matchLabel(reason: NewsMatch["match_reason"]): string | null {
+  if (reason.matched_etfs?.length) return `via ${reason.matched_etfs[0]}`;
+  if (reason.matched_tickers?.length) return null; // direct match — no label needed
+  if (reason.matched_isins?.length) return null;
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// NewsCard — compact horizontal row, fits inside FeedShell <ul>
+// ---------------------------------------------------------------------------
+
 export function NewsCard({ match }: { match: NewsMatch }) {
-  const [expanded, setExpanded] = useState(false);
   const article = match.news_clusters.primary_article;
-  const seeAlso = match.news_clusters.see_also ?? [];
-  const hasImage = !!article.image;
+  const via = matchLabel(match.match_reason);
 
   return (
-    <article className="group flex flex-col gap-0 overflow-hidden rounded-xl border border-border/50 bg-card transition-shadow hover:shadow-sm">
-      {/* Thumbnail */}
-      {hasImage && (
-        <div className="relative h-36 w-full overflow-hidden bg-surface-2">
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img
-            src={article.image!}
-            alt=""
-            className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-[1.02]"
-            loading="lazy"
-            onError={(e) => {
-              (e.currentTarget as HTMLImageElement).style.display = "none";
-            }}
-          />
-        </div>
-      )}
-
-      <div className="flex flex-col gap-2 p-3.5">
-        {/* Source + time */}
-        <div className="flex items-center gap-1.5 text-xs text-foreground-muted">
-          {article.source && (
-            <>
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img
-                src={getFaviconUrl(article.source)}
-                alt=""
-                className="h-3.5 w-3.5 rounded-sm opacity-70"
-                onError={(e) => {
-                  (e.currentTarget as HTMLImageElement).style.display = "none";
-                }}
-              />
-              <span className="font-medium">{article.source}</span>
-              <span className="text-foreground-muted/50">·</span>
-            </>
+    <li>
+      <a
+        href={article.url}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="flex w-full gap-3 px-5 py-3.5 transition-colors hover:bg-surface-2/40"
+      >
+        {/* Square thumbnail — ~1/10 of the column width */}
+        <div className="h-14 w-14 shrink-0 overflow-hidden rounded-md bg-surface-2">
+          {article.image ? (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img
+              src={article.image}
+              alt=""
+              className="h-full w-full object-cover"
+              loading="lazy"
+              onError={(e) => {
+                (e.currentTarget as HTMLImageElement).style.display = "none";
+                const parent = e.currentTarget.parentElement;
+                if (parent) parent.classList.add("grid", "place-items-center");
+              }}
+            />
+          ) : (
+            <div className="grid h-full w-full place-items-center">
+              <Newspaper className="h-5 w-5 text-foreground-muted/40" />
+            </div>
           )}
-          <span>{relativeTime(article.published_at)}</span>
         </div>
 
-        {/* Title */}
-        <a
-          href={article.url}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="line-clamp-3 text-sm font-semibold leading-snug text-foreground hover:underline"
-        >
-          {article.title}
-        </a>
-
-        {/* Snippet */}
-        {article.snippet && (
-          <p className="line-clamp-2 text-xs leading-relaxed text-foreground-muted">
-            {article.snippet}
-          </p>
-        )}
-
-        {/* See also */}
-        {seeAlso.length > 0 && (
-          <div className="mt-0.5">
-            <button
-              type="button"
-              onClick={() => setExpanded((e) => !e)}
-              className="flex items-center gap-1 text-xs font-medium text-foreground-muted hover:text-foreground"
-            >
-              {expanded ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
-              {expanded ? "Hide" : `See also (${seeAlso.length})`}
-            </button>
-            {expanded && (
-              <ul className="mt-2 flex flex-col gap-1.5 border-t border-hairline pt-2">
-                {seeAlso.map((item, i) => (
-                  <li key={i} className="flex items-start gap-1.5">
-                    <ExternalLink className="mt-0.5 h-3 w-3 shrink-0 text-foreground-muted/60" />
-                    <a
-                      href={item.url}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="line-clamp-2 text-xs text-foreground-muted hover:text-foreground hover:underline"
-                    >
-                      <span className="font-medium">{item.source && `${item.source}: `}</span>
-                      {item.title}
-                    </a>
-                  </li>
-                ))}
-              </ul>
-            )}
+        {/* Content */}
+        <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+          {/* Source + time */}
+          <div className="flex items-center gap-1.5 text-[11px] text-foreground-muted">
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src={getFaviconUrl(article.source)}
+              alt=""
+              className="h-3 w-3 rounded-sm opacity-70"
+              onError={(e) => {
+                (e.currentTarget as HTMLImageElement).style.display = "none";
+              }}
+            />
+            <span className="truncate font-medium">{article.source}</span>
+            <span className="shrink-0 text-foreground-muted/50">·</span>
+            <span className="shrink-0">{relativeTime(article.published_at)}</span>
           </div>
-        )}
-      </div>
-    </article>
+
+          {/* Title */}
+          <h3 className="line-clamp-2 text-[15px] font-medium leading-snug text-foreground">
+            {article.title}
+          </h3>
+
+          {/* Snippet */}
+          {article.snippet && (
+            <p className="line-clamp-1 text-xs leading-relaxed text-foreground-muted/80">
+              {article.snippet}
+            </p>
+          )}
+
+          {/* ETF via-label */}
+          {via && (
+            <p className="line-clamp-1 text-[11px] italic text-foreground-muted/60">{via}</p>
+          )}
+        </div>
+      </a>
+    </li>
   );
 }

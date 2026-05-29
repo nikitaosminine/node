@@ -60,6 +60,7 @@ interface GammaMarket {
   outcomePrices?: string; // JSON-encoded string: '["0.825","0.175"]'
   liquidity?: number | string | null;
   volume24hr?: number | string | null;
+  startDate?: string | null;
   endDate?: string | null;
   active?: boolean;
 }
@@ -77,6 +78,7 @@ interface FlatMarket {
   outcome_prices: number[];
   liquidity: number | null;
   volume_24hr: number | null;
+  start_date: string | null;
   end_date: string | null;
   image: string | null;
   active: boolean;
@@ -93,10 +95,16 @@ interface GrokScoreItem {
   reason: string;
 }
 
+interface PortfolioProfile {
+  tickers: string[];
+  /** ETF holdings expanded with underlying stocks, e.g. "PUST.PA (Amundi NASDAQ-100: NVDA, AAPL, MSFT, AMZN, META)" */
+  etfDescriptions: string[];
+  sectors: string[];
+  countries: string[];
+}
+
 // ---------------------------------------------------------------------------
-// Constants — tag IDs are numeric in Polymarket's Gamma API.
-// These may change over time; move to a DB admin table when they become
-// a maintenance burden (noted as an open item in the plan).
+// Constants
 // ---------------------------------------------------------------------------
 
 export const TAG_IDS = {
@@ -111,8 +119,7 @@ export const TAG_IDS = {
 } as const;
 
 // Slugs of Polymarket events to always pin (highest volume_24hr market from
-// each event gets is_pinned=true across all portfolios). Update as needed.
-// Keep this list short and current — expired/resolved slugs are silently skipped.
+// each event gets is_pinned=true across all portfolios).
 export const PINNED_MARKET_SLUGS: string[] = [
   "will-the-fed-cut-rates-in-2026",
   "will-there-be-a-us-recession-in-2026",
@@ -120,8 +127,63 @@ export const PINNED_MARKET_SLUGS: string[] = [
   "will-bitcoin-reach-200k-in-2026",
 ];
 
-const ROTATING_BATCH_SIZE = 50; // max candidate markets sent to Grok per portfolio
-const ROTATING_TOP_K = 8; // how many rotating matches to keep per portfolio
+const ROTATING_BATCH_SIZE = 60; // max candidate markets sent to Grok per portfolio (event-deduped by highest-Yes bucket)
+const ROTATING_TOP_K = 16; // Grok picks top-K; server-side event-dedup then reduces to ~8 unique events
+
+// Cache TTL: skip Grok re-scoring if holdings haven't changed AND last scored < 6h ago.
+// Market prices still refresh on every fanout run — only the per-portfolio LLM call is cached.
+const CACHE_TTL_HOURS = 6;
+
+// ETF → top-5 underlying stocks for Grok context.
+// Used when etf_constituents table is empty (lazy-populated by geography job).
+// Keyed by exchange-qualified ETF ticker.
+const ETF_UNDERLYING_LABELS: Record<string, { label: string; top5: string[] }> = {
+  "PUST.PA": {
+    label: "Amundi NASDAQ-100",
+    top5: ["NVDA", "AAPL", "MSFT", "AMZN", "META"],
+  },
+  "PTPXH.PA": {
+    label: "Amundi Japan Topix",
+    top5: ["Toyota (7203.T)", "Sony (6758.T)", "Keyence (6861.T)", "NTT (9432.T)", "SoftBank (9984.T)"],
+  },
+  "PAASI.PA": {
+    label: "Amundi EM Asia",
+    top5: ["TSM", "Samsung (005930.KS)", "Tencent (700.HK)", "Alibaba (BABA)", "ASML"],
+  },
+};
+
+// ---------------------------------------------------------------------------
+// Non-financial market filter — applied before Grok to prevent LLM from
+// wasting tokens on sports/entertainment/individual political candidacies.
+// Exported so the /api/polymarket/category endpoint in index.ts can reuse it.
+// ---------------------------------------------------------------------------
+
+export const NON_FINANCIAL_RE =
+  /\b(fifa|world cup|super bowl|nfl|nba|nhl|mlb|premier league|la liga|bundesliga|serie a|champions league|olympic|euro 202[0-9]|euros 202[0-9]|wimbledon|grand prix|formula.?1\b|f1 race|moto ?gp|cricket|rugby world|march madness|stanley cup|gold cup|copa am[eé]rica|esports|grammy|oscar|emmy|golden globe|box office|celebrity|reality (tv|show)|presidential nomination|republican nomination|democratic nomination|win the .{0,30} nomination|become .{0,20} nominee|primary election|senate seat|congressional seat|gubernatorial|win the .{0,20} primary|win the \d{4} .{0,30} presidential election|win the \d{4} us presidential|us president in \d{4})\b/i;
+
+export function isNonFinancialQuestion(question: string): boolean {
+  return NON_FINANCIAL_RE.test(question);
+}
+
+// ---------------------------------------------------------------------------
+// Short-duration filter — weekly/daily price-target markets ("Will MSFT close
+// $440-$450 this week?") are gambler noise. The discriminator is DURATION, not
+// end date: a monthly market resolving in 2 days (e.g. EWY "$212 in May") is
+// relevant. Weekly markets span ~6-7 days; monthly span ~30 days. Keep markets
+// with unknown duration (missing start/end) so we never over-filter.
+// ---------------------------------------------------------------------------
+
+export const MIN_MARKET_DURATION_DAYS = 14;
+
+export function isShortTermMarket(
+  startIso: string | null | undefined,
+  endIso: string | null | undefined,
+): boolean {
+  if (!startIso || !endIso) return false;
+  const ms = new Date(endIso).getTime() - new Date(startIso).getTime();
+  if (!Number.isFinite(ms)) return false;
+  return ms < MIN_MARKET_DURATION_DAYS * 86_400_000;
+}
 
 // ---------------------------------------------------------------------------
 // Grok helpers (self-contained — no cross-import from index.ts)
@@ -229,11 +291,10 @@ function flattenEvent(event: GammaEvent): FlatMarket[] {
 
   for (const market of event.markets ?? []) {
     const conditionId = String(market.conditionId ?? "").trim();
-    if (!conditionId) continue; // skip markets with no conditionId
+    if (!conditionId) continue;
 
     const outcomes = parseJsonStringArray(market.outcomes).map(String);
     const outcomePricesRaw = parseJsonStringArray(market.outcomePrices).map((p) => Number(p));
-    // Filter out NaN entries
     const outcomePrices = outcomePricesRaw.filter((p) => Number.isFinite(p));
 
     markets.push({
@@ -254,6 +315,7 @@ function flattenEvent(event: GammaEvent): FlatMarket[] {
         market.volume24hr != null && Number.isFinite(Number(market.volume24hr))
           ? Number(market.volume24hr)
           : null,
+      start_date: market.startDate ?? null,
       end_date: market.endDate ?? null,
       image: market.image ?? eventImage,
       active: market.active ?? true,
@@ -264,34 +326,13 @@ function flattenEvent(event: GammaEvent): FlatMarket[] {
 }
 
 // ---------------------------------------------------------------------------
-// Non-financial market filter — sports/entertainment sneak in even through
-// financial tags because Polymarket tags events broadly. We strip them here
-// so they never reach the Grok scoring step.
-// ---------------------------------------------------------------------------
-
-const NON_FINANCIAL_RE =
-  /\b(fifa|world cup|super bowl|nfl|nba|nhl|mlb|premier league|la liga|bundesliga|serie a|champions league|olympic|euro 202[0-9]|euros 202[0-9]|wimbledon|grand prix|formula.?1\b|f1 race|moto ?gp|cricket|rugby world|march madness|stanley cup|gold cup|copa am[eé]rica|esports|grammy|oscar|emmy|golden globe|box office|celebrity|reality (tv|show))\b/i;
-
-function isNonFinancialQuestion(question: string): boolean {
-  return NON_FINANCIAL_RE.test(question);
-}
-
-// ---------------------------------------------------------------------------
-// Fetch tag-filtered candidate pool (NO broad pool).
-//
-// The broad "top N by volume_24hr" pool sounds useful but is toxic: whatever
-// sport or event is culturally dominant right now (e.g. FIFA World Cup 2026)
-// dominates by volume and floods the candidate set, causing the LLM to find
-// spurious geographic connections (Japan ETF → Japan wins World Cup). Removing
-// it entirely and relying only on financially-tagged pools eliminates this.
+// Candidate pool fetch (tag-filtered only — no broad pool)
 // ---------------------------------------------------------------------------
 
 async function fetchCandidateMarkets(env: Env): Promise<Map<string, FlatMarket>> {
   const base = gammaBase(env);
   const marketMap = new Map<string, FlatMarket>();
 
-  // Tag-filtered pools only — no broad pool.
-  // Each tag call returns events already tagged as financial/political.
   for (const [tagName, tagId] of Object.entries(TAG_IDS)) {
     try {
       const events = await fetchGammaJson<GammaEvent[]>(
@@ -300,8 +341,6 @@ async function fetchCandidateMarkets(env: Env): Promise<Map<string, FlatMarket>>
       let added = 0;
       for (const event of events) {
         for (const market of flattenEvent(event)) {
-          // Secondary safety net: drop any market whose question matches a
-          // known non-financial pattern even if it slipped through the tag filter.
           if (isNonFinancialQuestion(market.question)) continue;
           if (!marketMap.has(market.condition_id)) {
             marketMap.set(market.condition_id, market);
@@ -320,8 +359,7 @@ async function fetchCandidateMarkets(env: Env): Promise<Map<string, FlatMarket>>
 }
 
 // ---------------------------------------------------------------------------
-// Fetch pinned events and determine which market to pin per event
-// Returns: Map<eventSlug, condition_id of pinned market>
+// Pinned event fetch
 // ---------------------------------------------------------------------------
 
 async function fetchPinnedMarkets(
@@ -329,21 +367,18 @@ async function fetchPinnedMarkets(
   candidateMap: Map<string, FlatMarket>,
 ): Promise<Map<string, string>> {
   const base = gammaBase(env);
-  const pinnedBySlug = new Map<string, string>(); // slug → condition_id
+  const pinnedBySlug = new Map<string, string>();
 
   for (const slug of PINNED_MARKET_SLUGS) {
     try {
-      // Check if we already have markets for this slug from the candidate pool
       const slugMarkets = Array.from(candidateMap.values()).filter(
         (m) => m.event_slug === slug,
       );
 
-      // If not in candidate pool, fetch the event directly
       let eventMarkets: FlatMarket[] = slugMarkets;
       if (eventMarkets.length === 0) {
         const event = await fetchGammaJson<GammaEvent>(`${base}/events/slug/${slug}`);
         eventMarkets = flattenEvent(event);
-        // Add to candidate map
         for (const m of eventMarkets) {
           if (!candidateMap.has(m.condition_id)) {
             candidateMap.set(m.condition_id, m);
@@ -351,7 +386,6 @@ async function fetchPinnedMarkets(
         }
       }
 
-      // Pick highest volume_24hr market (with non-empty conditionId)
       const best = eventMarkets
         .filter((m) => m.condition_id)
         .sort((a, b) => (b.volume_24hr ?? 0) - (a.volume_24hr ?? 0))[0];
@@ -392,15 +426,13 @@ async function upsertMarkets(
     outcome_prices: m.outcome_prices,
     liquidity: m.liquidity,
     volume_24hr: m.volume_24hr,
+    start_date: m.start_date,
     end_date: m.end_date,
     image: m.image,
     active: m.active,
     fetched_at: new Date().toISOString(),
   }));
 
-  // Batch upsert in chunks to avoid payload limits.
-  // Keep chunk large (500) to minimise subrequest count — Cloudflare Workers
-  // has a per-invocation subrequest limit (50 on free, 1000 on paid).
   const CHUNK = 500;
   for (let i = 0; i < rows.length; i += CHUNK) {
     const chunk = rows.slice(i, i + CHUNK);
@@ -415,25 +447,46 @@ async function upsertMarkets(
 }
 
 // ---------------------------------------------------------------------------
-// Score rotating candidates via Grok
+// Holdings hash — SHA-256 of sorted (ticker|isin|quantity) fingerprint.
+// Cache invalidates when any holding's ticker, ISIN, or quantity (rounded to
+// nearest 0.01) changes. Uses WebCrypto available natively in CF Workers.
 // ---------------------------------------------------------------------------
 
-interface PortfolioProfile {
-  tickers: string[];
-  sectors: string[];
-  countries: string[];
+async function computeHoldingsHash(holdings: HoldingRow[]): Promise<string> {
+  const fingerprint = [...holdings]
+    .sort((a, b) => a.ticker.localeCompare(b.ticker))
+    .map((h) => `${h.ticker}|${h.isin ?? ""}|${Math.round(h.quantity * 100)}`)
+    .join(",");
+  const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(fingerprint));
+  return Array.from(new Uint8Array(buf))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+// ---------------------------------------------------------------------------
+// Portfolio profile — full context including ETF underlying stocks.
+// Accepts pre-fetched holdings to avoid double DB round-trips.
+// ---------------------------------------------------------------------------
+
+function isFundLikePolymarket(assetType: string | null | undefined, name = ""): boolean {
+  return /\betf\b|exchange traded fund|mutual\s*fund|\bfund\b|\bucits\b/i.test(
+    `${assetType ?? ""} ${name}`,
+  );
 }
 
 async function buildPortfolioProfile(
   client: AnySupabaseClient,
   portfolioId: string,
-): Promise<PortfolioProfile> {
+  preloadedHoldings?: HoldingRow[],
+): Promise<{ profile: PortfolioProfile; profileSummary: string }> {
   const [holdingsResult, geoResult] = await Promise.all([
-    client
-      .from("holdings")
-      .select("ticker,isin,asset_type,name,quantity")
-      .eq("portfolio_id", portfolioId)
-      .gt("quantity", 0),
+    preloadedHoldings
+      ? Promise.resolve({ data: preloadedHoldings })
+      : client
+          .from("holdings")
+          .select("ticker,isin,asset_type,name,quantity")
+          .eq("portfolio_id", portfolioId)
+          .gt("quantity", 0),
     client
       .from("holding_geography_allocations")
       .select("country_name,weight_pct")
@@ -446,56 +499,98 @@ async function buildPortfolioProfile(
   const geoRows: GeographyAllocationRow[] =
     (geoResult.data as GeographyAllocationRow[] | null) ?? [];
 
-  const tickers = holdings
-    .filter((h) => h.quantity > 0)
-    .map((h) => h.ticker)
-    .filter(Boolean)
-    .slice(0, 15);
+  const directTickers: string[] = [];
+  const etfHoldings: Array<{ ticker: string; isin: string | null; name: string }> = [];
 
-  // Collect sectors from ETF constituents
-  const etfIsins = holdings
-    .filter(
-      (h) =>
-        h.isin &&
-        /\betf\b|exchange traded fund|mutual\s*fund|\bfund\b|\bucits\b/i.test(
-          `${h.asset_type ?? ""} ${h.name}`,
-        ),
-    )
-    .map((h) => h.isin as string);
+  for (const h of holdings) {
+    if (isFundLikePolymarket(h.asset_type, h.name)) {
+      etfHoldings.push({ ticker: h.ticker, isin: h.isin, name: h.name });
+    } else {
+      directTickers.push(h.ticker);
+    }
+  }
 
-  let sectors: string[] = [];
+  // Build ETF description strings including top-5 underlying stocks.
+  // This is the key context Grok needs to correctly reason about rate sensitivity:
+  // "PUST.PA" alone is opaque; "PUST.PA (Amundi NASDAQ-100: NVDA, AAPL, MSFT, AMZN, META)"
+  // makes DCF repricing obvious.
+  const etfIsins = etfHoldings.map((e) => e.isin).filter(Boolean) as string[];
+  const dbConstituentsByIsin: Record<string, { label: string; top5: string[] }> = {};
+
   if (etfIsins.length > 0) {
     const { data: constituentRows } = (await client
       .from("etf_constituents")
+      .select("etf_isin,constituents")
+      .in("etf_isin", etfIsins)) as {
+      data: Array<{ etf_isin: string; constituents: Array<{ ticker: string; name: string }> }> | null;
+      error: unknown;
+    };
+    for (const row of constituentRows ?? []) {
+      const top5 = (row.constituents ?? []).slice(0, 5).map((c) => c.ticker);
+      if (top5.length > 0) {
+        dbConstituentsByIsin[row.etf_isin] = { label: row.etf_isin, top5 };
+      }
+    }
+  }
+
+  const etfDescriptions: string[] = [];
+  for (const etf of etfHoldings) {
+    const fromDb = etf.isin ? dbConstituentsByIsin[etf.isin] : undefined;
+    const fromFallback = ETF_UNDERLYING_LABELS[etf.ticker];
+    const info = fromDb ?? fromFallback;
+    if (info) {
+      etfDescriptions.push(`${etf.ticker} (${info.label}: ${info.top5.join(", ")})`);
+    } else {
+      etfDescriptions.push(etf.ticker);
+    }
+  }
+
+  // Sectors from etf_constituents (best-effort — table may be empty)
+  const sectorSet = new Set<string>();
+  if (etfIsins.length > 0) {
+    const { data: sectorRows } = (await client
+      .from("etf_constituents")
       .select("top_sectors")
       .in("etf_isin", etfIsins)) as { data: Array<{ top_sectors: unknown }> | null; error: unknown };
-    const sectorSet = new Set<string>();
-    for (const row of constituentRows ?? []) {
+    for (const row of sectorRows ?? []) {
       const ts = (row.top_sectors as Array<{ sector: string }> | null) ?? [];
       for (const s of ts.slice(0, 3)) sectorSet.add(s.sector);
     }
-    sectors = Array.from(sectorSet);
   }
 
   const countries = geoRows.map((g) => g.country_name).filter(Boolean).slice(0, 5);
 
-  return { tickers, sectors, countries };
-}
-
-async function scoreRotatingCandidates(
-  env: Env,
-  profile: PortfolioProfile,
-  candidates: FlatMarket[],
-): Promise<GrokScoreItem[]> {
-  if (candidates.length === 0) return [];
+  const profile: PortfolioProfile = {
+    tickers: directTickers.slice(0, 10),
+    etfDescriptions,
+    sectors: Array.from(sectorSet),
+    countries,
+  };
 
   const profileSummary = [
-    `Holdings: ${profile.tickers.slice(0, 15).join(", ")}`,
+    profile.tickers.length > 0 ? `Direct holdings: ${profile.tickers.join(", ")}` : null,
+    profile.etfDescriptions.length > 0
+      ? `ETF exposure: ${profile.etfDescriptions.join(" | ")}`
+      : null,
     profile.sectors.length > 0 ? `Sectors: ${profile.sectors.join(", ")}` : null,
     profile.countries.length > 0 ? `Countries: ${profile.countries.join(", ")}` : null,
   ]
     .filter(Boolean)
     .join(". ");
+
+  return { profile, profileSummary };
+}
+
+// ---------------------------------------------------------------------------
+// Grok scoring
+// ---------------------------------------------------------------------------
+
+async function scoreRotatingCandidates(
+  env: Env,
+  profileSummary: string,
+  candidates: FlatMarket[],
+): Promise<GrokScoreItem[]> {
+  if (candidates.length === 0) return [];
 
   const candidateList = candidates
     .slice(0, ROTATING_BATCH_SIZE)
@@ -507,26 +602,27 @@ async function scoreRotatingCandidates(
 STRICT RULES — read carefully:
 1. Only include markets that have a DIRECT, MATERIAL financial connection to the portfolio's specific holdings or sectors.
 2. "Direct" means: the market outcome would move stock prices, interest rates, commodity prices, currency rates, or sector-specific regulation for specific companies held.
-3. REJECT any sports or entertainment market even if a country in the portfolio plays in it. "France wins World Cup" does NOT affect Schneider Electric's earnings. Geographic overlap is NOT relevance.
-4. REJECT markets about: sports championships, elections in countries where you hold no index ETFs, celebrity events, social media trends, weather, cultural events.
-5. SCORE HIGHLY (>0.6): Central bank rate decisions, trade tariffs/sanctions affecting specific sectors held, energy price regulation, tech regulation affecting held tech ETFs, company-specific events (earnings, mergers, regulatory approvals).
+3. REJECT any sports or entertainment market even if a country in the portfolio plays in it. Geographic overlap is NOT relevance.
+4. REJECT markets about: sports championships, individual political party nominations (e.g. "Will X win the Republican/Democratic nomination?"), celebrity events, social media trends, weather, cultural events. Who wins a primary race 2+ years away has NO direct link to stock prices.
+4b. For elections that ARE relevant (e.g. US House midterms affecting trade policy), only include if you can name a SPECIFIC financial mechanism — not generic "macro uncertainty".
+5. SCORE HIGHLY (>0.6): Central bank rate decisions (especially relevant to tech/growth stocks held via ETFs like NASDAQ-100), trade tariffs/sanctions affecting specific sectors held, energy price regulation, tech regulation affecting held tech ETFs, company-specific events (earnings, mergers, regulatory approvals).
 6. SCORE MEDIUM (0.3–0.6): Broad macroeconomic outcomes (recession, inflation) that would materially affect the portfolio's sector mix.
 7. Score 0 and EXCLUDE anything else.
 
 Return ONLY a JSON array with the top ${ROTATING_TOP_K} most relevant markets. Format:
-[{"condition_id": "...", "score": 0.85, "reason": "One specific financial mechanism connecting this to the portfolio"}]
+[{"condition_id": "...", "score": 0.85, "reason": "One specific financial mechanism naming the exact holding/ETF/underlying stock affected"}]
 
-Only include markets with score >= 0.35. If fewer than 3 markets meet this bar, return only those that genuinely do.`;
+Only include markets with score >= 0.35. If fewer than 3 markets meet this bar, return only those that genuinely do.
+IMPORTANT: Maximize DIVERSITY. If multiple markets come from the same Polymarket event (e.g. multiple Fed rate outcomes), pick AT MOST 2 from that event. Fill remaining slots with markets from DIFFERENT events/topics.`;
 
   const userPrompt = `Portfolio profile:
 ${profileSummary}
 
-Candidate prediction markets — pick the top ${ROTATING_TOP_K} that have a DIRECT financial connection to the holdings above:
+Candidate prediction markets — pick the top ${ROTATING_TOP_K} with DIRECT financial connection to this portfolio:
 ${candidateList}
 
-Return JSON array only. No sports, no entertainment, no geography-as-relevance.`;
+Return JSON array only. No sports, no entertainment, no individual political candidacies, no geography-as-relevance.`;
 
-  // Build a set of valid condition_ids so we can reject hallucinated ones
   const validIds = new Set(candidates.slice(0, ROTATING_BATCH_SIZE).map((m) => m.condition_id));
 
   try {
@@ -539,7 +635,6 @@ Return JSON array only. No sports, no entertainment, no geography-as-relevance.`
           item !== null &&
           typeof (item as Record<string, unknown>).condition_id === "string" &&
           typeof (item as Record<string, unknown>).score === "number" &&
-          // Reject any condition_id Grok hallucinated — must be in the candidate list
           validIds.has((item as Record<string, unknown>).condition_id as string),
       )
       .map((item) => ({
@@ -552,6 +647,61 @@ Return JSON array only. No sports, no entertainment, no geography-as-relevance.`
     console.error("[polymarket] Grok scoring failed:", err);
     return [];
   }
+}
+
+// ---------------------------------------------------------------------------
+// Probability of the affirmative ("Yes") outcome — the market's consensus
+// answer. Yes/No markets → the Yes price; non-binary → leading outcome price.
+// ---------------------------------------------------------------------------
+
+function getYesProb(market: FlatMarket | undefined): number {
+  if (!market) return 0;
+  const yesIdx = market.outcomes.findIndex((o) => /^yes$/i.test(o.trim()));
+  if (yesIdx >= 0) return market.outcome_prices[yesIdx] ?? 0;
+  return Math.max(...market.outcome_prices, 0);
+}
+
+// ---------------------------------------------------------------------------
+// Server-side event deduplication
+//
+// A single Polymarket EVENT (e.g. "How many Fed rate cuts in 2026?") is split
+// into many binary markets ("Will 0 cuts happen?", "Will 7 cuts happen?", …)
+// sharing one event_id. Grok scores them individually, so we collapse to one
+// row per event.
+//
+// Selection: keep the bucket with the HIGHEST Yes probability — the consensus
+// answer (e.g. "0 cuts" at 67% Yes), NOT a lopsided near-zero bucket like
+// "7 cuts" at 100% No which carries no information. The event's feed ranking
+// uses the MAX Grok score across its buckets so relevance is preserved.
+// ---------------------------------------------------------------------------
+
+function dedupeByEvent(
+  scored: Array<{ condition_id: string; score: number; reason: string | null }>,
+  candidateMap: Map<string, FlatMarket>,
+): typeof scored {
+  type Item = { condition_id: string; score: number; reason: string | null };
+  const groups = new Map<string, { best: Item; bestYes: number; maxScore: number }>();
+
+  for (const item of scored) {
+    const market = candidateMap.get(item.condition_id);
+    const eventKey = market?.event_id || item.condition_id;
+    const yesProb = getYesProb(market);
+
+    const group = groups.get(eventKey);
+    if (!group) {
+      groups.set(eventKey, { best: item, bestYes: yesProb, maxScore: item.score });
+    } else {
+      group.maxScore = Math.max(group.maxScore, item.score);
+      if (yesProb > group.bestYes) {
+        group.best = item;
+        group.bestYes = yesProb;
+      }
+    }
+  }
+
+  return Array.from(groups.values())
+    .sort((a, b) => b.maxScore - a.maxScore)
+    .map((g) => ({ ...g.best, score: g.maxScore }));
 }
 
 // ---------------------------------------------------------------------------
@@ -571,7 +721,7 @@ export async function runPolymarketFanout(env: Env): Promise<{
   let portfoliosProcessed = 0;
   let portfoliosSkipped = 0;
 
-  // 1. Fetch and flatten candidate markets (broad + per-tag)
+  // 1. Fetch and flatten candidate markets
   let candidateMap: Map<string, FlatMarket>;
   try {
     candidateMap = await fetchCandidateMarkets(env);
@@ -581,7 +731,7 @@ export async function runPolymarketFanout(env: Env): Promise<{
     candidateMap = new Map();
   }
 
-  // 2. Fetch pinned events (may add to candidateMap)
+  // 2. Fetch pinned events
   let pinnedBySlug: Map<string, string>;
   try {
     pinnedBySlug = await fetchPinnedMarkets(env, candidateMap);
@@ -591,7 +741,7 @@ export async function runPolymarketFanout(env: Env): Promise<{
     pinnedBySlug = new Map();
   }
 
-  // 3. Upsert all markets into polymarket_markets
+  // 3. Upsert all markets (prices + probabilities refresh every run)
   const allMarkets = Array.from(candidateMap.values());
   try {
     await upsertMarkets(client, allMarkets);
@@ -601,7 +751,7 @@ export async function runPolymarketFanout(env: Env): Promise<{
     errors.push(`market upsert: ${msg}`);
   }
 
-  // 4. Collect all pinned condition_ids (one per slug)
+  // 4. Collect pinned condition_ids
   const pinnedConditionIds = new Set(pinnedBySlug.values());
 
   // 5. Fetch all portfolios
@@ -622,17 +772,45 @@ export async function runPolymarketFanout(env: Env): Promise<{
 
   const portfolios = portfoliosData as PortfolioRow[];
 
-  // Rotating candidates = all markets NOT pinned, sorted by volume_24hr desc
-  const rotatingCandidates = allMarkets
-    .filter((m) => !pinnedConditionIds.has(m.condition_id))
-    .sort((a, b) => (b.volume_24hr ?? 0) - (a.volume_24hr ?? 0));
+  // Rotating candidates = all markets NOT pinned.
+  // Collapse multi-bucket events (e.g. "How many Fed cuts?") to a SINGLE
+  // representative market — the highest-Yes bucket (consensus answer) — BEFORE
+  // Grok scoring. Otherwise Grok sees all 13 buckets of one event and may pick
+  // a lopsided near-zero bucket ("Will 7 cuts happen?" at 100% No) instead of
+  // the meaningful one ("Will 0 cuts happen?" at 67% Yes).
+  // Drop near-certain markets (≥97% on the leading side) — a market at 100%
+  // Yes / 99% No is resolved-in-all-but-name and carries no information. This
+  // strips noise like "Will MSFT hit $435 in May? 100% Yes" before it reaches Grok.
+  const MAX_CERTAIN_PROB = 0.97;
+  const consensusByEvent = new Map<string, FlatMarket>();
+  for (const m of allMarkets) {
+    if (pinnedConditionIds.has(m.condition_id)) continue;
+    // Drop weekly/daily price-target gambling markets (short duration)
+    if (isShortTermMarket(m.start_date, m.end_date)) continue;
+    const topProb = Math.max(...m.outcome_prices, 0);
+    if (topProb >= MAX_CERTAIN_PROB) continue;
+    const key = m.event_id || m.condition_id;
+    const existing = consensusByEvent.get(key);
+    if (!existing || getYesProb(m) > getYesProb(existing)) {
+      consensusByEvent.set(key, m);
+    }
+  }
+  const rotatingCandidates = Array.from(consensusByEvent.values()).sort(
+    (a, b) => (b.volume_24hr ?? 0) - (a.volume_24hr ?? 0),
+  );
 
-  // 6. Per-portfolio: write pinned rows + score rotating
+  const hasGrokKey = !!(
+    env.GROK_MAIN_API_KEY ||
+    env.GROK_SUB_API_KEY ||
+    env.GROK_NORMALIZATION_API_KEY
+  );
+
+  // 6. Per-portfolio scoring
   for (const portfolio of portfolios) {
     const portfolioId = portfolio.id;
 
     try {
-      // 6a. Upsert pinned matches (is_pinned=true, score=NULL)
+      // 6a. Upsert pinned matches
       if (pinnedConditionIds.size > 0) {
         const pinnedRows = Array.from(pinnedConditionIds).map((conditionId) => ({
           portfolio_id: portfolioId,
@@ -658,39 +836,105 @@ export async function runPolymarketFanout(env: Env): Promise<{
         }
       }
 
-      // 6b. Score rotating candidates via Grok, or fall back to top-N by volume
-      const hasGrokKey = !!(env.GROK_MAIN_API_KEY || env.GROK_SUB_API_KEY || env.GROK_NORMALIZATION_API_KEY);
+      // 6b. Holdings-hash cache check — skip Grok if holdings unchanged AND cache is fresh
+      const { data: holdingsData } = await client
+        .from("holdings")
+        .select("ticker,isin,asset_type,name,quantity")
+        .eq("portfolio_id", portfolioId)
+        .gt("quantity", 0);
+
+      const holdings: HoldingRow[] = (holdingsData as HoldingRow[] | null) ?? [];
+
+      if (holdings.length === 0) {
+        // Portfolio has no holdings — skip scoring entirely
+        portfoliosProcessed++;
+        continue;
+      }
+
+      const currentHash = await computeHoldingsHash(holdings);
+
+      // Read cache row
+      const { data: cacheRow } = (await client
+        .from("portfolio_holdings_cache")
+        .select("holdings_hash,last_scored_at,profile_text")
+        .eq("portfolio_id", portfolioId)
+        .maybeSingle()) as {
+        data: { holdings_hash: string; last_scored_at: string; profile_text: string | null } | null;
+        error: unknown;
+      };
+
+      const cacheAgeHours = cacheRow
+        ? (Date.now() - new Date(cacheRow.last_scored_at).getTime()) / 3_600_000
+        : Infinity;
+      const cacheHit =
+        cacheRow !== null &&
+        cacheRow.holdings_hash === currentHash &&
+        cacheAgeHours < CACHE_TTL_HOURS;
+
+      if (cacheHit) {
+        console.log(
+          `[polymarket] cache hit for portfolio ${portfolioId} (holdings unchanged, age=${cacheAgeHours.toFixed(1)}h) — skipping Grok`,
+        );
+        portfoliosProcessed++;
+        continue;
+      }
+
+      // 6c. Cache miss or stale — run full profile build + Grok scoring
+      console.log(
+        `[polymarket] cache miss for portfolio ${portfolioId} (hashChanged=${cacheRow?.holdings_hash !== currentHash}, age=${cacheAgeHours.toFixed(1)}h) — scoring`,
+      );
+
       let scored: Array<{ condition_id: string; score: number; reason: string | null }>;
 
       if (!hasGrokKey) {
-        // No LLM key — just take the top 10 by volume as unscored rotating picks
         scored = rotatingCandidates.slice(0, 10).map((m) => ({
           condition_id: m.condition_id,
           score: 0,
           reason: null,
         }));
       } else {
-        const profile = await buildPortfolioProfile(client, portfolioId);
-        if (profile.tickers.length === 0 && profile.sectors.length === 0 && profile.countries.length === 0) {
-          // Portfolio has no holdings — fall back to top-10 by volume
+        const { profileSummary } = await buildPortfolioProfile(client, portfolioId, holdings);
+
+        const rawScored = await scoreRotatingCandidates(env, profileSummary, rotatingCandidates);
+
+        if (rawScored.length === 0) {
+          errors.push(`portfolio ${portfolioId}: Grok scoring returned 0 results — using volume fallback`);
           scored = rotatingCandidates.slice(0, 10).map((m) => ({
             condition_id: m.condition_id,
             score: 0,
             reason: null,
           }));
         } else {
-          scored = await scoreRotatingCandidates(env, profile, rotatingCandidates);
-          // If Grok returned nothing (API error, bad model, etc.) fall back to volume-ranked top-10
-          if (scored.length === 0) {
-            errors.push(`portfolio ${portfolioId}: Grok scoring returned 0 results — using volume fallback`);
-            scored = rotatingCandidates.slice(0, 10).map((m) => ({
-              condition_id: m.condition_id,
-              score: 0,
-              reason: null,
-            }));
-          }
+          // Server-side event deduplication before storing
+          const deduped = dedupeByEvent(rawScored, candidateMap);
+          console.log(
+            `[polymarket] portfolio ${portfolioId}: Grok returned ${rawScored.length} → ${deduped.length} after event-dedup`,
+          );
+          scored = deduped;
         }
+
+        // Update cache — reuse profileSummary already computed above
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        await (client as any)
+          .from("portfolio_holdings_cache")
+          .upsert(
+            {
+              portfolio_id: portfolioId,
+              holdings_hash: currentHash,
+              profile_text: profileSummary,
+              last_scored_at: new Date().toISOString(),
+            },
+            { onConflict: "portfolio_id" },
+          );
       }
+
+      // 6d. Replace rotating matches entirely — delete stale rows, insert fresh
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (client as any)
+        .from("portfolio_polymarket_matches")
+        .delete()
+        .eq("portfolio_id", portfolioId)
+        .eq("is_pinned", false);
 
       if (scored.length > 0) {
         const rotatingRows = scored.map((item) => ({
@@ -704,13 +948,11 @@ export async function runPolymarketFanout(env: Env): Promise<{
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const { error: rotatingError } = (await (client as any)
           .from("portfolio_polymarket_matches")
-          .upsert(rotatingRows, { onConflict: "portfolio_id,condition_id" })) as {
-          error: { message: string } | null;
-        };
+          .insert(rotatingRows)) as { error: { message: string } | null };
 
         if (rotatingError) {
           console.error(
-            `[polymarket] rotating upsert failed for portfolio ${portfolioId}:`,
+            `[polymarket] rotating insert failed for portfolio ${portfolioId}:`,
             rotatingError.message,
           );
           errors.push(`portfolio ${portfolioId} rotating: ${rotatingError.message}`);

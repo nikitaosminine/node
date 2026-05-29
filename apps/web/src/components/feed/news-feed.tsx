@@ -1,8 +1,9 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
-import { Newspaper, RefreshCw } from "lucide-react";
+import { Newspaper } from "lucide-react";
 import { NewsCard, type NewsMatch } from "@/components/feed/news-card";
+import { FeedShell } from "@/components/feed/feed-shell";
 
 const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_URL ??
@@ -28,7 +29,9 @@ export function NewsFeed({ portfolioId, limit = 20 }: NewsFeedProps) {
       setError(null);
       try {
         const { supabase } = await import("@/integrations/supabase/client");
-        const { data: { session } } = await supabase.auth.getSession();
+        const {
+          data: { session },
+        } = await supabase.auth.getSession();
         const token = session?.access_token;
 
         const res = await fetch(
@@ -39,7 +42,7 @@ export function NewsFeed({ portfolioId, limit = 20 }: NewsFeedProps) {
           const body = await res.json().catch(() => ({ error: "Unknown error" }));
           throw new Error((body as { error?: string }).error ?? `HTTP ${res.status}`);
         }
-        const data = await res.json() as NewsMatch[];
+        const data = (await res.json()) as NewsMatch[];
         setMatches(data);
       } catch (err) {
         setError(err instanceof Error ? err.message : "Couldn't load news, retrying…");
@@ -50,100 +53,56 @@ export function NewsFeed({ portfolioId, limit = 20 }: NewsFeedProps) {
     [portfolioId, limit],
   );
 
-  // Initial fetch
   useEffect(() => {
     fetchNews(true);
   }, [fetchNews]);
 
-  // Poll on interval
   useEffect(() => {
     const id = setInterval(() => fetchNews(false), POLL_INTERVAL_MS);
     return () => clearInterval(id);
   }, [fetchNews]);
 
-  // Refetch on tab focus
   useEffect(() => {
     const handler = () => fetchNews(false);
     window.addEventListener("focus", handler);
     return () => window.removeEventListener("focus", handler);
   }, [fetchNews]);
 
+  const subtitle = matches.length > 0 ? `${matches.length} articles` : undefined;
+
   if (loading) {
-    return (
-      <div className="flex flex-col gap-3">
-        <FeedHeader title="News" />
-        <div className="flex flex-col gap-3">
-          {Array.from({ length: 3 }).map((_, i) => (
-            <div key={i} className="h-28 animate-pulse rounded-xl bg-surface-2" />
-          ))}
-        </div>
-      </div>
-    );
+    return <FeedShell title="Headlines" liveColor="red" loading>{null}</FeedShell>;
   }
 
   if (error) {
     return (
-      <div className="flex flex-col gap-3">
-        <FeedHeader title="News" onRefresh={() => fetchNews(true)} />
-        <div className="rounded-xl border border-border/50 bg-card p-6 text-center text-sm text-foreground-muted">
-          {error}
-        </div>
-      </div>
+      <FeedShell title="Headlines" liveColor="red" onRefresh={() => fetchNews(true)}>
+        <li className="px-4 py-8 text-center text-sm text-foreground-muted">{error}</li>
+      </FeedShell>
     );
   }
 
   if (matches.length === 0) {
     return (
-      <div className="flex flex-col gap-3">
-        <FeedHeader title="News" />
-        <EmptyState />
-      </div>
+      <FeedShell title="Headlines" liveColor="red">
+        <li className="flex flex-col items-center gap-3 px-4 py-10 text-center">
+          <Newspaper className="h-8 w-8 text-foreground-muted/30" />
+          <div className="flex flex-col gap-1">
+            <p className="text-sm font-medium text-foreground-muted">No news yet</p>
+            <p className="text-xs text-foreground-muted/70">
+              News feed is personalized. Import holdings to display news.
+            </p>
+          </div>
+        </li>
+      </FeedShell>
     );
   }
 
   return (
-    <div className="flex flex-col gap-3">
-      <FeedHeader title="News" onRefresh={() => fetchNews(true)} />
-      <div className="flex flex-col gap-3">
-        {matches.map((match, i) => (
-          <NewsCard key={match.news_clusters.id ?? i} match={match} />
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function FeedHeader({ title, onRefresh }: { title: string; onRefresh?: () => void }) {
-  return (
-    <div className="flex items-center justify-between">
-      <div className="flex items-center gap-2">
-        <Newspaper className="h-4 w-4 text-foreground-muted" />
-        <h2 className="text-sm font-semibold tracking-tight">{title}</h2>
-      </div>
-      {onRefresh && (
-        <button
-          type="button"
-          onClick={onRefresh}
-          className="grid h-7 w-7 place-items-center rounded-md text-foreground-muted hover:bg-surface-2 hover:text-foreground"
-          title="Refresh"
-        >
-          <RefreshCw className="h-3.5 w-3.5" />
-        </button>
-      )}
-    </div>
-  );
-}
-
-function EmptyState() {
-  return (
-    <div className="flex flex-col items-center gap-3 rounded-xl border border-border/50 bg-card p-8 text-center">
-      <Newspaper className="h-8 w-8 text-foreground-muted/40" />
-      <div className="flex flex-col gap-1">
-        <p className="text-sm font-medium text-foreground-muted">No news yet</p>
-        <p className="text-xs text-foreground-muted/70">
-          News feed is personalized. Import holdings to display news.
-        </p>
-      </div>
-    </div>
+    <FeedShell title="Headlines" liveColor="red" subtitle={subtitle} onRefresh={() => fetchNews(true)}>
+      {matches.map((match, i) => (
+        <NewsCard key={match.news_clusters.id ?? i} match={match} />
+      ))}
+    </FeedShell>
   );
 }

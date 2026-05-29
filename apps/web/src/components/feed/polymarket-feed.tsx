@@ -1,8 +1,10 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
-import { TrendingUp, RefreshCw, Pin, CalendarDays } from "lucide-react";
+import { useState, useEffect, useCallback, type ReactNode } from "react";
+import { TrendingUp, Pin, CalendarDays } from "lucide-react";
 import { formatDistanceToNow, isPast } from "date-fns";
+import { FeedShell } from "@/components/feed/feed-shell";
+import { CategoryPills, type PolymarketTabId } from "@/components/feed/category-pills";
 
 const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_URL ??
@@ -41,7 +43,7 @@ interface PolymarketMatch {
   polymarket_markets: PolymarketMarket;
 }
 
-interface FeedData {
+interface PersonalizedFeedData {
   pinned: PolymarketMatch[];
   rotating: PolymarketMatch[];
 }
@@ -51,7 +53,36 @@ interface PolymarketFeedProps {
 }
 
 // ---------------------------------------------------------------------------
-// Market card
+// Dedup by event_id (for personalized tab)
+// ---------------------------------------------------------------------------
+
+// Collapse buckets of the same event to one row, keeping the highest-"Yes"
+// bucket (the consensus answer). Mirrors the server-side dedup; safety net since
+// the server already dedups personalized matches before storing them.
+function dedupeByEvent(matches: PolymarketMatch[]): PolymarketMatch[] {
+  const seen = new Map<string, PolymarketMatch>();
+  const yesProb = (m: PolymarketMatch) => {
+    const { outcomes, outcome_prices } = m.polymarket_markets;
+    const yesIdx = outcomes.findIndex((o) => /^yes$/i.test(o.trim()));
+    if (yesIdx >= 0) return outcome_prices[yesIdx] ?? 0;
+    return Math.max(...(outcome_prices.length > 0 ? outcome_prices : [0]));
+  };
+
+  for (const match of matches) {
+    const key =
+      match.polymarket_markets.event_id ?? match.polymarket_markets.condition_id;
+    const existing = seen.get(key);
+    if (!existing) {
+      seen.set(key, match);
+      continue;
+    }
+    if (yesProb(match) > yesProb(existing)) seen.set(key, match);
+  }
+  return Array.from(seen.values());
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
 // ---------------------------------------------------------------------------
 
 function endDateLabel(iso: string | null): string | null {
@@ -65,45 +96,98 @@ function endDateLabel(iso: string | null): string | null {
   }
 }
 
-function MarketCard({ match }: { match: PolymarketMatch }) {
-  const m = match.polymarket_markets;
-
-  // Pair outcomes with prices, sort by probability descending
-  const pairs: Array<{ label: string; prob: number }> = m.outcomes
-    .map((label, i) => ({ label, prob: m.outcome_prices[i] ?? 0 }))
-    .sort((a, b) => b.prob - a.prob);
-
-  const isBinary = pairs.length === 2;
-  const endLabel = endDateLabel(m.end_date);
-  const href = m.event_slug
+function polymarketHref(m: PolymarketMarket): string {
+  return m.event_slug
     ? `https://polymarket.com/event/${m.event_slug}`
     : "https://polymarket.com";
+}
+
+/** Compact volume label, e.g. "$2.4M" / "$840k" / "$120" */
+function formatVolume(v: number | null | undefined): string | null {
+  if (v == null || v <= 0) return null;
+  if (v >= 1_000_000) return `$${(v / 1_000_000).toFixed(1)}M`;
+  if (v >= 1_000) return `$${Math.round(v / 1_000)}k`;
+  return `$${Math.round(v)}`;
+}
+
+/** Live "updated Xs ago" — recomputed on each tick of `now` */
+function formatUpdatedAgo(since: Date | null, now: number): string | null {
+  if (!since) return null;
+  const secs = Math.max(0, Math.round((now - since.getTime()) / 1000));
+  if (secs < 60) return `${secs}s ago`;
+  const mins = Math.floor(secs / 60);
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.floor(mins / 60);
+  return `${hrs}h ago`;
+}
+
+// ---------------------------------------------------------------------------
+// Probability bar — single clean display matching the reference design
+// ---------------------------------------------------------------------------
+
+function ProbabilityBar({ pairs }: { pairs: Array<{ label: string; prob: number }> }) {
+  // pairs is already sorted desc — top probability is the leading outcome
+  const top = pairs[0];
+  const pct = Math.round((top?.prob ?? 0) * 100);
+  const label = top?.label ?? "";
+  return (
+    <div className="flex flex-col gap-1.5">
+      <div className="flex items-center justify-between">
+        <span className="text-[10px] font-semibold uppercase tracking-[0.12em] text-foreground-muted">
+          Probability
+        </span>
+        <span className="flex items-baseline gap-1.5 leading-none">
+          <span className="text-base font-semibold tabular-nums">{pct}%</span>
+          {label && (
+            <span className="text-[11px] font-medium uppercase tracking-wide text-foreground-muted">
+              {label}
+            </span>
+          )}
+        </span>
+      </div>
+      <div className="overflow-hidden rounded-full bg-surface-3" style={{ height: 6 }}>
+        <div
+          className="h-full rounded-full bg-foreground transition-all"
+          style={{ width: `${pct}%` }}
+        />
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Market row — used for both personalized and category tabs
+// ---------------------------------------------------------------------------
+
+function MarketRow({
+  market,
+  isPinned,
+  reason,
+}: {
+  market: PolymarketMarket;
+  isPinned: boolean;
+  reason: string | null;
+}) {
+  const pairs = market.outcomes
+    .map((label, i) => ({ label, prob: market.outcome_prices[i] ?? 0 }))
+    .sort((a, b) => b.prob - a.prob);
+  const endLabel = endDateLabel(market.end_date);
+  const volLabel = formatVolume(market.volume_24hr);
 
   return (
-    <article className="flex flex-col gap-3 rounded-xl border border-border/50 bg-card p-3.5 transition-shadow hover:shadow-sm">
-      {/* Header: pinned badge + end date */}
-      <div className="flex items-start gap-2">
-        <div className="flex min-w-0 flex-1 flex-col gap-1">
-          {match.is_pinned && (
-            <div className="flex items-center gap-1 text-[10px] font-semibold uppercase tracking-widest text-foreground-muted/60">
-              <Pin className="h-2.5 w-2.5" />
-              Pinned
-            </div>
-          )}
-          <a
-            href={href}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="text-sm font-semibold leading-snug text-foreground hover:underline"
-          >
-            {m.question}
-          </a>
-        </div>
-        {m.image && (
-          <div className="h-12 w-12 shrink-0 overflow-hidden rounded-lg bg-surface-2">
-            {/* eslint-disable-next-line @next/next/no-img-element */}
+    <li>
+      <a
+        href={polymarketHref(market)}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="flex w-full gap-3 px-5 py-3.5 transition-colors hover:bg-surface-2/40"
+      >
+        {/* Left thumbnail */}
+        <div className="h-12 w-12 shrink-0 overflow-hidden rounded-md bg-surface-2">
+          {market.image ? (
+            // eslint-disable-next-line @next/next/no-img-element
             <img
-              src={m.image}
+              src={market.image}
               alt=""
               className="h-full w-full object-cover"
               loading="lazy"
@@ -111,88 +195,46 @@ function MarketCard({ match }: { match: PolymarketMatch }) {
                 (e.currentTarget as HTMLImageElement).style.display = "none";
               }}
             />
-          </div>
-        )}
-      </div>
-
-      {/* Outcomes */}
-      {isBinary ? (
-        // 2-outcome bar
-        <div className="flex flex-col gap-1">
-          <div className="flex overflow-hidden rounded-full" style={{ height: 6 }}>
-            <div
-              className="bg-positive transition-all"
-              style={{ width: `${(pairs[0]?.prob ?? 0) * 100}%` }}
-            />
-            <div className="flex-1 bg-surface-3" />
-          </div>
-          <div className="flex justify-between text-xs">
-            {pairs.map((p) => (
-              <div key={p.label} className="flex items-center gap-1">
-                <span className="font-medium text-foreground">{Math.round(p.prob * 100)}%</span>
-                <span className="text-foreground-muted">{p.label}</span>
-              </div>
-            ))}
-          </div>
-        </div>
-      ) : (
-        // Multi-way ranked list (top 4)
-        <div className="flex flex-col gap-1.5">
-          {pairs.slice(0, 4).map((p) => (
-            <div key={p.label} className="flex items-center gap-2">
-              <div className="w-10 shrink-0 text-right text-xs font-semibold tabular-nums text-foreground">
-                {Math.round(p.prob * 100)}%
-              </div>
-              <div className="relative flex-1 overflow-hidden rounded-full bg-surface-3" style={{ height: 5 }}>
-                <div
-                  className="absolute inset-y-0 left-0 rounded-full bg-foreground/30 transition-all"
-                  style={{ width: `${p.prob * 100}%` }}
-                />
-              </div>
-              <div className="min-w-0 flex-1 truncate text-xs text-foreground-muted">{p.label}</div>
+          ) : (
+            <div className="grid h-full w-full place-items-center">
+              <TrendingUp className="h-4 w-4 text-foreground-muted/40" />
             </div>
-          ))}
+          )}
         </div>
-      )}
 
-      {/* Footer: reason + end date */}
-      <div className="flex flex-wrap items-center justify-between gap-1.5 text-[11px] text-foreground-muted/70">
-        {match.reason && !match.is_pinned && (
-          <span className="min-w-0 truncate italic">{match.reason}</span>
-        )}
-        {endLabel && (
-          <span className="ml-auto flex items-center gap-1 shrink-0">
-            <CalendarDays className="h-3 w-3" />
-            {endLabel}
-          </span>
-        )}
-      </div>
-    </article>
-  );
-}
+        {/* Content */}
+        <div className="flex min-w-0 flex-1 flex-col gap-1.5">
+          {/* Question + pinned badge */}
+          <div className="flex items-start gap-1.5">
+            {isPinned && (
+              <Pin className="mt-0.5 h-3 w-3 shrink-0 text-foreground-muted/60" />
+            )}
+            <h3 className="line-clamp-2 text-[15px] font-medium leading-snug text-foreground">
+              {market.question}
+            </h3>
+          </div>
 
-// ---------------------------------------------------------------------------
-// Feed header
-// ---------------------------------------------------------------------------
+          {/* Probability */}
+          <ProbabilityBar pairs={pairs} />
 
-function FeedHeader({ title, onRefresh }: { title: string; onRefresh?: () => void }) {
-  return (
-    <div className="flex items-center justify-between">
-      <div className="flex items-center gap-2">
-        <TrendingUp className="h-4 w-4 text-foreground-muted" />
-        <h2 className="text-sm font-semibold tracking-tight">{title}</h2>
-      </div>
-      {onRefresh && (
-        <button
-          type="button"
-          onClick={onRefresh}
-          className="grid h-7 w-7 place-items-center rounded-md text-foreground-muted hover:bg-surface-2 hover:text-foreground"
-          title="Refresh"
-        >
-          <RefreshCw className="h-3.5 w-3.5" />
-        </button>
-      )}
-    </div>
+          {/* Footer: reason + volume + end date */}
+          <div className="flex min-w-0 items-center justify-between gap-2 text-[11px] text-foreground-muted/70">
+            {reason && !isPinned && (
+              <span className="min-w-0 line-clamp-2 italic">{reason}</span>
+            )}
+            <div className="ml-auto flex shrink-0 items-center gap-2.5">
+              {volLabel && <span className="tabular-nums">{volLabel} vol</span>}
+              {endLabel && (
+                <span className="flex items-center gap-1">
+                  <CalendarDays className="h-3 w-3" />
+                  {endLabel}
+                </span>
+              )}
+            </div>
+          </div>
+        </div>
+      </a>
+    </li>
   );
 }
 
@@ -200,46 +242,42 @@ function FeedHeader({ title, onRefresh }: { title: string; onRefresh?: () => voi
 // Main feed component
 // ---------------------------------------------------------------------------
 
-// Deduplicate matches by event_id — collapses e.g. 4 "Fed June meeting"
-// variants into 1 card. Selection priority:
-//   1. Higher Grok relevance score wins.
-//   2. On a tie: pick the market CLOSEST to 50% probability — it's the most
-//      uncertain and therefore most informative to investors (e.g. "No change:
-//      97.75% Yes" is more useful than "Rate hike 50bps: 0.25% Yes").
-function dedupeByEvent(matches: PolymarketMatch[]): PolymarketMatch[] {
-  const seen = new Map<string, PolymarketMatch>();
-  const maxProb = (m: PolymarketMatch) =>
-    Math.max(...(m.polymarket_markets.outcome_prices.length > 0
-      ? m.polymarket_markets.outcome_prices
-      : [0]));
-
-  for (const match of matches) {
-    const key = match.polymarket_markets.event_id ?? match.polymarket_markets.condition_id;
-    const existing = seen.get(key);
-    if (!existing) { seen.set(key, match); continue; }
-
-    const ms = match.score ?? 0;
-    const es = existing.score ?? 0;
-    if (ms > es) { seen.set(key, match); continue; }
-    if (ms < es) continue;
-    // Tied score — prefer the market whose top probability is lowest (closest to 50%)
-    if (maxProb(match) < maxProb(existing)) seen.set(key, match);
-  }
-  return Array.from(seen.values());
-}
-
 export function PolymarketFeed({ portfolioId }: PolymarketFeedProps) {
-  const [data, setData] = useState<FeedData>({ pinned: [], rotating: [] });
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [activeTab, setActiveTab] = useState<PolymarketTabId>("personalized");
 
-  const fetchFeed = useCallback(
+  // Personalized tab state
+  const [personalizedData, setPersonalizedData] = useState<PersonalizedFeedData>({
+    pinned: [],
+    rotating: [],
+  });
+  const [personalizedLoading, setPersonalizedLoading] = useState(true);
+  const [personalizedError, setPersonalizedError] = useState<string | null>(null);
+
+  // Category tab state
+  const [categoryMarkets, setCategoryMarkets] = useState<PolymarketMarket[]>([]);
+  const [categoryLoading, setCategoryLoading] = useState(false);
+  const [categoryError, setCategoryError] = useState<string | null>(null);
+
+  // "updated Xs ago" tracking — lastUpdated set on each successful fetch,
+  // nowTick re-renders the relative label every 15s
+  const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
+  const [nowTick, setNowTick] = useState(() => Date.now());
+
+  useEffect(() => {
+    const id = setInterval(() => setNowTick(Date.now()), 15_000);
+    return () => clearInterval(id);
+  }, []);
+
+  // Fetch personalized
+  const fetchPersonalized = useCallback(
     async (showLoadingSpinner = false) => {
-      if (showLoadingSpinner) setLoading(true);
-      setError(null);
+      if (showLoadingSpinner) setPersonalizedLoading(true);
+      setPersonalizedError(null);
       try {
         const { supabase } = await import("@/integrations/supabase/client");
-        const { data: { session } } = await supabase.auth.getSession();
+        const {
+          data: { session },
+        } = await supabase.auth.getSession();
         const token = session?.access_token;
 
         const res = await fetch(
@@ -250,108 +288,184 @@ export function PolymarketFeed({ portfolioId }: PolymarketFeedProps) {
           const body = await res.json().catch(() => ({ error: "Unknown error" }));
           throw new Error((body as { error?: string }).error ?? `HTTP ${res.status}`);
         }
-        const raw = await res.json() as FeedData;
-        // Collapse multiple markets from the same event into the most decisive one
-        setData({
+        const raw = (await res.json()) as PersonalizedFeedData;
+        setPersonalizedData({
           pinned: dedupeByEvent(raw.pinned),
           rotating: dedupeByEvent(raw.rotating),
         });
+        setLastUpdated(new Date());
       } catch (err) {
-        setError(err instanceof Error ? err.message : "Couldn't load markets, retrying…");
+        setPersonalizedError(
+          err instanceof Error ? err.message : "Couldn't load markets, retrying…",
+        );
       } finally {
-        setLoading(false);
+        setPersonalizedLoading(false);
       }
     },
     [portfolioId],
   );
 
-  useEffect(() => {
-    fetchFeed(true);
-  }, [fetchFeed]);
+  // Fetch category
+  const fetchCategory = useCallback(async (tag: Exclude<PolymarketTabId, "personalized">) => {
+    setCategoryLoading(true);
+    setCategoryError(null);
+    try {
+      const { supabase } = await import("@/integrations/supabase/client");
+      const {
+        data: { session },
+      } = await supabase.auth.getSession();
+      const token = session?.access_token;
+
+      const res = await fetch(
+        `${API_BASE_URL}/api/polymarket/category?tag=${tag}&limit=30`,
+        token ? { headers: { Authorization: `Bearer ${token}` } } : {},
+      );
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({ error: "Unknown error" }));
+        throw new Error((body as { error?: string }).error ?? `HTTP ${res.status}`);
+      }
+      const data = (await res.json()) as PolymarketMarket[];
+      setCategoryMarkets(data);
+      setLastUpdated(new Date());
+    } catch (err) {
+      setCategoryError(
+        err instanceof Error ? err.message : "Couldn't load markets, retrying…",
+      );
+    } finally {
+      setCategoryLoading(false);
+    }
+  }, []);
+
+  // Initial load + polling
+  useEffect(() => { fetchPersonalized(true); }, [fetchPersonalized]);
 
   useEffect(() => {
-    const id = setInterval(() => fetchFeed(false), POLL_INTERVAL_MS);
+    const id = setInterval(() => {
+      if (activeTab === "personalized") fetchPersonalized(false);
+      else fetchCategory(activeTab as Exclude<PolymarketTabId, "personalized">);
+    }, POLL_INTERVAL_MS);
     return () => clearInterval(id);
-  }, [fetchFeed]);
+  }, [fetchPersonalized, fetchCategory, activeTab]);
 
   useEffect(() => {
-    const handler = () => fetchFeed(false);
+    const handler = () => {
+      if (activeTab === "personalized") fetchPersonalized(false);
+      else fetchCategory(activeTab as Exclude<PolymarketTabId, "personalized">);
+    };
     window.addEventListener("focus", handler);
     return () => window.removeEventListener("focus", handler);
-  }, [fetchFeed]);
+  }, [fetchPersonalized, fetchCategory, activeTab]);
 
-  if (loading) {
-    return (
-      <div className="flex flex-col gap-3">
-        <FeedHeader title="Markets" />
-        <div className="flex flex-col gap-3">
-          {Array.from({ length: 3 }).map((_, i) => (
-            <div key={i} className="h-28 animate-pulse rounded-xl bg-surface-2" />
-          ))}
-        </div>
-      </div>
-    );
+  // Fetch category when tab changes.
+  // Note: we deliberately DON'T clear categoryMarkets here — clearing causes a
+  // skeleton flash + header reflow that makes the pill layout animation jump.
+  // The old data stays visible until the new category arrives.
+  useEffect(() => {
+    if (activeTab !== "personalized") {
+      fetchCategory(activeTab as Exclude<PolymarketTabId, "personalized">);
+    }
+  }, [activeTab, fetchCategory]);
+
+  const handleRefresh = () => {
+    if (activeTab === "personalized") fetchPersonalized(true);
+    else fetchCategory(activeTab as Exclude<PolymarketTabId, "personalized">);
+  };
+
+  // ---------------------------------------------------------------------------
+  // Derived state — single FeedShell stays mounted across all of these so the
+  // header (and the category-pill layout animation) never reflow.
+  // ---------------------------------------------------------------------------
+
+  const isPersonalized = activeTab === "personalized";
+  const personalizedCount =
+    personalizedData.pinned.length + personalizedData.rotating.length;
+  const count = isPersonalized ? personalizedCount : categoryMarkets.length;
+  const hasData = count > 0;
+  const isLoading = isPersonalized ? personalizedLoading : categoryLoading;
+  const currentError = isPersonalized ? personalizedError : categoryError;
+  const showSkeleton = isLoading && !hasData;
+
+  // Subtitle is ALWAYS a non-empty string → header height stays constant →
+  // no vertical jump in the pill layout animation.
+  const updatedLabel = formatUpdatedAgo(lastUpdated, nowTick);
+  let subtitle: string;
+  if (showSkeleton) {
+    subtitle = "Loading…";
+  } else if (currentError && !hasData) {
+    subtitle = "Connection issue";
+  } else {
+    const parts = [`${count} ${count === 1 ? "market" : "markets"} tracked`];
+    if (updatedLabel) parts.push(`updated ${updatedLabel}`);
+    subtitle = parts.join(" · ");
   }
 
-  if (error) {
-    return (
-      <div className="flex flex-col gap-3">
-        <FeedHeader title="Markets" onRefresh={() => fetchFeed(true)} />
-        <div className="rounded-xl border border-border/50 bg-card p-6 text-center text-sm text-foreground-muted">
-          {error}
-        </div>
-      </div>
-    );
-  }
+  const pills = <CategoryPills activeTab={activeTab} onChange={setActiveTab} />;
 
-  const totalItems = data.pinned.length + data.rotating.length;
-
-  if (totalItems === 0) {
-    return (
-      <div className="flex flex-col gap-3">
-        <FeedHeader title="Markets" />
-        <div className="flex flex-col items-center gap-3 rounded-xl border border-border/50 bg-card p-8 text-center">
-          <TrendingUp className="h-8 w-8 text-foreground-muted/40" />
-          <div className="flex flex-col gap-1">
-            <p className="text-sm font-medium text-foreground-muted">No markets yet</p>
-            <p className="text-xs text-foreground-muted/70">
-              Markets feed is personalized. Import holdings to display relevant markets.
-            </p>
-          </div>
-        </div>
-      </div>
+  // Body content (only rendered when not showing skeletons)
+  let body: ReactNode;
+  if (currentError && !hasData) {
+    body = (
+      <li className="px-4 py-8 text-center text-sm text-foreground-muted">
+        {currentError}
+      </li>
     );
+  } else if (!hasData) {
+    body = (
+      <li className="flex flex-col items-center gap-3 px-4 py-10 text-center">
+        <TrendingUp className="h-8 w-8 text-foreground-muted/30" />
+        <div className="flex flex-col gap-1">
+          <p className="text-sm font-medium text-foreground-muted">No markets yet</p>
+          <p className="text-xs text-foreground-muted/70">
+            {isPersonalized
+              ? "Markets feed is personalized. Import holdings to display relevant markets."
+              : "No markets found for this category."}
+          </p>
+        </div>
+      </li>
+    );
+  } else if (isPersonalized) {
+    body = (
+      <>
+        {personalizedData.pinned.map((match) => (
+          <MarketRow
+            key={match.polymarket_markets.condition_id}
+            market={match.polymarket_markets}
+            isPinned
+            reason={match.reason}
+          />
+        ))}
+        {personalizedData.rotating.map((match) => (
+          <MarketRow
+            key={match.polymarket_markets.condition_id}
+            market={match.polymarket_markets}
+            isPinned={false}
+            reason={match.reason}
+          />
+        ))}
+      </>
+    );
+  } else {
+    body = categoryMarkets.map((market) => (
+      <MarketRow
+        key={market.condition_id}
+        market={market}
+        isPinned={false}
+        reason={null}
+      />
+    ));
   }
 
   return (
-    <div className="flex flex-col gap-3">
-      <FeedHeader title="Markets" onRefresh={() => fetchFeed(true)} />
-
-      {/* Pinned markets */}
-      {data.pinned.length > 0 && (
-        <div className="flex flex-col gap-2">
-          <div className="px-0.5 text-[10px] font-semibold uppercase tracking-widest text-foreground-muted/60">
-            Pinned
-          </div>
-          {data.pinned.map((match) => (
-            <MarketCard key={match.polymarket_markets.condition_id} match={match} />
-          ))}
-        </div>
-      )}
-
-      {/* Rotating markets */}
-      {data.rotating.length > 0 && (
-        <div className="flex flex-col gap-2">
-          {data.pinned.length > 0 && (
-            <div className="px-0.5 text-[10px] font-semibold uppercase tracking-widest text-foreground-muted/60">
-              Relevant to your portfolio
-            </div>
-          )}
-          {data.rotating.map((match) => (
-            <MarketCard key={match.polymarket_markets.condition_id} match={match} />
-          ))}
-        </div>
-      )}
-    </div>
+    <FeedShell
+      title="Markets"
+      liveColor="green"
+      liveLabel="Polymarket"
+      subtitle={subtitle}
+      headerSlot={pills}
+      onRefresh={handleRefresh}
+      loading={showSkeleton}
+    >
+      {body}
+    </FeedShell>
   );
 }
