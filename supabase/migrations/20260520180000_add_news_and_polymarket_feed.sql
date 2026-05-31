@@ -46,17 +46,17 @@ create trigger update_etf_constituents_updated_at
 
 -- ============================================================
 -- News Clusters
--- One row per Marketaux similar-cluster (deduped by cluster_key).
+-- One row per news article/story (deduped by cluster_key).
 -- Shared across portfolios; portfolio assignment lives in the
 -- portfolio_news_matches bridge. expires_at uses
--- GREATEST(existing, new_published_at + 48h) on re-fetch so
--- actively-trending stories don't get swept at hour 48.
+-- GREATEST(existing, new_published_at + TTL) on re-fetch so
+-- actively-trending stories don't get swept early.
 -- ============================================================
 
 create table if not exists public.news_clusters (
   id              uuid primary key default gen_random_uuid(),
   cluster_key     text not null unique,
-  -- Marketaux `similar` field — stable identifier for a story cluster
+  -- stable identifier for a story (provider document id, else url)
   primary_article jsonb not null default '{}'::jsonb,
   -- {title, url, source, published_at, snippet, image}
   -- Note: `sentiment` intentionally excluded (V1 drops it)

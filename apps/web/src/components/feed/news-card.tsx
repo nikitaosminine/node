@@ -1,10 +1,12 @@
 "use client";
 
-import { Newspaper } from "lucide-react";
-import { formatDistanceToNow } from "date-fns";
+import { useState } from "react";
+import { Newspaper, ExternalLink, X } from "lucide-react";
+import { formatDistanceToNow, format } from "date-fns";
+import * as Dialog from "@radix-ui/react-dialog";
 
 // ---------------------------------------------------------------------------
-// Types (unchanged — consumed by news-feed.tsx)
+// Types
 // ---------------------------------------------------------------------------
 
 interface PrimaryArticle {
@@ -12,7 +14,7 @@ interface PrimaryArticle {
   url: string;
   source: string;
   published_at: string;
-  snippet: string;
+  snippet: string; // AI summary (coherent prose)
   image: string | null;
 }
 
@@ -38,6 +40,7 @@ export interface NewsMatch {
     matched_tickers?: string[];
     matched_etfs?: string[];
     matched_country_sector?: string[];
+    matched_company_names?: string[];
   };
   news_clusters: NewsCluster;
 }
@@ -46,10 +49,10 @@ export interface NewsMatch {
 // Helpers
 // ---------------------------------------------------------------------------
 
-function getFaviconUrl(source: string): string {
+function getFaviconUrl(source: string, size = 32): string {
   try {
     const cleaned = source.replace(/^https?:\/\//i, "").replace(/\/.*$/, "");
-    return `https://www.google.com/s2/favicons?domain=${cleaned}&sz=16`;
+    return `https://www.google.com/s2/favicons?domain=${cleaned}&sz=${size}`;
   } catch {
     return "";
   }
@@ -63,88 +66,188 @@ function relativeTime(iso: string): string {
   }
 }
 
-/** Derive a short "via" label from the match_reason for display */
-function matchLabel(reason: NewsMatch["match_reason"]): string | null {
-  if (reason.matched_etfs?.length) return `via ${reason.matched_etfs[0]}`;
-  if (reason.matched_tickers?.length) return null; // direct match — no label needed
-  if (reason.matched_isins?.length) return null;
-  return null;
+function absoluteDate(iso: string): string {
+  try {
+    return format(new Date(iso), "d MMM yyyy");
+  } catch {
+    return "";
+  }
+}
+
+/** Split an AI summary into clean paragraphs (summaries are coherent prose). */
+function summaryParagraphs(text: string): string[] {
+  return text
+    .split(/\n+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
 }
 
 // ---------------------------------------------------------------------------
-// NewsCard — compact horizontal row, fits inside FeedShell <ul>
+// FaviconSquare — 32px favicon with newspaper fallback
+// ---------------------------------------------------------------------------
+
+function FaviconSquare({ source }: { source: string }) {
+  const [failed, setFailed] = useState(false);
+  return (
+    <div className="mt-0.5 h-8 w-8 shrink-0 overflow-hidden rounded-md bg-surface-2 grid place-items-center">
+      {failed ? (
+        <Newspaper className="h-4 w-4 text-foreground-muted/30" />
+      ) : (
+        // eslint-disable-next-line @next/next/no-img-element
+        <img
+          src={getFaviconUrl(source, 32)}
+          alt=""
+          className="h-full w-full object-contain"
+          loading="lazy"
+          onError={() => setFailed(true)}
+        />
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Detail modal
+// ---------------------------------------------------------------------------
+
+function NewsModal({ article, open, onClose }: {
+  article: PrimaryArticle;
+  open: boolean;
+  onClose: () => void;
+}) {
+  const segments: string[] = article.snippet ? summaryParagraphs(article.snippet) : [];
+
+  return (
+    <Dialog.Root open={open} onOpenChange={(o) => !o && onClose()}>
+      <Dialog.Portal>
+        <Dialog.Overlay className="fixed inset-0 z-50 bg-black/50 backdrop-blur-sm data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0" />
+        <Dialog.Content className="fixed left-1/2 top-1/2 z-50 max-h-[90vh] w-full max-w-lg overflow-y-auto -translate-x-1/2 -translate-y-1/2 rounded-2xl border border-hairline bg-surface p-6 shadow-2xl data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95">
+          {/* Close */}
+          <Dialog.Close asChild>
+            <button
+              className="absolute right-4 top-4 grid h-7 w-7 place-items-center rounded-md text-foreground-muted hover:bg-surface-2 hover:text-foreground"
+              aria-label="Close"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </Dialog.Close>
+
+          {/* Source meta */}
+          <div className="mb-4 flex items-center gap-2 text-[11px] text-foreground-muted">
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src={getFaviconUrl(article.source, 16)}
+              alt=""
+              className="h-4 w-4 rounded-sm"
+              onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = "none"; }}
+            />
+            <span className="font-medium">{article.source}</span>
+            <span className="text-foreground-muted/40">·</span>
+            <span>{absoluteDate(article.published_at)}</span>
+            <span className="text-foreground-muted/40">·</span>
+            <span>{relativeTime(article.published_at)}</span>
+          </div>
+
+          {/* Title — links to article */}
+          <Dialog.Title asChild>
+            <a
+              href={article.url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="mb-4 block break-words text-base font-semibold leading-snug text-foreground hover:underline"
+            >
+              {article.title}
+            </a>
+          </Dialog.Title>
+
+          {/* Summary */}
+          {segments.length > 0 && (
+            <div className="mb-5">
+              <p className="mb-2 text-[10px] font-semibold uppercase tracking-widest text-foreground-muted/60">
+                Summary
+              </p>
+              <div className="flex flex-col gap-2">
+                {segments.map((seg, i) => (
+                  <p key={i} className="break-words text-sm leading-relaxed text-foreground-muted">
+                    {seg}
+                  </p>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* CTA */}
+          <a
+            href={article.url}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex items-center gap-1.5 rounded-lg bg-foreground px-4 py-2 text-sm font-medium text-background transition-opacity hover:opacity-80"
+          >
+            Read article
+            <ExternalLink className="h-3.5 w-3.5" />
+          </a>
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// NewsCard — compact horizontal row, opens detail modal on click
 // ---------------------------------------------------------------------------
 
 export function NewsCard({ match }: { match: NewsMatch }) {
+  const [open, setOpen] = useState(false);
   const article = match.news_clusters.primary_article;
-  const via = matchLabel(match.match_reason);
 
   return (
-    <li>
-      <a
-        href={article.url}
-        target="_blank"
-        rel="noopener noreferrer"
-        className="flex w-full gap-3 px-5 py-3.5 transition-colors hover:bg-surface-2/40"
-      >
-        {/* Square thumbnail — ~1/10 of the column width */}
-        <div className="h-14 w-14 shrink-0 overflow-hidden rounded-md bg-surface-2">
-          {article.image ? (
-            // eslint-disable-next-line @next/next/no-img-element
-            <img
-              src={article.image}
-              alt=""
-              className="h-full w-full object-cover"
-              loading="lazy"
-              onError={(e) => {
-                (e.currentTarget as HTMLImageElement).style.display = "none";
-                const parent = e.currentTarget.parentElement;
-                if (parent) parent.classList.add("grid", "place-items-center");
-              }}
-            />
-          ) : (
-            <div className="grid h-full w-full place-items-center">
-              <Newspaper className="h-5 w-5 text-foreground-muted/40" />
-            </div>
-          )}
-        </div>
+    <>
+      <li>
+        <button
+          type="button"
+          onClick={() => setOpen(true)}
+          className="flex w-full gap-3 px-5 py-3.5 text-left transition-colors hover:bg-surface-2/40"
+        >
+          {/* 32px favicon square */}
+          <FaviconSquare source={article.source} />
 
-        {/* Content */}
-        <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-          {/* Source + time */}
-          <div className="flex items-center gap-1.5 text-[11px] text-foreground-muted">
-            {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img
-              src={getFaviconUrl(article.source)}
-              alt=""
-              className="h-3 w-3 rounded-sm opacity-70"
-              onError={(e) => {
-                (e.currentTarget as HTMLImageElement).style.display = "none";
-              }}
-            />
-            <span className="truncate font-medium">{article.source}</span>
-            <span className="shrink-0 text-foreground-muted/50">·</span>
-            <span className="shrink-0">{relativeTime(article.published_at)}</span>
+          {/* Content */}
+          <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+            {/* Source + time (no inline favicon) */}
+            <div className="flex items-center gap-1.5 text-[11px] text-foreground-muted">
+              <span className="truncate font-medium">{article.source}</span>
+              <span className="shrink-0 text-foreground-muted/50">·</span>
+              <span className="shrink-0">{relativeTime(article.published_at)}</span>
+            </div>
+
+            {/* Title */}
+            <h3 className="line-clamp-2 text-[15px] font-medium leading-snug text-foreground">
+              {article.title}
+            </h3>
+
+            {/* Summary — 1 line teaser */}
+            {article.snippet && (
+              <p className="line-clamp-1 text-xs leading-relaxed text-foreground-muted/70">
+                {article.snippet}
+              </p>
+            )}
           </div>
 
-          {/* Title */}
-          <h3 className="line-clamp-2 text-[15px] font-medium leading-snug text-foreground">
-            {article.title}
-          </h3>
+          {/* Direct-link icon (doesn't open modal) */}
+          <a
+            href={article.url}
+            target="_blank"
+            rel="noopener noreferrer"
+            onClick={(e) => e.stopPropagation()}
+            className="mt-1 shrink-0 text-foreground-muted/40 hover:text-foreground-muted"
+            aria-label="Open article"
+          >
+            <ExternalLink className="h-3.5 w-3.5" />
+          </a>
+        </button>
+      </li>
 
-          {/* Snippet */}
-          {article.snippet && (
-            <p className="line-clamp-1 text-xs leading-relaxed text-foreground-muted/80">
-              {article.snippet}
-            </p>
-          )}
-
-          {/* ETF via-label */}
-          {via && (
-            <p className="line-clamp-1 text-[11px] italic text-foreground-muted/60">{via}</p>
-          )}
-        </div>
-      </a>
-    </li>
+      <NewsModal article={article} open={open} onClose={() => setOpen(false)} />
+    </>
   );
 }
