@@ -12,6 +12,8 @@ interface FeedShellProps {
   /** Small subtitle below the title, e.g. "8 articles" or "4 markets tracked" */
   subtitle?: string;
   onRefresh?: () => void;
+  /** Optional controls rendered to the right of the title, alongside the refresh button */
+  rightSlot?: React.ReactNode;
   /** Optional slot below the title row (e.g. category pills for Polymarket) */
   headerSlot?: React.ReactNode;
   /** Show skeleton rows instead of children while loading */
@@ -23,12 +25,11 @@ interface FeedShellProps {
 function SkeletonRow() {
   return (
     <li className="flex gap-3 px-5 py-3.5">
-      <div className="h-14 w-14 shrink-0 animate-pulse rounded-md bg-surface-2" />
+      <div className="mt-0.5 h-8 w-8 shrink-0 animate-pulse rounded-md bg-surface-2" />
       <div className="flex flex-1 flex-col gap-2 py-0.5">
         <div className="h-2.5 w-24 animate-pulse rounded-full bg-surface-2" />
         <div className="h-3.5 w-full animate-pulse rounded-full bg-surface-2" />
         <div className="h-3.5 w-3/4 animate-pulse rounded-full bg-surface-2" />
-        <div className="h-2.5 w-1/2 animate-pulse rounded-full bg-surface-2" />
       </div>
     </li>
   );
@@ -40,6 +41,7 @@ export function FeedShell({
   liveLabel,
   subtitle,
   onRefresh,
+  rightSlot,
   headerSlot,
   loading = false,
   children,
@@ -89,16 +91,21 @@ export function FeedShell({
             )}
           </div>
 
-          {/* Refresh button */}
-          {onRefresh && (
-            <button
-              type="button"
-              onClick={onRefresh}
-              className="mt-1 grid h-7 w-7 shrink-0 place-items-center rounded-md text-foreground-muted hover:bg-surface-2 hover:text-foreground"
-              title="Refresh"
-            >
-              <RefreshCw className="h-3.5 w-3.5" />
-            </button>
+          {/* Right controls: optional slot + refresh */}
+          {(rightSlot || onRefresh) && (
+            <div className="mt-1 flex shrink-0 items-center gap-1">
+              {rightSlot}
+              {onRefresh && (
+                <button
+                  type="button"
+                  onClick={onRefresh}
+                  className="grid h-7 w-7 shrink-0 place-items-center rounded-md text-foreground-muted hover:bg-surface-2 hover:text-foreground"
+                  title="Refresh"
+                >
+                  <RefreshCw className="h-3.5 w-3.5" />
+                </button>
+              )}
+            </div>
           )}
         </div>
 

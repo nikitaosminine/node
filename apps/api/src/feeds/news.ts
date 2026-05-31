@@ -10,590 +10,805 @@ type AnySupabaseClient = SupabaseClient<any, any, any>;
 interface Env {
   SUPABASE_URL: string;
   SUPABASE_SERVICE_KEY: string;
-  MARKETAUX_API_KEY?: string;
-}
-
-interface PortfolioRow {
-  id: string;
-  user_id: string;
+  EXA_SEARCH?: string;
 }
 
 interface HoldingRow {
-  id: string;
   ticker: string;
   isin: string | null;
   asset_type: string | null;
   name: string;
   quantity: number;
+  portfolio_id: string;
 }
 
-interface EtfConstituentTopSector {
-  sector: string;
-  weight_pct: number;
-}
-
-interface GeographyAllocationRow {
-  country_code: string;
-  weight_pct: number;
-}
-
-// Marketaux API shapes
-interface MarketauxArticle {
-  uuid?: string;
-  title?: string;
-  description?: string;
-  snippet?: string;
+// Exa Search API shapes (POST https://api.exa.ai/search)
+interface ExaSearchResult {
+  id?: string;
   url?: string;
-  image_url?: string;
-  source?: string;
-  published_at?: string;
-  // Marketaux returns `similar` as an inline array of related article objects,
-  // NOT a string cluster-key. Each top-level article in data[] is its own cluster head;
-  // its similar[] entries are the "see also" siblings.
-  similar?: MarketauxArticle[];
-  entities?: MarketauxEntity[];
+  title?: string;
+  publishedDate?: string | null;
+  author?: string | null;
+  image?: string;
+  favicon?: string;
+  score?: number;
+  summary?: string;
 }
 
-interface MarketauxEntity {
-  symbol?: string;
-  isin?: string;
-  name?: string;
-  exchange_short?: string;
-  country?: string;
-  industry?: string;
-  sentiment_score?: number;
-  type?: string;
-}
-
-interface MarketauxResponse {
-  data?: MarketauxArticle[];
-  error?: { code?: string; message?: string };
-  meta?: { found?: number; returned?: number; limit?: number; page?: number };
-}
-
-// Internal matching structures
-interface NewsClusterEntities {
-  isins: string[];
-  tickers: string[];
-  countries: string[];
-  sectors: string[];
-}
-
-interface PortfolioNewsContext {
-  portfolioId: string;
-  stockIsins: string[];
-  stockTickers: string[];
-  etfSectors: string[];
-  etfCountries: string[];
+interface ExaSearchResponse {
+  requestId?: string;
+  searchType?: string;
+  results?: ExaSearchResult[];
+  costDollars?: { total?: number };
+  error?: string;
 }
 
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
-const MARKETAUX_BASE = "https://api.marketaux.com";
+const EXA_BASE = "https://api.exa.ai";
 const MAX_RETRIES = 3;
 const RETRY_BASE_MS = 1000;
-// 7-day window: French/European mid-caps have sparse daily coverage on Marketaux.
-// A 48h window often returns 0 articles; 7 days ensures the feed is always populated.
-// The expires_at TTL uses the same value so we don't surface stale content indefinitely.
+// 7-day window: French/European mid-caps have sparse coverage. A short window
+// often returns 0 articles; 7 days keeps the feed populated. The expires_at TTL
+// uses the same value so we don't surface stale content indefinitely.
 const CLUSTER_TTL_HOURS = 168;
+const NEWS_WINDOW_MS = CLUSTER_TTL_HOURS * 3_600_000;
+const RESULTS_PER_COMPANY = 25;
+// Bounded concurrency for the Exa fetch phase.
+const FETCH_CONCURRENCY = 4;
+// Distinct-company window per run (rotating-cursor insurance for growth).
+// At current scale (~4 distinct companies) this covers everything every run.
+const FANOUT_WINDOW = 200;
 
-// Marketaux industry labels corresponding to GICS sector names (best-effort mapping)
-// Used to build the `industries` filter for ETF holdings
-const SECTOR_TO_INDUSTRY_MAP: Record<string, string> = {
-  Technology: "Technology",
-  Financials: "Financial Services",
-  "Health Care": "Healthcare",
-  Industrials: "Industrials",
-  "Consumer Discretionary": "Consumer Cyclical",
-  "Consumer Staples": "Consumer Defensive",
-  Energy: "Energy",
-  Materials: "Basic Materials",
-  "Real Estate": "Real Estate",
-  Utilities: "Utilities",
-  "Communication Services": "Communication Services",
+// Source-quality allowlist: curated premium financial/news outlets. An allowlist
+// (not blocklist) decisively cuts the long tail of quote pages / SEO junk.
+const NEWS_INCLUDE_DOMAINS = [
+  "ft.com", "wsj.com", "bloomberg.com", "economist.com", "reuters.com",
+  "apnews.com", "barrons.com", "marketwatch.com", "cnbc.com", "seekingalpha.com",
+  "morningstar.com", "imf.org", "worldbank.org", "bis.org", "ecb.europa.eu",
+  "banque-france.fr", "sec.gov", "amf-france.org", "oecd.org", "alphaville.ft.com",
+  "breakingviews.reuters.com", "institutionalinvestor.com", "pensions-investments.com",
+  "zerohedge.com", "calculatedriskblog.com", "lesechos.fr", "latribune.fr",
+  "boursier.com", "boursorama.com", "challenges.fr", "euronews.com",
+];
+
+// Secondary (broader / small-cap-friendly) allowlist — only searched when the
+// premium list yields too few on-target results for a company. Tune as needed.
+const NEWS_INCLUDE_DOMAINS_SECONDARY = [
+  "investir.lesechos.fr", "capital.fr", "usinenouvelle.com", "agefi.fr",
+  "tradingsat.com", "bfmtv.com",
+];
+
+// Trigger a secondary search when fewer than this many on-target results come
+// back from the premium list (big caps often return mostly sector-noise, so the
+// company-specific count is low even for well-covered names).
+const MIN_ONTARGET = 4;
+
+// Source-quality priority for cross-story dedup (lower = better, kept on merge).
+// Exa's score is relevance, NOT authority, so quality ranking must be explicit.
+const SOURCE_TIER: Record<string, number> = {
+  "reuters.com": 1, "bloomberg.com": 1, "ft.com": 1, "wsj.com": 1, "economist.com": 1, "apnews.com": 1,
+  // Top French sources — human-written, high quality for this portfolio.
+  "lesechos.fr": 1, "boursier.com": 1, "boursorama.com": 1,
+  "barrons.com": 2, "cnbc.com": 2, "marketwatch.com": 2, "latribune.fr": 2,
+  "sec.gov": 2, "ecb.europa.eu": 2, "imf.org": 2, "amf-france.org": 2,
+  "seekingalpha.com": 3, "morningstar.com": 3, "challenges.fr": 3, "euronews.com": 3,
 };
-
-// ---------------------------------------------------------------------------
-// Helper: is an asset fund-like (ETF/mutual fund)?
-// Mirrors the logic in geography.ts without importing cross-file
-// ---------------------------------------------------------------------------
-
-function isFundLike(assetType: string | null | undefined, name = ""): boolean {
-  const value = `${assetType ?? ""} ${name}`.toLowerCase();
-  return /\betf\b|exchange traded fund|mutual\s*fund|\bfund\b|\bucits\b/.test(value);
+function sourceTier(source: string): number {
+  return SOURCE_TIER[source.replace(/^www\./i, "")] ?? 99;
 }
 
-// ---------------------------------------------------------------------------
-// Helper: build per-portfolio Marketaux query context
-// ---------------------------------------------------------------------------
-
-async function buildPortfolioNewsContext(
-  client: AnySupabaseClient,
-  portfolioId: string,
-): Promise<PortfolioNewsContext> {
-  const [holdingsResult, geographyResult] = await Promise.all([
-    client
-      .from("holdings")
-      .select("id,ticker,isin,asset_type,name,quantity")
-      .eq("portfolio_id", portfolioId)
-      .gt("quantity", 0),
-    client
-      .from("holding_geography_allocations")
-      .select("country_code,weight_pct")
-      .eq("portfolio_id", portfolioId),
-  ]);
-
-  const holdings: HoldingRow[] = (holdingsResult.data as HoldingRow[] | null) ?? [];
-  const geoAllocations: GeographyAllocationRow[] =
-    (geographyResult.data as GeographyAllocationRow[] | null) ?? [];
-
-  const stockIsins: string[] = [];
-  const stockTickers: string[] = [];
-  const etfHoldingIds: string[] = [];
-
-  for (const h of holdings) {
-    if (isFundLike(h.asset_type, h.name)) {
-      etfHoldingIds.push(h.id);
-    } else {
-      if (h.isin) stockIsins.push(h.isin);
-      // Always collect the ticker for the symbols query — entity_isin is
-      // not reliably supported on all Marketaux plans and is silently ignored,
-      // whereas symbols=TICKER.EXCHANGE works correctly and disambiguates
-      // cross-listed names (e.g. SU.PA = Schneider Electric, not Suncor).
-      stockTickers.push(h.ticker);
-    }
-  }
-
-  // Pull ETF top sectors from the central registry for each ETF's ISIN
-  const etfIsins = holdings
-    .filter((h) => isFundLike(h.asset_type, h.name) && h.isin)
-    .map((h) => h.isin as string);
-
-  let etfSectors: string[] = [];
-  if (etfIsins.length > 0) {
-    const { data: constituentRows } = (await client
-      .from("etf_constituents")
-      .select("top_sectors")
-      .in("etf_isin", etfIsins)) as { data: Array<{ top_sectors: unknown }> | null; error: unknown };
-
-    const sectorSet = new Set<string>();
-    for (const row of constituentRows ?? []) {
-      const topSectors = (row.top_sectors as EtfConstituentTopSector[] | null) ?? [];
-      // Include top 3 sectors per ETF by weight
-      for (const s of topSectors.slice(0, 3)) {
-        const mapped = SECTOR_TO_INDUSTRY_MAP[s.sector];
-        if (mapped) sectorSet.add(mapped);
-      }
-    }
-    etfSectors = Array.from(sectorSet);
-  }
-
-  // Top countries by weight from geography allocations (top 5)
-  const sortedCountries = geoAllocations
-    .filter((g) => g.country_code && g.weight_pct > 0)
-    .sort((a, b) => b.weight_pct - a.weight_pct)
-    .slice(0, 5)
-    .map((g) => g.country_code.toLowerCase());
-
-  return {
-    portfolioId,
-    stockIsins: [...new Set(stockIsins)],
-    stockTickers: [...new Set(stockTickers)],
-    etfSectors,
-    etfCountries: [...new Set(sortedCountries)],
-  };
+// French-language sources → drive the language of the generated summary.
+const FRENCH_DOMAINS = new Set([
+  "lesechos.fr", "investir.lesechos.fr", "boursier.com", "boursorama.com", "latribune.fr",
+  "challenges.fr", "capital.fr", "usinenouvelle.com", "agefi.fr", "tradingsat.com",
+  "bfmtv.com", "banque-france.fr", "amf-france.org",
+]);
+function isFrenchSource(source: string): boolean {
+  const s = source.replace(/^www\./i, "");
+  return FRENCH_DOMAINS.has(s) || s.endsWith(".fr");
 }
 
+// English stopwords + filler — dropped from title signatures so dedup compares
+// the distinctive tokens of a story.
+const STOPWORDS = new Set([
+  "the", "a", "an", "of", "for", "to", "in", "on", "and", "or", "as", "at", "by",
+  "from", "with", "is", "are", "be", "its", "it", "that", "this", "se", "sa",
+  "inc", "ltd", "plc", "corp", "co", "group", "news", "update", "latest",
+]);
+
 // ---------------------------------------------------------------------------
-// Helper: fetch Marketaux with retry/backoff
+// Helpers
 // ---------------------------------------------------------------------------
-
-async function fetchMarketaux(
-  apiKey: string,
-  params: Record<string, string>,
-  attempt = 1,
-): Promise<MarketauxResponse> {
-  const url = new URL(`${MARKETAUX_BASE}/v1/news/all`);
-  url.searchParams.set("api_token", apiKey);
-  for (const [k, v] of Object.entries(params)) {
-    url.searchParams.set(k, v);
-  }
-
-  let res: Response;
-  try {
-    res = await fetch(url.toString());
-  } catch (err) {
-    if (attempt >= MAX_RETRIES) throw err;
-    await sleep(RETRY_BASE_MS * 2 ** (attempt - 1));
-    return fetchMarketaux(apiKey, params, attempt + 1);
-  }
-
-  if (res.status === 429 || res.status >= 500) {
-    if (attempt >= MAX_RETRIES) {
-      const body = await res.text().catch(() => "");
-      throw new Error(`Marketaux ${res.status} after ${MAX_RETRIES} attempts: ${body}`);
-    }
-    await sleep(RETRY_BASE_MS * 2 ** (attempt - 1));
-    return fetchMarketaux(apiKey, params, attempt + 1);
-  }
-
-  return res.json() as Promise<MarketauxResponse>;
-}
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-// ---------------------------------------------------------------------------
-// Helper: build Marketaux query params for a portfolio
-// ---------------------------------------------------------------------------
-
-function buildMarketauxParams(
-  ctx: PortfolioNewsContext,
-  publishedAfter: string,
-): Record<string, string> | null {
-  const params: Record<string, string> = {
-    published_after: publishedAfter,
-    group_similar: "true",
-    language: "en,fr",
-    limit: "50",
-    sort: "published_at",
-    sort_order: "desc",
-  };
-
-  const hasEntitySymbols = ctx.stockTickers.length > 0;
-
-  // Use the symbols parameter with exchange-qualified tickers (e.g. "SU.PA", "TTE.PA").
-  // entity_isin is silently ignored on Marketaux free plans (returns the full corpus —
-  // 5M+ articles — instead of filtering). Exchange-qualified symbols work correctly
-  // and also disambiguate cross-listed companies (bare "SU" → Suncor Energy, not
-  // Schneider Electric; "SU.PA" → Schneider Electric unambiguously).
-  if (hasEntitySymbols) {
-    params["entity_types"] = "equity";
-    params["symbols"] = ctx.stockTickers.slice(0, 10).join(",");
-  } else {
-    // No direct equity identifiers (e.g. ETF-only portfolio with no stock holdings).
-    // Skip rather than returning geography-scoped noise.
-    return null;
-  }
-
-  return params;
+// Is an asset fund-like (ETF/mutual fund)? Mirrors geography.ts without a cross-import.
+function isFundLike(assetType: string | null | undefined, name = ""): boolean {
+  const value = `${assetType ?? ""} ${name}`.toLowerCase();
+  return /\betf\b|exchange traded fund|mutual\s*fund|\bfund\b|\bucits\b/.test(value);
 }
 
-// ---------------------------------------------------------------------------
-// Helper: parse article entities into our standard shape
-// ---------------------------------------------------------------------------
+function normalizeName(name: string): string {
+  return name.trim().toLowerCase().replace(/\s+/g, " ");
+}
 
-function extractClusterEntities(articles: MarketauxArticle[]): NewsClusterEntities {
-  const isins = new Set<string>();
-  const tickers = new Set<string>();
-  const countries = new Set<string>();
-  const sectors = new Set<string>();
+// Canonical key for one company — collapses multi-lot / dual-listing rows of the
+// same company into a single work-list entry so they don't double-boost.
+function canonicalKey(h: HoldingRow): string {
+  if (h.isin) return `isin:${h.isin.toUpperCase()}`;
+  if (h.ticker) return `ticker:${h.ticker.toUpperCase()}`;
+  return `name:${normalizeName(h.name)}`;
+}
 
-  for (const article of articles) {
-    for (const entity of article.entities ?? []) {
-      if (entity.isin) isins.add(entity.isin.toUpperCase());
-      if (entity.symbol) tickers.add(entity.symbol.toUpperCase());
-      if (entity.country) countries.add(entity.country.toUpperCase());
-      if (entity.industry) sectors.add(entity.industry);
+// Map exchange suffix → ISO 2-letter country code for Exa userLocation
+const EXCHANGE_COUNTRY: Record<string, string> = {
+  PA: "FR", DE: "DE", AS: "NL", MI: "IT", L: "GB", SW: "CH",
+  MC: "ES", BE: "BE", VI: "AT", CO: "DK", HE: "FI", ST: "SE", OL: "NO",
+};
+
+function deriveUserLocation(workList: Map<string, CompanyEntry>): string {
+  const counts = new Map<string, number>();
+  for (const entry of workList.values()) {
+    for (const holder of entry.holders.values()) {
+      for (const ticker of holder.tickers) {
+        const suffix = ticker.split(".").pop()?.toUpperCase() ?? "";
+        const country = EXCHANGE_COUNTRY[suffix];
+        if (country) counts.set(country, (counts.get(country) ?? 0) + 1);
+      }
     }
   }
-
-  return {
-    isins: Array.from(isins),
-    tickers: Array.from(tickers),
-    countries: Array.from(countries),
-    sectors: Array.from(sectors),
-  };
+  if (counts.size === 0) return "FR";
+  return [...counts.entries()].sort(([, a], [, b]) => b - a)[0][0];
 }
 
-// ---------------------------------------------------------------------------
-// Helper: compute relevance score for a cluster vs a portfolio context
-// entity_weight × recency_decay
-// ---------------------------------------------------------------------------
-
-function computeMatchScore(
-  clusterEntities: NewsClusterEntities,
-  ctx: PortfolioNewsContext,
-  publishedAt: string,
-): { score: number; matchReason: Record<string, string[]> } {
-  const matchedIsins: string[] = [];
-  const matchedTickers: string[] = [];
-  const matchedCountrySector: string[] = [];
-
-  // ISIN overlap
-  for (const isin of clusterEntities.isins) {
-    if (ctx.stockIsins.includes(isin)) matchedIsins.push(isin);
+function hostname(url: string): string {
+  try {
+    return new URL(url).hostname.replace(/^www\./i, "");
+  } catch {
+    return "";
   }
+}
 
-  // Ticker overlap (for stocks with no ISIN)
-  for (const ticker of clusterEntities.tickers) {
-    if (ctx.stockTickers.includes(ticker)) matchedTickers.push(ticker);
-  }
+// Drop stock-quote / price-chart / data pages with no editorial content, even
+// when they sit on an allowed news domain and pass category:"news".
+// Catches e.g. "Legrand ADR Stock Quote - MarketWatch" and markets.ft.com data pages.
+const LOW_VALUE_TITLE = /stock quote|share price|markets data|stock price|\bADR\b.*\bquote\b|cours de bourse|quote \(|price target|^subscribe to (read|continue)|^log ?in|^sign ?in/i;
+const LOW_VALUE_PATH = /\/(quote|quotes|cours|stock-quote|share-price|chart)\b/i;
 
-  // ETF sector/country overlap
-  for (const sector of clusterEntities.sectors) {
-    if (ctx.etfSectors.includes(sector)) matchedCountrySector.push(`sector:${sector}`);
+function isLowValuePage(title: string, url: string): boolean {
+  const host = hostname(url);
+  if (/^markets\./i.test(host)) return true; // markets.ft.com etc. — pure data
+  if (LOW_VALUE_TITLE.test(title)) return true;
+  try {
+    if (LOW_VALUE_PATH.test(new URL(url).pathname)) return true;
+  } catch {
+    /* ignore */
   }
-  for (const country of clusterEntities.countries) {
-    if (ctx.etfCountries.includes(country.toLowerCase())) {
-      matchedCountrySector.push(`country:${country}`);
+  return false;
+}
+
+// Run an async fn over items with a fixed concurrency cap. Never rejects —
+// per-item failures are handled inside `fn` (mirrors Promise.allSettled).
+async function runWithConcurrency<T>(
+  items: T[],
+  limit: number,
+  fn: (item: T) => Promise<void>,
+): Promise<void> {
+  let cursor = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (cursor < items.length) {
+      const idx = cursor++;
+      await fn(items[idx]);
     }
-  }
-
-  // Entity weight: prioritise direct ISIN/ticker match over sector/country match.
-  // Minimum of 0.35 when no overlap detected — Marketaux already confirmed relevance
-  // by returning this article for our ISIN/ticker query, so entity format mismatches
-  // (e.g. "AAPL" vs "AAPL.NAS") should not cause the article to be discarded.
-  let entityWeight = 0;
-  if (matchedIsins.length > 0) entityWeight = Math.min(1, 0.5 + matchedIsins.length * 0.15);
-  else if (matchedTickers.length > 0) entityWeight = Math.min(1, 0.4 + matchedTickers.length * 0.15);
-  else if (matchedCountrySector.length > 0) entityWeight = Math.min(0.6, matchedCountrySector.length * 0.1);
-  else entityWeight = 0.35; // baseline: Marketaux query already confirmed relevance
-
-  // Recency decay: linear from 1.0 (now) to 0.1 at 48 h
-  const ageHours = (Date.now() - new Date(publishedAt).getTime()) / 3_600_000;
-  const recencyDecay = Math.max(0.1, 1 - (ageHours / CLUSTER_TTL_HOURS) * 0.9);
-
-  const score = Math.round(entityWeight * recencyDecay * 10000) / 10000;
-
-  return {
-    score,
-    matchReason: {
-      matched_isins: matchedIsins,
-      matched_tickers: matchedTickers,
-      matched_country_sector: matchedCountrySector,
-    },
-  };
+  });
+  await Promise.allSettled(workers);
 }
 
 // ---------------------------------------------------------------------------
-// Helper: upsert a single cluster and its portfolio bridge row
+// Work-list: one entry per distinct company, deduped across all portfolios
 // ---------------------------------------------------------------------------
 
-async function upsertCluster(
+interface CompanyHolder {
+  tickers: Set<string>;
+  isins: Set<string>;
+}
+
+interface CompanyEntry {
+  canonicalKey: string;
+  query: string; // canonical query string — the company name, computed once
+  holders: Map<string, CompanyHolder>; // portfolioId → that portfolio's identifiers
+}
+
+async function buildGlobalWorkList(
   client: AnySupabaseClient,
-  article: MarketauxArticle,
-): Promise<string | null> {
-  // Marketaux returns each top-level article as a cluster head.
-  // The article's own `similar[]` array contains inline sibling articles ("see also").
-  // cluster_key = article uuid (stable, unique per cluster head).
-  const clusterKey = article.uuid ?? `solo-${article.url ?? Math.random()}`;
-  const similarArticles: MarketauxArticle[] = Array.isArray(article.similar) ? article.similar : [];
-
-  const publishedAt = article.published_at ?? new Date().toISOString();
-  const newExpiresAt = new Date(
-    new Date(publishedAt).getTime() + CLUSTER_TTL_HOURS * 3_600_000,
-  ).toISOString();
-
-  // Build primary_article (no sentiment)
-  const primaryArticle = {
-    title: article.title ?? "",
-    url: article.url ?? "",
-    source: article.source ?? "",
-    published_at: publishedAt,
-    snippet: article.snippet ?? article.description ?? "",
-    image: article.image_url ?? null,
-  };
-
-  // Build see_also from similar siblings
-  const seeAlso = similarArticles.slice(0, 5).map((a) => ({
-    title: a.title ?? "",
-    url: a.url ?? "",
-    source: a.source ?? "",
-  }));
-
-  // Extract entities from primary article + all siblings
-  const entities = extractClusterEntities([article, ...similarArticles]);
-
-  // Upsert with expires_at = GREATEST(existing, new)
-  // We do a select first to check existing expires_at, then upsert
-  const { data: existing } = (await client
-    .from("news_clusters")
-    .select("id,expires_at")
-    .eq("cluster_key", clusterKey)
-    .maybeSingle()) as { data: { id: string; expires_at: string } | null; error: unknown };
-
-  const existingExpiresAt = existing?.expires_at ? new Date(existing.expires_at) : null;
-  const expiresAt =
-    existingExpiresAt && existingExpiresAt > new Date(newExpiresAt)
-      ? existingExpiresAt.toISOString()
-      : newExpiresAt;
-
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const { data: upserted, error } = (await (client as any)
-    .from("news_clusters")
-    .upsert(
-      {
-        cluster_key: clusterKey,
-        primary_article: primaryArticle,
-        see_also: seeAlso,
-        entities,
-        published_at: publishedAt,
-        fetched_at: new Date().toISOString(),
-        expires_at: expiresAt,
-      },
-      { onConflict: "cluster_key" },
-    )
-    .select("id")
-    .maybeSingle()) as { data: { id: string } | null; error: { message: string } | null };
+): Promise<Map<string, CompanyEntry>> {
+  const { data, error } = await client
+    .from("holdings")
+    .select("ticker,isin,asset_type,name,quantity,portfolio_id")
+    .gt("quantity", 0);
 
   if (error) {
-    console.error(`[news] cluster upsert failed for key ${clusterKey}:`, error.message);
-    return null;
+    throw new Error(`[news] failed to fetch holdings: ${error.message}`);
   }
 
-  // If upsert doesn't return the id (e.g. no-op), look it up
-  if (upserted?.id) return upserted.id;
-  const { data: fetched } = (await client
-    .from("news_clusters")
-    .select("id")
-    .eq("cluster_key", clusterKey)
-    .maybeSingle()) as { data: { id: string } | null; error: unknown };
-  return fetched?.id ?? null;
+  const holdings = (data as HoldingRow[] | null) ?? [];
+  const workList = new Map<string, CompanyEntry>();
+
+  for (const h of holdings) {
+    if (isFundLike(h.asset_type, h.name)) continue;
+    if (!h.name && !h.ticker && !h.isin) continue;
+
+    const key = canonicalKey(h);
+    let entry = workList.get(key);
+    if (!entry) {
+      entry = { canonicalKey: key, query: h.name?.trim() || h.ticker, holders: new Map() };
+      workList.set(key, entry);
+    }
+
+    let holder = entry.holders.get(h.portfolio_id);
+    if (!holder) {
+      holder = { tickers: new Set(), isins: new Set() };
+      entry.holders.set(h.portfolio_id, holder);
+    }
+    if (h.ticker) holder.tickers.add(h.ticker.toUpperCase());
+    if (h.isin) holder.isins.add(h.isin.toUpperCase());
+  }
+
+  return workList;
 }
 
 // ---------------------------------------------------------------------------
-// Main: runNewsFanout
+// Exa Search with retry/backoff
 // ---------------------------------------------------------------------------
 
+async function exaSearchNews(
+  apiKey: string,
+  query: string,
+  startPublishedDate: string,
+  userLocation: string,
+  includeDomains: string[],
+  attempt = 1,
+): Promise<ExaSearchResponse> {
+  let res: Response;
+  try {
+    res = await fetch(`${EXA_BASE}/search`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": apiKey,
+      },
+      body: JSON.stringify({
+        query,
+        type: "auto",
+        category: "news",
+        numResults: RESULTS_PER_COMPANY,
+        startPublishedDate,
+        userLocation,
+        includeDomains,
+        // No `contents` — search returns title/url/publishedDate/image/score natively.
+        // Summaries are fetched only for survivors via the Contents API (cheaper).
+      }),
+    });
+  } catch (err) {
+    if (attempt >= MAX_RETRIES) throw err;
+    await sleep(RETRY_BASE_MS * 2 ** (attempt - 1));
+    return exaSearchNews(apiKey, query, startPublishedDate, userLocation, includeDomains, attempt + 1);
+  }
+
+  // Retry only transient failures. 400/401/422 are deterministic — fail fast.
+  if (res.status === 429 || res.status >= 500) {
+    if (attempt >= MAX_RETRIES) {
+      const body = await res.text().catch(() => "");
+      throw new Error(`Exa ${res.status} after ${MAX_RETRIES} attempts: ${body}`);
+    }
+    await sleep(RETRY_BASE_MS * 2 ** (attempt - 1));
+    return exaSearchNews(apiKey, query, startPublishedDate, userLocation, includeDomains, attempt + 1);
+  }
+
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(`Exa ${res.status}: ${body}`);
+  }
+
+  return res.json() as Promise<ExaSearchResponse>;
+}
+
+// ---------------------------------------------------------------------------
+// Exa Contents — fetch summaries for a batch of URLs in ONE call.
+// On /contents, `summary` is TOP-LEVEL (unlike /search where it nests in contents).
+// summaryQuery is written in the target language so the summary matches the article.
+// ---------------------------------------------------------------------------
+
+interface ExaContentsResponse {
+  results?: Array<{ id?: string; url?: string; summary?: string }>;
+  error?: string;
+}
+
+async function exaFetchSummaries(
+  apiKey: string,
+  urls: string[],
+  summaryQuery: string,
+  attempt = 1,
+): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  if (urls.length === 0) return out;
+
+  let res: Response;
+  try {
+    res = await fetch(`${EXA_BASE}/contents`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-api-key": apiKey },
+      // Prefer Exa's cached/indexed content (what search-summary used) over a fresh
+      // livecrawl, which hits paywalls (Bloomberg/FT/MarketWatch) and returns no text.
+      body: JSON.stringify({ urls, summary: { query: summaryQuery }, maxAgeHours: 720 }),
+    });
+  } catch (err) {
+    if (attempt >= MAX_RETRIES) throw err;
+    await sleep(RETRY_BASE_MS * 2 ** (attempt - 1));
+    return exaFetchSummaries(apiKey, urls, summaryQuery, attempt + 1);
+  }
+
+  if (res.status === 429 || res.status >= 500) {
+    if (attempt >= MAX_RETRIES) {
+      const body = await res.text().catch(() => "");
+      throw new Error(`Exa contents ${res.status} after ${MAX_RETRIES} attempts: ${body}`);
+    }
+    await sleep(RETRY_BASE_MS * 2 ** (attempt - 1));
+    return exaFetchSummaries(apiKey, urls, summaryQuery, attempt + 1);
+  }
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(`Exa contents ${res.status}: ${body}`);
+  }
+
+  const json = (await res.json()) as ExaContentsResponse;
+  for (const r of json.results ?? []) {
+    const key = r.url ?? r.id;
+    if (key && r.summary) out.set(key, r.summary);
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// Cluster row builder — pure, no DB call (batch upsert happens after Phase 1)
+// Dropping the per-row pre-SELECT + GREATEST(expires_at) logic keeps subrequests
+// within the free-plan cap. expires_at = published_at + TTL is deterministic for
+// a given article (published_at is fixed), so re-fetching computes the same value.
+// ---------------------------------------------------------------------------
+
+function buildClusterRow(result: ExaSearchResult, tickers: string[], isins: string[], summary: string) {
+  const url = result.url!;
+  return {
+    cluster_key: result.id ?? url,
+    primary_article: {
+      title: result.title ?? "",
+      url,
+      source: hostname(url),
+      published_at: result.publishedDate!,
+      // Strip an occasional leading "Summary:"/"Résumé:" label.
+      snippet: summary.replace(/^\s*(summary|résumé|resume)\s*:\s*/i, "").trim(),
+      image: result.image ?? null,
+      exa_score: typeof result.score === "number" ? result.score : null,
+    },
+    see_also: [] as unknown[],
+    entities: { isins, tickers, countries: [] as string[], sectors: [] as string[] },
+    published_at: result.publishedDate!,
+    fetched_at: new Date().toISOString(),
+    expires_at: new Date(new Date(result.publishedDate!).getTime() + NEWS_WINDOW_MS).toISOString(),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Score: exaScore × recencyDecay × holdingsBooster (hybrid; each signal once)
+// ---------------------------------------------------------------------------
+
+function computeMatchScore(exaScore: number, publishedAt: string, holdingsHit: number): number {
+  // Missing score → 0.5: the result came from this company's query, so a format
+  // quirk shouldn't zero it out.
+  const exa = Math.min(1, Math.max(0, Number.isFinite(exaScore) ? exaScore : 0.5));
+  const booster = Math.min(1.3, 1 + (Math.max(1, holdingsHit) - 1) * 0.15);
+  const ageHours = (Date.now() - new Date(publishedAt).getTime()) / 3_600_000;
+  const recency = Math.max(0.1, 1 - (ageHours / CLUSTER_TTL_HOURS) * 0.9);
+  return Math.round(exa * recency * booster * 10000) / 10000;
+}
+
+// ---------------------------------------------------------------------------
+// Name-presence (drift filter) + cross-story dedup helpers
+// ---------------------------------------------------------------------------
+
+// Normalize a company name to its searchable core (drop legal suffixes/punctuation).
+function coreName(name: string): string {
+  return name
+    .toLowerCase()
+    .replace(/[^a-z0-9àâäéèêëïîôöùûüç\s]/gi, " ")
+    .replace(/\b(se|sa|plc|inc|ltd|corp|nv|ag|spa|llc)\b/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+// Does the title/summary actually mention the company? Requires the FULL core
+// name (e.g. "schneider electric", not bare "schneider") — a single proper-noun
+// token is too loose for surname-like names (matched a baseball article on
+// "schneider"). The LLM summaries reliably contain the full official name.
+// Tradeoff: drops articles that reference a company only by a partial name.
+function mentionsCompany(haystack: string, companyNames: string[]): boolean {
+  const hay = haystack.toLowerCase();
+  for (const name of companyNames) {
+    const core = coreName(name);
+    if (core && hay.includes(core)) return true;
+  }
+  return false;
+}
+
+// Distinctive-token signature of a headline (company name + source label stripped).
+function titleSignature(title: string, companyNames: string[]): Set<string> {
+  let t = title.toLowerCase();
+  t = t.replace(/\s+[–\-|]\s+[^–\-|]*$/u, " "); // trailing " – Bloomberg" / " | Seeking Alpha"
+  t = t.replace(/\([^)]*\)/g, " "); // (TTE:NYSE)
+  t = t.replace(/\$/g, " ").replace(/(\d)\s*b\b/g, "$1 billion").replace(/(\d)\s*m\b/g, "$1 million");
+  for (const name of companyNames) {
+    const core = coreName(name);
+    if (core) t = t.split(core).join(" ");
+  }
+  const tokens = t
+    .replace(/[^a-z0-9\s]/gi, " ")
+    .split(/\s+/)
+    .filter((w) => w.length >= 3 && !STOPWORDS.has(w));
+  return new Set(tokens);
+}
+
+// Collapse near-identical stories from different sources. Keeps the best source
+// tier (tiebreak exaScore, then recency); merges companyKeys so attribution
+// survives. Conservative: requires ≥3 shared distinctive tokens AND ≥0.6 containment.
+function dedupeByStory(
+  pending: Map<string, PendingCluster>,
+  workList: Map<string, CompanyEntry>,
+): number {
+  const keys = [...pending.keys()];
+  const sig = new Map<string, Set<string>>();
+  for (const key of keys) {
+    const pc = pending.get(key)!;
+    const names = [...pc.companyKeys].map((ck) => workList.get(ck)?.query ?? "").filter(Boolean);
+    sig.set(key, titleSignature(pc.result.title ?? "", names));
+  }
+
+  let dropped = 0;
+  for (let i = 0; i < keys.length; i++) {
+    const keyA = keys[i];
+    if (!pending.has(keyA)) continue;
+    for (let j = i + 1; j < keys.length; j++) {
+      const keyB = keys[j];
+      if (!pending.has(keyB)) continue;
+      const a = sig.get(keyA)!;
+      const b = sig.get(keyB)!;
+      if (a.size === 0 || b.size === 0) continue;
+      let inter = 0;
+      for (const x of a) if (b.has(x)) inter++;
+      const containment = inter / Math.min(a.size, b.size);
+      if (inter < 3 || containment < 0.6) continue;
+
+      const pcA = pending.get(keyA)!;
+      const pcB = pending.get(keyB)!;
+      const tierA = sourceTier(hostname(pcA.result.url ?? ""));
+      const tierB = sourceTier(hostname(pcB.result.url ?? ""));
+      let dropKey: string;
+      if (tierA !== tierB) dropKey = tierA < tierB ? keyB : keyA;
+      else if (pcA.exaScore !== pcB.exaScore) dropKey = pcA.exaScore >= pcB.exaScore ? keyB : keyA;
+      else {
+        const da = new Date(pcA.result.publishedDate ?? 0).getTime();
+        const db = new Date(pcB.result.publishedDate ?? 0).getTime();
+        dropKey = da >= db ? keyB : keyA;
+      }
+      const keepKey = dropKey === keyA ? keyB : keyA;
+      pending.get(dropKey)!.companyKeys.forEach((ck) => pending.get(keepKey)!.companyKeys.add(ck));
+      pending.delete(dropKey);
+      dropped++;
+      if (dropKey === keyA) break; // A removed — stop comparing it
+    }
+  }
+  return dropped;
+}
+
+// ---------------------------------------------------------------------------
+// Main: runNewsFanout (two-phase, globally deduped, batched DB writes)
+//
+// Subrequest budget (free plan cap = 50):
+//   1  holdings query
+//   N  Exa calls (one per distinct company, N=4 today)
+//   1  batch cluster upsert (all at once)
+//   1  batch match upsert
+//   1  sweep
+//   ─────────────────
+//   N+4  total  (8 today, well under 50)
+// ---------------------------------------------------------------------------
+
+interface PendingCluster {
+  result: ExaSearchResult; // raw search result — summary fetched later via Contents API
+  exaScore: number;
+  companyKeys: Set<string>;
+  tickers: Set<string>;
+  isins: Set<string>;
+}
+
+interface ClusterAccum {
+  publishedAt: string;
+  exaScore: number;
+  companyKeys: Set<string>;
+}
+
 export async function runNewsFanout(env: Env): Promise<{
-  portfoliosProcessed: number;
-  portfoliosSkipped: number;
+  distinctCompaniesQueried: number;
   clustersUpserted: number;
   matchesUpserted: number;
+  undatedDropped: number;
+  lowValueDropped: number;
+  offTargetDropped: number;
+  secondarySearches: number;
+  dedupedAway: number;
   expiredSwept: number;
   errors: string[];
 }> {
-  if (!env.MARKETAUX_API_KEY) {
-    console.warn("[news] MARKETAUX_API_KEY not set — skipping news fanout");
+  const errors: string[] = [];
+
+  if (!env.EXA_SEARCH) {
+    console.warn("[news] EXA_SEARCH not set — skipping news fanout");
     return {
-      portfoliosProcessed: 0,
-      portfoliosSkipped: 0,
+      distinctCompaniesQueried: 0,
       clustersUpserted: 0,
       matchesUpserted: 0,
+      undatedDropped: 0,
+      lowValueDropped: 0,
+      offTargetDropped: 0,
+      secondarySearches: 0,
+      dedupedAway: 0,
       expiredSwept: 0,
-      errors: ["MARKETAUX_API_KEY not configured"],
+      errors: ["EXA_SEARCH not configured"],
     };
   }
 
+  const apiKey = env.EXA_SEARCH;
   const client: AnySupabaseClient = createClient(env.SUPABASE_URL, env.SUPABASE_SERVICE_KEY);
 
-  // Fetch all portfolios
-  const { data: portfoliosData, error: portfoliosError } = await client
-    .from("portfolios")
-    .select("id,user_id");
+  // --- Build global work-list (1 subrequest) ---------------------------------
+  const workList = await buildGlobalWorkList(client);
 
-  if (portfoliosError || !portfoliosData) {
-    throw new Error(`[news] failed to fetch portfolios: ${portfoliosError?.message}`);
-  }
+  const allCompanies = [...workList.values()].sort((a, b) =>
+    a.canonicalKey < b.canonicalKey ? -1 : a.canonicalKey > b.canonicalKey ? 1 : 0,
+  );
+  const cursor = 0;
+  const companies = allCompanies.slice(cursor, cursor + FANOUT_WINDOW);
 
-  const portfolios = portfoliosData as PortfolioRow[];
+  const startPublishedDate = new Date(Date.now() - NEWS_WINDOW_MS).toISOString();
+  const userLocation = deriveUserLocation(workList);
 
-  // published_after = 48h ago
-  // Marketaux expects "YYYY-MM-DDTHH:MM:SS" — no milliseconds, no Z suffix.
-  const publishedAfter = new Date(Date.now() - CLUSTER_TTL_HOURS * 3_600_000)
-    .toISOString()
-    .replace(/\.\d{3}Z$/, "");
+  // --- Phase 1: FETCH — collect results, no DB writes (N..2N subrequests) ----
+  const pendingClusters = new Map<string, PendingCluster>();
+  let undatedDropped = 0;
+  let lowValueDropped = 0;
+  let offTargetDropped = 0;
+  let secondarySearches = 0;
 
-  let portfoliosProcessed = 0;
-  let portfoliosSkipped = 0;
-  let clustersUpserted = 0;
-  let matchesUpserted = 0;
-  const errors: string[] = [];
+  // Filter a result list for one company and add survivors to pendingClusters.
+  // Returns the count of on-target (company-mentioning) results kept.
+  const ingest = (
+    results: ExaSearchResult[],
+    company: CompanyEntry,
+    tickerArr: string[],
+    isinArr: string[],
+  ): number => {
+    let kept = 0;
+    for (const result of results) {
+      if (!result.publishedDate || !result.url) {
+        undatedDropped++;
+        continue;
+      }
+      if (isLowValuePage(result.title ?? "", result.url)) {
+        lowValueDropped++;
+        continue;
+      }
+      // Drift filter on the TITLE only (summary not fetched yet — see Contents step).
+      if (!mentionsCompany(result.title ?? "", [company.query])) {
+        offTargetDropped++;
+        continue;
+      }
 
-  for (const portfolio of portfolios) {
-    const portfolioId = portfolio.id;
+      kept++;
+      const clusterKey = result.id ?? result.url;
+      const exaScore = typeof result.score === "number" ? result.score : 0.5;
+      const existing = pendingClusters.get(clusterKey);
+      if (existing) {
+        existing.exaScore = Math.max(existing.exaScore, exaScore);
+        existing.companyKeys.add(company.canonicalKey);
+        tickerArr.forEach((t) => existing.tickers.add(t));
+        isinArr.forEach((i) => existing.isins.add(i));
+      } else {
+        pendingClusters.set(clusterKey, {
+          result,
+          exaScore,
+          companyKeys: new Set([company.canonicalKey]),
+          tickers: new Set(tickerArr),
+          isins: new Set(isinArr),
+        });
+      }
+    }
+    return kept;
+  };
 
+  await runWithConcurrency(companies, FETCH_CONCURRENCY, async (company) => {
+    const tickers = new Set<string>();
+    const isins = new Set<string>();
+    for (const holder of company.holders.values()) {
+      holder.tickers.forEach((t) => tickers.add(t));
+      holder.isins.forEach((i) => isins.add(i));
+    }
+    const tickerArr = [...tickers];
+    const isinArr = [...isins];
+    // News-intent phrasing nudges ranking toward articles over reference pages.
+    const newsQuery = `${company.query} latest news and developments`;
+
+    // Primary search — premium allowlist.
+    let primary: ExaSearchResponse;
     try {
-      // Build query context for this portfolio
-      const ctx = await buildPortfolioNewsContext(client, portfolioId);
-      const params = buildMarketauxParams(ctx, publishedAfter);
-
-      if (!params) {
-        portfoliosSkipped++;
-        continue;
-      }
-
-      // Fetch from Marketaux
-      let response: MarketauxResponse;
-      try {
-        response = await fetchMarketaux(env.MARKETAUX_API_KEY, params);
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        console.error(`[news] Marketaux fetch failed for portfolio ${portfolioId}:`, msg);
-        errors.push(`portfolio ${portfolioId}: ${msg}`);
-        portfoliosSkipped++;
-        continue;
-      }
-
-      if (response.error) {
-        const msg = response.error.message ?? response.error.code ?? "unknown error";
-        console.error(`[news] Marketaux API error for portfolio ${portfolioId}:`, msg);
-        errors.push(`portfolio ${portfolioId}: Marketaux error ${msg}`);
-        portfoliosSkipped++;
-        continue;
-      }
-
-      const articles = response.data ?? [];
-      if (articles.length === 0) {
-        portfoliosProcessed++;
-        continue;
-      }
-
-      // Each top-level article in data[] is its own cluster head.
-      // article.similar[] contains inline sibling articles (see-also).
-      // We upsert each cluster head directly — no pre-grouping step needed.
-      for (const article of articles) {
-        if (!article.uuid && !article.url) continue;
-
-        const clusterId = await upsertCluster(client, article);
-        if (!clusterId) continue;
-        clustersUpserted++;
-
-        // Compute relevance score for this cluster vs the portfolio
-        const similarArticles: MarketauxArticle[] = Array.isArray(article.similar)
-          ? article.similar
-          : [];
-        const clusterEntities = extractClusterEntities([article, ...similarArticles]);
-        const publishedAt = article.published_at ?? new Date().toISOString();
-        const { score, matchReason } = computeMatchScore(clusterEntities, ctx, publishedAt);
-
-        // Only store matches with non-zero score
-        if (score === 0) continue;
-
-        const { error: matchError } = await client.from("portfolio_news_matches").upsert(
-          {
-            portfolio_id: portfolioId,
-            cluster_id: clusterId,
-            score,
-            match_reason: matchReason,
-          },
-          { onConflict: "portfolio_id,cluster_id" },
-        );
-
-        if (matchError) {
-          console.error(
-            `[news] match upsert failed for portfolio ${portfolioId} cluster ${clusterId}:`,
-            matchError.message,
-          );
-        } else {
-          matchesUpserted++;
-        }
-      }
-
-      portfoliosProcessed++;
+      primary = await exaSearchNews(apiKey, newsQuery, startPublishedDate, userLocation, NEWS_INCLUDE_DOMAINS);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      console.error(`[news] unexpected error for portfolio ${portfolioId}:`, msg);
-      errors.push(`portfolio ${portfolioId}: ${msg}`);
-      portfoliosSkipped++;
+      console.error(`[news] Exa primary failed for "${company.query}":`, msg);
+      errors.push(`${company.canonicalKey}: ${msg}`);
+      return;
+    }
+    if (primary.error) {
+      console.error(`[news] Exa API error for "${company.query}":`, primary.error);
+      errors.push(`${company.canonicalKey}: Exa error ${primary.error}`);
+      return;
+    }
+    const onTarget = ingest(primary.results ?? [], company, tickerArr, isinArr);
+
+    // Tiered fallback — too few on-target premium results → broaden once.
+    if (onTarget < MIN_ONTARGET) {
+      secondarySearches++;
+      try {
+        const secondary = await exaSearchNews(
+          apiKey, newsQuery, startPublishedDate, userLocation, NEWS_INCLUDE_DOMAINS_SECONDARY,
+        );
+        if (!secondary.error) ingest(secondary.results ?? [], company, tickerArr, isinArr);
+        else errors.push(`${company.canonicalKey} (secondary): Exa error ${secondary.error}`);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error(`[news] Exa secondary failed for "${company.query}":`, msg);
+        errors.push(`${company.canonicalKey} (secondary): ${msg}`);
+      }
+    }
+  });
+
+  // Collapse same-story duplicates across sources (keep best source tier).
+  const dedupedAway = dedupeByStory(pendingClusters, workList);
+
+  // --- Fetch summaries for survivors only, in the article's language ---------
+  const EN_SUMMARY_QUERY =
+    "Summarize the key business, financial, and strategic developments in this article in 2-3 sentences.";
+  const FR_SUMMARY_QUERY =
+    "Résumez les principaux développements commerciaux, financiers et stratégiques de cet article en 2 à 3 phrases.";
+
+  const survivors = [...pendingClusters.values()];
+  const summaryByUrl = new Map<string, string>();
+  const frUrls = survivors.filter((p) => isFrenchSource(hostname(p.result.url ?? ""))).map((p) => p.result.url!);
+  const enUrls = survivors.filter((p) => !isFrenchSource(hostname(p.result.url ?? ""))).map((p) => p.result.url!);
+  for (const [urls, q] of [[frUrls, FR_SUMMARY_QUERY], [enUrls, EN_SUMMARY_QUERY]] as const) {
+    if (urls.length === 0) continue;
+    try {
+      const m = await exaFetchSummaries(apiKey, urls, q);
+      for (const [u, s] of m) summaryByUrl.set(u, s);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error("[news] Exa contents (summaries) failed:", msg);
+      errors.push(`contents: ${msg}`);
     }
   }
 
-  // Sweep expired clusters (no portfolio references needed — cascade handles bridge)
+  // --- Batch cluster upsert (1 subrequest) -----------------------------------
+  const clusterRows = survivors.map((p) =>
+    buildClusterRow(p.result, [...p.tickers], [...p.isins], summaryByUrl.get(p.result.url!) ?? ""),
+  );
+  let clustersUpserted = 0;
+  const clusterMap = new Map<string, ClusterAccum>();
+
+  if (clusterRows.length > 0) {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { data: upserted, error: clusterBatchError } = await (client as any)
+      .from("news_clusters")
+      .upsert(clusterRows, { onConflict: "cluster_key" })
+      .select("id, cluster_key") as { data: Array<{ id: string; cluster_key: string }> | null; error: { message: string } | null };
+
+    if (clusterBatchError) {
+      errors.push(`batch cluster upsert: ${clusterBatchError.message}`);
+      console.error("[news] batch cluster upsert failed:", clusterBatchError.message);
+    } else {
+      for (const row of upserted ?? []) {
+        const pending = pendingClusters.get(row.cluster_key);
+        if (pending) {
+          clusterMap.set(row.id, {
+            publishedAt: pending.result.publishedDate ?? new Date().toISOString(),
+            exaScore: pending.exaScore,
+            companyKeys: pending.companyKeys,
+          });
+        }
+      }
+      clustersUpserted = clusterMap.size;
+    }
+  }
+
+  // --- Phase 2: SCORE + MATCH — build matchAccum (pure JS, 0 subrequests) ---
+  const matchAccum = new Map<string, Map<string, { keys: Set<string>; tickers: Set<string> }>>();
+
+  for (const [clusterId, cluster] of clusterMap) {
+    for (const ck of cluster.companyKeys) {
+      const entry = workList.get(ck);
+      if (!entry) continue;
+      for (const [portfolioId, holder] of entry.holders) {
+        let pMap = matchAccum.get(portfolioId);
+        if (!pMap) {
+          pMap = new Map();
+          matchAccum.set(portfolioId, pMap);
+        }
+        let acc = pMap.get(clusterId);
+        if (!acc) {
+          acc = { keys: new Set(), tickers: new Set() };
+          pMap.set(clusterId, acc);
+        }
+        acc.keys.add(ck);
+        holder.tickers.forEach((t) => acc!.tickers.add(t));
+      }
+    }
+  }
+
+  // --- Batch match upsert (1 subrequest) ------------------------------------
+  let matchesUpserted = 0;
+  const matchRows: Array<{
+    portfolio_id: string;
+    cluster_id: string;
+    score: number;
+    match_reason: object;
+  }> = [];
+
+  for (const [portfolioId, pMap] of matchAccum) {
+    for (const [clusterId, acc] of pMap) {
+      const cluster = clusterMap.get(clusterId);
+      if (!cluster) continue;
+      const companyNames = [...acc.keys]
+        .map((ck) => workList.get(ck)?.query)
+        .filter((n): n is string => Boolean(n));
+
+      matchRows.push({
+        portfolio_id: portfolioId,
+        cluster_id: clusterId,
+        score: computeMatchScore(cluster.exaScore, cluster.publishedAt, acc.keys.size),
+        match_reason: {
+          matched_tickers: [...acc.tickers],
+          matched_company_names: companyNames,
+        },
+      });
+    }
+  }
+
+  if (matchRows.length > 0) {
+    const { error: matchBatchError } = await client
+      .from("portfolio_news_matches")
+      .upsert(matchRows, { onConflict: "portfolio_id,cluster_id" });
+
+    if (matchBatchError) {
+      errors.push(`batch match upsert: ${matchBatchError.message}`);
+      console.error("[news] batch match upsert failed:", matchBatchError.message);
+    } else {
+      matchesUpserted = matchRows.length;
+    }
+  }
+
+  // --- Sweep expired clusters (1 subrequest) --------------------------------
   const { count: expiredSwept, error: sweepError } = await client
     .from("news_clusters")
     .delete({ count: "exact" })
@@ -604,10 +819,14 @@ export async function runNewsFanout(env: Env): Promise<{
   }
 
   const result = {
-    portfoliosProcessed,
-    portfoliosSkipped,
+    distinctCompaniesQueried: companies.length,
     clustersUpserted,
     matchesUpserted,
+    undatedDropped,
+    lowValueDropped,
+    offTargetDropped,
+    secondarySearches,
+    dedupedAway,
     expiredSwept: expiredSwept ?? 0,
     errors,
   };

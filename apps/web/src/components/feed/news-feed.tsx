@@ -1,9 +1,11 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
-import { Newspaper } from "lucide-react";
+import { useState, useEffect, useCallback, useMemo } from "react";
+import { Newspaper, ArrowUpDown } from "lucide-react";
 import { NewsCard, type NewsMatch } from "@/components/feed/news-card";
 import { FeedShell } from "@/components/feed/feed-shell";
+import { CategoryPills } from "@/components/feed/category-pills";
+import { ExpandableSearch } from "@/components/feed/expandable-search";
 
 const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_URL ??
@@ -18,10 +20,15 @@ interface NewsFeedProps {
   limit?: number;
 }
 
-export function NewsFeed({ portfolioId, limit = 20 }: NewsFeedProps) {
+export function NewsFeed({ portfolioId, limit = 50 }: NewsFeedProps) {
   const [matches, setMatches] = useState<NewsMatch[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  // Filter / sort / search state
+  const [activeFilter, setActiveFilter] = useState("all");
+  const [dateSort, setDateSort] = useState<"newest" | "oldest">("newest");
+  const [search, setSearch] = useState("");
 
   const fetchNews = useCallback(
     async (showLoadingSpinner = false) => {
@@ -53,22 +60,98 @@ export function NewsFeed({ portfolioId, limit = 20 }: NewsFeedProps) {
     [portfolioId, limit],
   );
 
-  useEffect(() => {
-    fetchNews(true);
-  }, [fetchNews]);
-
+  useEffect(() => { fetchNews(true); }, [fetchNews]);
   useEffect(() => {
     const id = setInterval(() => fetchNews(false), POLL_INTERVAL_MS);
     return () => clearInterval(id);
   }, [fetchNews]);
-
   useEffect(() => {
     const handler = () => fetchNews(false);
     window.addEventListener("focus", handler);
     return () => window.removeEventListener("focus", handler);
   }, [fetchNews]);
 
-  const subtitle = matches.length > 0 ? `${matches.length} articles` : undefined;
+  // Build ticker → company name map from match_reason.matched_company_names
+  const tickerToName = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const m of matches) {
+      const tickers = m.match_reason.matched_tickers ?? [];
+      const names = m.match_reason.matched_company_names ?? [];
+      tickers.forEach((t, i) => { if (names[i]) map.set(t, names[i]); });
+    }
+    return map;
+  }, [matches]);
+
+  // Derive unique company tabs — id=ticker (for filtering), label=company name
+  const companyTabs = useMemo(() => {
+    const tickers = new Set(matches.flatMap((m) => m.match_reason.matched_tickers ?? []));
+    const sorted = [...tickers].sort();
+    return [
+      { id: "all", label: "All" },
+      ...sorted.map((t) => ({ id: t, label: tickerToName.get(t) ?? t })),
+    ] as const;
+  }, [matches, tickerToName]);
+
+  // Client-side filter → search → sort
+  const displayedMatches = useMemo(() => {
+    let list = matches;
+
+    if (activeFilter !== "all") {
+      list = list.filter((m) => m.match_reason.matched_tickers?.includes(activeFilter));
+    }
+
+    if (search.trim()) {
+      const q = search.toLowerCase();
+      list = list.filter((m) => {
+        const a = m.news_clusters.primary_article;
+        return a.title.toLowerCase().includes(q) || a.source.toLowerCase().includes(q);
+      });
+    }
+
+    list = [...list].sort((a, b) => {
+      const ta = new Date(a.news_clusters.primary_article.published_at).getTime();
+      const tb = new Date(b.news_clusters.primary_article.published_at).getTime();
+      return dateSort === "newest" ? tb - ta : ta - tb;
+    });
+
+    return list;
+  }, [matches, activeFilter, search, dateSort]);
+
+  const isFiltered = activeFilter !== "all" || search.trim() !== "";
+  const subtitle =
+    matches.length > 0
+      ? isFiltered
+        ? `${displayedMatches.length} of ${matches.length} articles`
+        : `${matches.length} articles`
+      : undefined;
+
+  // rightSlot: search + sort alongside the refresh button
+  const rightSlot = matches.length > 0 ? (
+    <>
+      <ExpandableSearch value={search} onChange={setSearch} placeholder="Search…" />
+      <button
+        type="button"
+        onClick={() => setDateSort((s) => (s === "newest" ? "oldest" : "newest"))}
+        title={dateSort === "newest" ? "Showing newest first" : "Showing oldest first"}
+        className="grid h-7 w-7 shrink-0 place-items-center rounded-md text-foreground-muted hover:bg-surface-2 hover:text-foreground"
+      >
+        <ArrowUpDown className="h-3.5 w-3.5" />
+      </button>
+    </>
+  ) : undefined;
+
+  // headerSlot: company filter pills only
+  const headerSlot = matches.length > 0 ? (
+    <div className="min-w-0 overflow-hidden">
+      <CategoryPills
+        tabs={companyTabs}
+        activeTab={activeFilter}
+        onChange={setActiveFilter}
+        layoutId="news-filter-pill"
+        ariaLabel="Filter by company"
+      />
+    </div>
+  ) : undefined;
 
   if (loading) {
     return <FeedShell title="Headlines" liveColor="red" loading>{null}</FeedShell>;
@@ -99,10 +182,23 @@ export function NewsFeed({ portfolioId, limit = 20 }: NewsFeedProps) {
   }
 
   return (
-    <FeedShell title="Headlines" liveColor="red" subtitle={subtitle} onRefresh={() => fetchNews(true)}>
-      {matches.map((match, i) => (
-        <NewsCard key={match.news_clusters.id ?? i} match={match} />
-      ))}
+    <FeedShell
+      title="Headlines"
+      liveColor="red"
+      subtitle={subtitle}
+      onRefresh={() => fetchNews(true)}
+      rightSlot={rightSlot}
+      headerSlot={headerSlot}
+    >
+      {displayedMatches.length === 0 ? (
+        <li className="px-4 py-8 text-center text-sm text-foreground-muted">
+          No articles match your filter.
+        </li>
+      ) : (
+        displayedMatches.map((match, i) => (
+          <NewsCard key={match.news_clusters.id ?? i} match={match} />
+        ))
+      )}
     </FeedShell>
   );
 }

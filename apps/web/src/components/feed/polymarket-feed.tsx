@@ -1,10 +1,11 @@
 "use client";
 
-import { useState, useEffect, useCallback, type ReactNode } from "react";
+import { useState, useEffect, useCallback, useMemo, type ReactNode } from "react";
 import { TrendingUp, Pin, CalendarDays } from "lucide-react";
 import { formatDistanceToNow, isPast } from "date-fns";
 import { FeedShell } from "@/components/feed/feed-shell";
-import { CategoryPills, type PolymarketTabId } from "@/components/feed/category-pills";
+import { CategoryPills, POLYMARKET_TABS, type PolymarketTabId } from "@/components/feed/category-pills";
+import { ExpandableSearch } from "@/components/feed/expandable-search";
 
 const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_URL ??
@@ -244,6 +245,7 @@ function MarketRow({
 
 export function PolymarketFeed({ portfolioId }: PolymarketFeedProps) {
   const [activeTab, setActiveTab] = useState<PolymarketTabId>("personalized");
+  const [search, setSearch] = useState("");
 
   // Personalized tab state
   const [personalizedData, setPersonalizedData] = useState<PersonalizedFeedData>({
@@ -399,7 +401,30 @@ export function PolymarketFeed({ portfolioId }: PolymarketFeedProps) {
     subtitle = parts.join(" · ");
   }
 
-  const pills = <CategoryPills activeTab={activeTab} onChange={setActiveTab} />;
+  const headerSlot = (
+    <div className="flex flex-col gap-2">
+      <div className="flex items-center gap-2">
+        <div className="min-w-0 flex-1 overflow-hidden">
+          <CategoryPills
+            tabs={POLYMARKET_TABS}
+            activeTab={activeTab}
+            onChange={setActiveTab}
+            layoutId="polymarket-category-pill"
+            ariaLabel="Market category"
+          />
+        </div>
+        <ExpandableSearch
+          value={search}
+          onChange={setSearch}
+          placeholder="Search markets…"
+        />
+      </div>
+    </div>
+  );
+
+  // Client-side search filter applied to displayed markets
+  const filterMarket = (question: string) =>
+    !search.trim() || question.toLowerCase().includes(search.toLowerCase());
 
   // Body content (only rendered when not showing skeletons)
   let body: ReactNode;
@@ -424,9 +449,15 @@ export function PolymarketFeed({ portfolioId }: PolymarketFeedProps) {
       </li>
     );
   } else if (isPersonalized) {
+    const pinnedFiltered = personalizedData.pinned.filter((m) =>
+      filterMarket(m.polymarket_markets.question),
+    );
+    const rotatingFiltered = personalizedData.rotating.filter((m) =>
+      filterMarket(m.polymarket_markets.question),
+    );
     body = (
       <>
-        {personalizedData.pinned.map((match) => (
+        {pinnedFiltered.map((match) => (
           <MarketRow
             key={match.polymarket_markets.condition_id}
             market={match.polymarket_markets}
@@ -434,7 +465,7 @@ export function PolymarketFeed({ portfolioId }: PolymarketFeedProps) {
             reason={match.reason}
           />
         ))}
-        {personalizedData.rotating.map((match) => (
+        {rotatingFiltered.map((match) => (
           <MarketRow
             key={match.polymarket_markets.condition_id}
             market={match.polymarket_markets}
@@ -442,17 +473,29 @@ export function PolymarketFeed({ portfolioId }: PolymarketFeedProps) {
             reason={match.reason}
           />
         ))}
+        {pinnedFiltered.length === 0 && rotatingFiltered.length === 0 && (
+          <li className="px-4 py-8 text-center text-sm text-foreground-muted">
+            No markets match your search.
+          </li>
+        )}
       </>
     );
   } else {
-    body = categoryMarkets.map((market) => (
-      <MarketRow
-        key={market.condition_id}
-        market={market}
-        isPinned={false}
-        reason={null}
-      />
-    ));
+    const filtered = categoryMarkets.filter((m) => filterMarket(m.question));
+    body = filtered.length > 0 ? (
+      filtered.map((market) => (
+        <MarketRow
+          key={market.condition_id}
+          market={market}
+          isPinned={false}
+          reason={null}
+        />
+      ))
+    ) : (
+      <li className="px-4 py-8 text-center text-sm text-foreground-muted">
+        No markets match your search.
+      </li>
+    );
   }
 
   return (
@@ -461,7 +504,7 @@ export function PolymarketFeed({ portfolioId }: PolymarketFeedProps) {
       liveColor="green"
       liveLabel="Polymarket"
       subtitle={subtitle}
-      headerSlot={pills}
+      headerSlot={headerSlot}
       onRefresh={handleRefresh}
       loading={showSkeleton}
     >
