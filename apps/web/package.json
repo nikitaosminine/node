@@ -5,6 +5,7 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
+    "build:cf": "node node_modules/@opennextjs/cloudflare/dist/cli/index.js build && node -e \"require('fs').copyFileSync('.open-next/worker.js','.open-next/assets/_worker.js')\"",
     "start": "next start",
     "lint": "eslint ."
   },
