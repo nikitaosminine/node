@@ -1,12 +1,5 @@
 import type { NextConfig } from "next";
-import path from "path";
 
-const nextConfig: NextConfig = {
-  // Pin the workspace root to the monorepo root (apps/web/../..). Without this,
-  // Next.js walks up the tree, finds a stray lockfile in the user's home dir,
-  // and infers the wrong root. This keeps Node_assets/ (used by a relative SVG
-  // import in src/components/portfolio-chart.tsx) inside the traced root.
-  outputFileTracingRoot: path.join(__dirname, "..", ".."),
-};
+const nextConfig: NextConfig = {};
 
 export default nextConfig;
