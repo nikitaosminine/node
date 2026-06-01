@@ -14,7 +14,10 @@ SUPABASE_URL = "https://sfqowvpuzsqgmwlecgdx.supabase.co"
 # wrangler secret put GROK_NORMALIZATION_API_KEY
 # wrangler secret put FRED_API_KEY
 # wrangler secret put EXA_SEARCH
+# wrangler secret put GEMINI_API_KEY   (daily/weekly recaps)
 # Optional:
+# wrangler secret put GEMINI_MODEL  (default: gemini-3.5-flash)
+# wrangler secret put GEMINI_API_BASE_URL  (default: https://generativelanguage.googleapis.com/v1beta)
 # wrangler secret put MAIN_AGENT_SYSTEM_PROMPT
 # wrangler secret put SUB_AGENT_SYSTEM_PROMPT
 # wrangler secret put SUB_AGENT_PLANNING_SYSTEM_PROMPT
@@ -33,6 +36,10 @@ queue = "snapshot-rebuild-queue"
 binding = "GEOGRAPHY_QUEUE"
 queue = "geography-queue"
 
+[[queues.producers]]
+binding = "RECAP_QUEUE"
+queue = "recap-queue"
+
 [[queues.consumers]]
 queue = "agent-runs"
 
@@ -49,6 +56,12 @@ max_batch_size = 1
 max_batch_timeout = 5
 max_retries = 3
 
+[[queues.consumers]]
+queue = "recap-queue"
+max_batch_size = 1
+max_batch_timeout = 5
+max_retries = 2
+
 [triggers]
 # Hourly cron for scheduled fanout. Actual per-portfolio run times are selected
 # in code based on user timezone + effective runs/day setting.
@@ -57,7 +70,7 @@ max_retries = 3
 crons = [
   "5 * * * *",
   "30 6 * * 2-6",
-  "30 16 * * 1-5",
-  "30 17 * * 1-5",
-  "0 21 * * 1-5",
+  "30 16 * * 2-6",
+  "30 17 * * 2-6",
+  "0 21 * * 2-6",
 ]

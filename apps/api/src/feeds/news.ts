@@ -64,7 +64,7 @@ const FANOUT_WINDOW = 200;
 
 // Source-quality allowlist: curated premium financial/news outlets. An allowlist
 // (not blocklist) decisively cuts the long tail of quote pages / SEO junk.
-const NEWS_INCLUDE_DOMAINS = [
+export const NEWS_INCLUDE_DOMAINS = [
   "ft.com", "wsj.com", "bloomberg.com", "economist.com", "reuters.com",
   "apnews.com", "barrons.com", "marketwatch.com", "cnbc.com", "seekingalpha.com",
   "morningstar.com", "imf.org", "worldbank.org", "bis.org", "ecb.europa.eu",
@@ -76,7 +76,7 @@ const NEWS_INCLUDE_DOMAINS = [
 
 // Secondary (broader / small-cap-friendly) allowlist — only searched when the
 // premium list yields too few on-target results for a company. Tune as needed.
-const NEWS_INCLUDE_DOMAINS_SECONDARY = [
+export const NEWS_INCLUDE_DOMAINS_SECONDARY = [
   "investir.lesechos.fr", "capital.fr", "usinenouvelle.com", "agefi.fr",
   "tradingsat.com", "bfmtv.com",
 ];

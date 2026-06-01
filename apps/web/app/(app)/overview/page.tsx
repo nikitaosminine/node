@@ -8,6 +8,7 @@ import { supabase } from "@/integrations/supabase/client";
 import { PortfolioChart } from "@/components/portfolio-chart";
 import { NewsFeed } from "@/components/feed/news-feed";
 import { PolymarketFeed } from "@/components/feed/polymarket-feed";
+import { RecapInsightsRow } from "@/components/recaps/recap-insights-row";
 import {
   convertCurrency,
   fetchFxRates,
@@ -407,6 +408,9 @@ function OverviewContent({ portfolioId }: { portfolioId: string }) {
           <PortfolioChart portfolioId={portfolioId} currency={portfolioCurrency} />
         </div>
       </div>
+
+      {/* Daily & weekly recap + insights placeholder */}
+      <RecapInsightsRow portfolioId={portfolioId} />
 
       {/* Feed 2-column grid */}
       <div className="grid grid-cols-1 items-start gap-6 md:grid-cols-2">
