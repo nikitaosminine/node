@@ -19,6 +19,8 @@ import {
 } from "./feeds/etf-constituents";
 import { runNewsFanout } from "./feeds/news";
 import { runPolymarketFanout, NON_FINANCIAL_RE, TAG_IDS, isShortTermMarket } from "./feeds/polymarket";
+import { generateRecap } from "./feeds/recaps";
+import type { RecapQueueMessage, RecapType } from "./feeds/recap-types";
 
 export interface Env {
   SUPABASE_URL: string;
@@ -27,6 +29,7 @@ export interface Env {
   AGENT_RUNS_QUEUE: Queue<AgentRunQueueMessage>;
   SNAPSHOT_QUEUE: Queue<SnapshotQueueMessage>;
   GEOGRAPHY_QUEUE: Queue<GeographyQueueMessage>;
+  RECAP_QUEUE: Queue<RecapQueueMessage>;
   GROK_MAIN_API_KEY?: string;
   GROK_SUB_API_KEY?: string;
   GROK_NORMALIZATION_API_KEY?: string;
@@ -38,6 +41,9 @@ export interface Env {
   FRED_API_KEY?: string;
   EXA_SEARCH?: string;
   POLYMARKET_GAMMA_BASE_URL?: string;
+  GEMINI_API_KEY?: string;
+  GEMINI_MODEL?: string;
+  GEMINI_API_BASE_URL?: string;
 }
 
 const CORS_HEADERS = {
@@ -406,7 +412,11 @@ interface GeographyQueueMessage {
   reason?: "holding_change" | "transaction_import" | "snapshot_rebuild" | "manual_retry";
 }
 
-type WorkerQueueMessage = AgentRunQueueMessage | SnapshotQueueMessage | GeographyQueueMessage;
+type WorkerQueueMessage =
+  | AgentRunQueueMessage
+  | SnapshotQueueMessage
+  | GeographyQueueMessage
+  | RecapQueueMessage;
 
 const STALE_GEOGRAPHY_RUNNING_JOB_MS = 15 * 60 * 1000;
 
@@ -1958,6 +1968,10 @@ function isGeographyQueueMessage(message: WorkerQueueMessage): message is Geogra
   return "type" in message && message.type === "geography_research";
 }
 
+function isRecapQueueMessage(message: WorkerQueueMessage): message is RecapQueueMessage {
+  return "recapId" in message;
+}
+
 async function fetchHistoricalPrices(
   ticker: string,
   firstDate: Date,
@@ -2940,15 +2954,26 @@ async function recomputeSnapshots(env: Env, portfolioId: string): Promise<void> 
     securities_value: number;
   }> = [];
 
-  const cursor = new Date(firstDate);
-  while (cursor <= today) {
-    const date = toDateString(cursor);
+  // Collect the union of all real trading days present in the price maps
+  // (Mon–Fri only, no weekends), bounded by [firstDate, today]. A calendar
+  // cursor would generate weekend rows and miss any market-specific holidays;
+  // price_history is the authoritative set of dates prices actually exist.
+  const tradingDaySet = new Set<string>();
+  const todayStr = toDateString(today);
+  const firstDateStr = toDateString(firstDate);
+  for (const dateMap of pricesByTicker.values()) {
+    for (const d of dateMap.keys()) {
+      if (d >= firstDateStr && d <= todayStr) tradingDaySet.add(d);
+    }
+  }
+  const tradingDays = Array.from(tradingDaySet).sort();
+
+  for (const date of tradingDays) {
     snapshots.push({
       portfolio_id: portfolioId,
       date,
       ...computeSnapshotForDate(txns, pricesByTicker, date),
     });
-    cursor.setUTCDate(cursor.getUTCDate() + 1);
   }
   console.log("[recompute] snapshots built:", snapshots.length);
 
@@ -2962,19 +2987,32 @@ async function recomputeSnapshots(env: Env, portfolioId: string): Promise<void> 
   }
 }
 
-async function appendTodaySnapshot(env: Env, portfolioId: string): Promise<void> {
+// Returns the trading day the snapshot was written for, or null if no price
+// data was available (e.g. called on a public holiday with no close yet).
+// The date is derived from the latest trading day present in the fetched
+// price maps — NOT from the wall-clock — so a misfired cron (e.g. Sunday)
+// writes Friday's snapshot and never creates a weekend row.
+async function appendTodaySnapshot(env: Env, portfolioId: string): Promise<string | null> {
   const txns = await loadPortfolioTransactions(env, portfolioId);
-  if (txns.length === 0) return;
+  if (txns.length === 0) return null;
 
-  const today = new Date();
-  today.setUTCHours(0, 0, 0, 0);
-  const date = toDateString(today);
   const tickers = Array.from(new Set(txns.map((txn) => txn.yahoo_ticker).filter(Boolean))) as string[];
   const { pricesByTicker, typeByTicker, currencyByTicker } = await getPricesByTicker(
     env,
     tickers,
-    new Date(Date.now() - 3 * 24 * 60 * 60 * 1000),
+    new Date(Date.now() - 5 * 24 * 60 * 60 * 1000), // lookback covers a long weekend
   );
+
+  // Find the latest trading day across all fetched price maps.
+  let latestTradingDay = "";
+  for (const dateMap of pricesByTicker.values()) {
+    for (const d of dateMap.keys()) {
+      if (d > latestTradingDay) latestTradingDay = d;
+    }
+  }
+  if (!latestTradingDay) return null;
+
+  const date = latestTradingDay;
   await db(env).from("portfolio_snapshots").upsert(
     {
       portfolio_id: portfolioId,
@@ -2984,6 +3022,7 @@ async function appendTodaySnapshot(env: Env, portfolioId: string): Promise<void>
     { onConflict: "portfolio_id,date" },
   );
   await rebuildCurrentHoldings(env, portfolioId, typeByTicker, currencyByTicker);
+  return date;
 }
 
 async function enqueueDailySnapshotsForClosedMarkets(env: Env, scheduledTime: number): Promise<void> {
@@ -3116,6 +3155,125 @@ function getHourInTimezone(now: Date, timezone: string): number {
   const parsed = Number.parseInt(hour, 10);
   if (Number.isNaN(parsed)) return now.getUTCHours();
   return parsed;
+}
+
+function getWeekdayInTimezone(now: Date, timezone: string): string {
+  try {
+    return new Intl.DateTimeFormat("en-US", { timeZone: timezone, weekday: "short" }).format(now);
+  } catch {
+    return new Intl.DateTimeFormat("en-US", { weekday: "short" }).format(now);
+  }
+}
+
+// Most recent Friday on or before `now` (UTC). Weekly recaps fire Saturday
+// morning and cover Mon–Fri, reading Friday's already-committed snapshot.
+function mostRecentFridayUTC(now: Date): Date {
+  const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+  // getUTCDay: 0=Sun … 5=Fri … 6=Sat
+  const delta = (d.getUTCDay() - 5 + 7) % 7;
+  d.setUTCDate(d.getUTCDate() - delta);
+  return d;
+}
+
+function toUtcDateString(d: Date): string {
+  return d.toISOString().slice(0, 10);
+}
+
+// Idempotent recap-row create + enqueue. Returns the recap id, or null if a
+// recap for this (portfolio, type, period_end) already exists (unique
+// constraint) — so snapshot retries / repeated cron ticks never double-generate.
+async function createAndQueueRecap(
+  env: Env,
+  params: {
+    portfolioId: string;
+    userId: string;
+    type: RecapType;
+    periodStart: string;
+    periodEnd: string;
+  },
+): Promise<string | null> {
+  const client = db(env);
+  const { data, error } = await client
+    .from("recaps")
+    .insert({
+      portfolio_id: params.portfolioId,
+      user_id: params.userId,
+      type: params.type,
+      period_start: params.periodStart,
+      period_end: params.periodEnd,
+      status: "queued",
+    })
+    .select("id")
+    .single();
+
+  if (error) {
+    if (error.code === "23505") return null; // already exists for this period
+    throw new Error(`createAndQueueRecap insert error: ${error.message}`);
+  }
+  const recapId = String(data.id);
+  if (env.RECAP_QUEUE) await env.RECAP_QUEUE.send({ recapId });
+  return recapId;
+}
+
+// Weekly fanout — runs on the hourly cron; selects portfolios where it is
+// Saturday 08:00 in the user's timezone. (Daily recaps are NOT fanned here —
+// they are chained off the snapshot commit; see the queue() handler.)
+async function runWeeklyRecapFanout(
+  env: Env,
+  options: { now: Date; dryRun?: boolean },
+): Promise<{ dryRun: boolean; checkedPortfolios: number; duePortfolios: number; queued: number; queuedIds: string[] }> {
+  const client = db(env);
+  const [{ data: portfolios, error: pErr }, { data: userSettings, error: sErr }] = await Promise.all([
+    client.from("portfolios").select("id,user_id"),
+    client.from("agent_user_settings").select("user_id,timezone"),
+  ]);
+  if (pErr) throw new Error(`weekly recap fanout portfolios error: ${pErr.message}`);
+  if (sErr) throw new Error(`weekly recap fanout settings error: ${sErr.message}`);
+
+  const tzByUser = new Map(
+    (userSettings ?? []).map((r) => [String(r.user_id), String(r.timezone ?? "Europe/Paris")]),
+  );
+
+  const friday = mostRecentFridayUTC(options.now);
+  const monday = new Date(friday);
+  monday.setUTCDate(monday.getUTCDate() - 4);
+  const periodEnd = toUtcDateString(friday);
+  const periodStart = toUtcDateString(monday);
+
+  const due = (portfolios ?? []).filter((p) => {
+    const tz = tzByUser.get(String(p.user_id)) ?? "Europe/Paris";
+    return getWeekdayInTimezone(options.now, tz) === "Sat" && getHourInTimezone(options.now, tz) === 8;
+  });
+
+  if (options.dryRun) {
+    return {
+      dryRun: true,
+      checkedPortfolios: (portfolios ?? []).length,
+      duePortfolios: due.length,
+      queued: 0,
+      queuedIds: [],
+    };
+  }
+
+  const queuedIds: string[] = [];
+  for (const p of due) {
+    const id = await createAndQueueRecap(env, {
+      portfolioId: String(p.id),
+      userId: String(p.user_id),
+      type: "weekly",
+      periodStart,
+      periodEnd,
+    });
+    if (id) queuedIds.push(id);
+  }
+
+  return {
+    dryRun: false,
+    checkedPortfolios: (portfolios ?? []).length,
+    duePortfolios: due.length,
+    queued: queuedIds.length,
+    queuedIds,
+  };
 }
 
 async function runScheduledFanout(
@@ -4918,6 +5076,90 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
       }
     }
 
+    // POST /api/_debug/run-recap-fanout
+    //   ?type=weekly                       → run the weekly cron fanout (add &dryRun=true to preview)
+    //   ?type=daily|weekly&portfolio_id=…  → generate one recap synchronously (force-regenerates)
+    if (method === "POST" && pathname === "/api/_debug/run-recap-fanout") {
+      try {
+        const type = (url.searchParams.get("type") ?? "daily") as RecapType;
+        if (type !== "daily" && type !== "weekly") {
+          return json({ error: "type must be 'daily' or 'weekly'" }, 400);
+        }
+        const portfolioId = url.searchParams.get("portfolio_id");
+
+        if (!portfolioId) {
+          // Fanout path (weekly only — daily is chained off snapshots).
+          if (type !== "weekly") {
+            return json({ error: "daily requires portfolio_id (daily is chained off snapshots)" }, 400);
+          }
+          const result = await runWeeklyRecapFanout(env, {
+            now: new Date(),
+            dryRun: url.searchParams.get("dryRun") === "true",
+          });
+          return json(result, 200);
+        }
+
+        // Single-portfolio synchronous generation (force-regenerate for testing).
+        const client = db(env);
+        const { data: pf } = await client
+          .from("portfolios")
+          .select("user_id")
+          .eq("id", portfolioId)
+          .maybeSingle();
+        if (!pf?.user_id) return json({ error: "portfolio not found" }, 404);
+
+        let periodStart: string;
+        let periodEnd: string;
+        if (type === "weekly") {
+          const friday = mostRecentFridayUTC(new Date());
+          const monday = new Date(friday);
+          monday.setUTCDate(monday.getUTCDate() - 4);
+          periodEnd = toUtcDateString(friday);
+          periodStart = toUtcDateString(monday);
+        } else {
+          // Allow overriding period_end for testing (e.g. passing a specific trading day
+          // when running the debug endpoint on a weekend).
+          const overridePeriodEnd = url.searchParams.get("period_end");
+          periodEnd = overridePeriodEnd ?? toUtcDateString(new Date());
+          periodStart = periodEnd;
+        }
+
+        await client
+          .from("recaps")
+          .delete()
+          .eq("portfolio_id", portfolioId)
+          .eq("type", type)
+          .eq("period_end", periodEnd);
+        const { data: created, error: createErr } = await client
+          .from("recaps")
+          .insert({
+            portfolio_id: portfolioId,
+            user_id: String(pf.user_id),
+            type,
+            period_start: periodStart,
+            period_end: periodEnd,
+            status: "running",
+          })
+          .select("id")
+          .single();
+        if (createErr || !created) return json({ error: createErr?.message ?? "insert failed" }, 500);
+
+        try {
+          const result = await generateRecap(env, String(created.id));
+          const { data: finalRow } = await client.from("recaps").select("*").eq("id", created.id).single();
+          return json({ result, recap: finalRow }, 200);
+        } catch (genErr) {
+          await client
+            .from("recaps")
+            .update({ status: "failed", error: genErr instanceof Error ? genErr.message : String(genErr) })
+            .eq("id", created.id);
+          return json({ error: genErr instanceof Error ? genErr.message : String(genErr) }, 500);
+        }
+      } catch (err) {
+        return json({ error: err instanceof Error ? err.message : String(err) }, 500);
+      }
+    }
+
     // ---------------------------------------------------------------------------
     // Feed read endpoints
     // ---------------------------------------------------------------------------
@@ -4982,6 +5224,70 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
       const pinned = rows.filter((r) => r.is_pinned);
       const rotating = rows.filter((r) => !r.is_pinned);
       return json({ pinned, rotating }, 200);
+    }
+
+    // GET /api/recaps?portfolio_id=...&type=daily|weekly → latest ready recap
+    if (method === "GET" && pathname === "/api/recaps") {
+      const portfolioId = url.searchParams.get("portfolio_id") ?? "";
+      if (!portfolioId) return json({ error: "portfolio_id is required" }, 400);
+      const accessError = await requirePortfolioAccess(request, env, portfolioId);
+      if (accessError) return accessError;
+
+      const type = url.searchParams.get("type");
+      let query = db(env)
+        .from("recaps")
+        .select("id, type, period_start, period_end, status, slides, generated_at, seen_at")
+        .eq("portfolio_id", portfolioId)
+        .eq("status", "ready");
+      if (type === "daily" || type === "weekly") query = query.eq("type", type);
+
+      const { data, error } = await query
+        .order("period_end", { ascending: false })
+        .order("generated_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      if (error) return json({ error: error.message }, 500);
+      return json(data ?? null, 200);
+    }
+
+    // GET /api/recaps/list?portfolio_id=...&limit=20 → recap history
+    if (method === "GET" && pathname === "/api/recaps/list") {
+      const portfolioId = url.searchParams.get("portfolio_id") ?? "";
+      if (!portfolioId) return json({ error: "portfolio_id is required" }, 400);
+      const accessError = await requirePortfolioAccess(request, env, portfolioId);
+      if (accessError) return accessError;
+
+      const limit = Math.min(50, Math.max(1, Number(url.searchParams.get("limit") ?? "20")));
+      const { data, error } = await db(env)
+        .from("recaps")
+        .select("id, type, period_start, period_end, status, generated_at, seen_at")
+        .eq("portfolio_id", portfolioId)
+        .order("period_end", { ascending: false })
+        .limit(limit);
+      if (error) return json({ error: error.message }, 500);
+      return json(data ?? [], 200);
+    }
+
+    // POST /api/recaps/:id/seen → mark a recap as seen (clears the "new" dot)
+    const recapSeenMatch = pathname.match(/^\/api\/recaps\/([^/]+)\/seen$/);
+    if (method === "POST" && recapSeenMatch) {
+      const recapId = decodeURIComponent(recapSeenMatch[1]);
+      const client = db(env);
+      const { data: recap } = await client
+        .from("recaps")
+        .select("portfolio_id")
+        .eq("id", recapId)
+        .maybeSingle();
+      if (!recap) return json({ error: "recap not found" }, 404);
+      const accessError = await requirePortfolioAccess(request, env, String(recap.portfolio_id));
+      if (accessError) return accessError;
+
+      const { error } = await client
+        .from("recaps")
+        .update({ seen_at: new Date().toISOString() })
+        .eq("id", recapId);
+      if (error) return json({ error: error.message }, 500);
+      return json({ ok: true }, 200);
     }
 
     // GET /api/polymarket/category?tag=finance|geopolitics|tech|economy&limit=30
@@ -5061,6 +5367,16 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
     } catch (error) {
       console.error("polymarket fanout failed", error);
     }
+    // Weekly recap fanout — rides the hourly cron; fires for portfolios where
+    // it is Saturday 08:00 in the user's tz. Daily recaps are chained off the
+    // snapshot commit in queue(), not here.
+    if (controller.cron === "5 * * * *") {
+      try {
+        await runWeeklyRecapFanout(env, { now: new Date(controller.scheduledTime) });
+      } catch (error) {
+        console.error("weekly recap fanout failed", error);
+      }
+    }
   },
   async queue(batch: MessageBatch<WorkerQueueMessage>, env: Env): Promise<void> {
     for (const message of batch.messages) {
@@ -5070,7 +5386,32 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
             await recomputeSnapshots(env, message.body.portfolio_id);
             await syncAndEnqueueGeography(env, message.body.portfolio_id, "snapshot_rebuild");
           } else {
-            await appendTodaySnapshot(env, message.body.portfolio_id);
+            const tradingDay = await appendTodaySnapshot(env, message.body.portfolio_id);
+            // Chain the daily recap AFTER the snapshot commits. Use the actual
+            // trading day returned (not wall-clock) so a misfired Sunday cron
+            // never creates a "Sunday daily recap" — it either chains off
+            // Friday's row or skips if no trading day was written.
+            if (tradingDay) {
+              try {
+                const { data: pf } = await db(env)
+                  .from("portfolios")
+                  .select("user_id")
+                  .eq("id", message.body.portfolio_id)
+                  .maybeSingle();
+                if (pf?.user_id) {
+                  await createAndQueueRecap(env, {
+                    portfolioId: message.body.portfolio_id,
+                    userId: String(pf.user_id),
+                    type: "daily",
+                    periodStart: tradingDay,
+                    periodEnd: tradingDay,
+                  });
+                }
+              } catch (recapError) {
+                // Recap chaining is best-effort — never fail the snapshot ack over it.
+                console.error(`daily recap enqueue failed for portfolio ${message.body.portfolio_id}`, recapError);
+              }
+            }
           }
           message.ack();
         } catch (error) {
@@ -5095,6 +5436,24 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
           await markGeographyJobsFailed(env, message.body.portfolio_id, holdingIds, error);
           console.error(`geography queue failed for portfolio ${message.body.portfolio_id}`, error);
           message.retry();
+        }
+        continue;
+      }
+
+      if (isRecapQueueMessage(message.body)) {
+        const recapId = message.body.recapId;
+        try {
+          await db(env).from("recaps").update({ status: "running" }).eq("id", recapId).eq("status", "queued");
+          await generateRecap(env, recapId);
+          message.ack();
+        } catch (error) {
+          console.error(`recap queue failed for recap ${recapId}`, error);
+          await db(env)
+            .from("recaps")
+            .update({ status: "failed", error: error instanceof Error ? error.message : String(error) })
+            .eq("id", recapId);
+          // Mark failed and ack — deterministic failures shouldn't retry-storm Gemini.
+          message.ack();
         }
         continue;
       }
