@@ -16,6 +16,7 @@ import {
 import { toast } from "sonner";
 import { useAuth } from "@/hooks/use-auth";
 import { supabase } from "@/integrations/supabase/client";
+import { authHeaders } from "@/lib/api";
 
 const DEPLOYED_API_BASE_URL = "https://binturong-api.nikita-osminine.workers.dev";
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? DEPLOYED_API_BASE_URL;
@@ -25,8 +26,12 @@ async function fetchApiWithFallback(path: string, init?: RequestInit): Promise<R
   const fallbackUrl = `${DEPLOYED_API_BASE_URL}${path}`;
   const canFallback = API_BASE_URL !== DEPLOYED_API_BASE_URL;
 
+  // The API authenticates via bearer token — attach it to every request.
+  const auth = await authHeaders();
+  const authedInit: RequestInit = { ...init, headers: { ...auth, ...(init?.headers ?? {}) } };
+
   try {
-    const primary = await fetch(primaryUrl, init);
+    const primary = await fetch(primaryUrl, authedInit);
     if (!canFallback) return primary;
 
     if (primary.ok) return primary;
@@ -38,10 +43,10 @@ async function fetchApiWithFallback(path: string, init?: RequestInit): Promise<R
     const hasServerConfigError = body.includes("Server misconfiguration");
     if (!hasServerConfigError) return primary;
 
-    return fetch(fallbackUrl, init);
+    return fetch(fallbackUrl, authedInit);
   } catch (error) {
     if (!canFallback) throw error;
-    return fetch(fallbackUrl, init);
+    return fetch(fallbackUrl, authedInit);
   }
 }
 

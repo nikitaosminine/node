@@ -6,6 +6,7 @@ import { useThesisContext } from "@/contexts/thesis-context";
 import { motion, useReducedMotion } from "framer-motion";
 import { Thesis } from "@/lib/thesis";
 import { useAuth } from "@/hooks/use-auth";
+import { authHeaders } from "@/lib/api";
 import { TakePageHeader } from "@/components/take/take-page-header";
 import { Button } from "@/components/ui/button";
 import { TakeToolbar, FilterTab } from "@/components/take/take-toolbar";
@@ -67,7 +68,9 @@ export default function ThesesPage() {
   useEffect(() => {
     if (!user?.id) return;
     void (async () => {
-      const response = await fetch(`${API_BASE_URL}/api/agent/feed?user_id=${user.id}&limit=50`);
+      const response = await fetch(`${API_BASE_URL}/api/agent/feed?limit=50`, {
+        headers: await authHeaders(),
+      });
       if (!response.ok) return;
       const payload = (await response.json()) as {
         insights?: Array<{

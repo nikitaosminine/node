@@ -44,6 +44,11 @@ export interface Env {
   GEMINI_API_KEY?: string;
   GEMINI_MODEL?: string;
   GEMINI_API_BASE_URL?: string;
+  // Shared secret protecting operator-only routes (debug + scheduled fanout).
+  ADMIN_SECRET?: string;
+  // Comma-separated list of allowed browser origins for CORS. When unset, falls
+  // back to "*" (safe only because the API authenticates via bearer token, not cookies).
+  ALLOWED_ORIGINS?: string;
 }
 
 const CORS_HEADERS = {
@@ -76,6 +81,39 @@ function normalizeCurrencyCode(value: unknown): string | null {
   const currency = String(value ?? "").trim().toUpperCase();
   return /^[A-Z]{3}$/.test(currency) ? currency : null;
 }
+
+// Copy only whitelisted keys from a client-supplied body. Prevents callers from
+// setting internal/ownership columns (e.g. user_id) on insert/update.
+function pickColumns(body: Record<string, unknown>, keys: readonly string[]): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const key of keys) {
+    if (body[key] !== undefined) out[key] = body[key];
+  }
+  return out;
+}
+
+const PORTFOLIO_WRITE_COLUMNS = [
+  "name",
+  "description",
+  "currency",
+  "cash_value",
+  "primary_exchange",
+] as const;
+
+const HOLDING_WRITE_COLUMNS = [
+  "name",
+  "ticker",
+  "isin",
+  "portfolio_id",
+  "purchase_date",
+  "purchase_price",
+  "quantity",
+  "fees",
+  "currency",
+  "asset_type",
+  "country_code",
+  "country_name",
+] as const;
 
 const YAHOO_HEADERS = {
   "User-Agent": "Mozilla/5.0",
@@ -263,6 +301,17 @@ async function requirePortfolioAccess(request: Request, env: Env, portfolioId: s
   const userId = await getAuthenticatedUserId(request, env);
   if (!userId) return json({ error: "Unauthorized" }, 401);
   return assertPortfolioAccess(env, portfolioId, userId);
+}
+
+// Gate for operator-only routes (debug + scheduled fanout). Requires the caller to
+// present the shared ADMIN_SECRET via the X-Admin-Secret header. If ADMIN_SECRET is
+// not configured, the route is treated as locked (fails closed) rather than open.
+function requireAdmin(request: Request, env: Env): Response | null {
+  const provided = request.headers.get("X-Admin-Secret") ?? "";
+  if (!env.ADMIN_SECRET || provided !== env.ADMIN_SECRET) {
+    return json({ error: "Forbidden" }, 403);
+  }
+  return null;
 }
 
 interface YahooSearchQuote {
@@ -4090,13 +4139,22 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
     // Portfolios
     if (pathname === "/api/portfolios") {
       if (method === "GET") {
-        const { data, error } = await db(env).from("portfolios").select("*");
+        const userId = await getAuthenticatedUserId(request, env);
+        if (!userId) return json({ error: "Unauthorized" }, 401);
+        const { data, error } = await db(env)
+          .from("portfolios")
+          .select("*")
+          .eq("user_id", userId);
         if (error) return json({ error: error.message }, 500);
         return json(data);
       }
       if (method === "POST") {
+        const userId = await getAuthenticatedUserId(request, env);
+        if (!userId) return json({ error: "Unauthorized" }, 401);
         const body = (await request.json()) as Record<string, unknown>;
-        const { data, error } = await db(env).from("portfolios").insert(body).select();
+        // Ownership is forced from the verified token — never from the body.
+        const payload = { ...pickColumns(body, PORTFOLIO_WRITE_COLUMNS), user_id: userId };
+        const { data, error } = await db(env).from("portfolios").insert(payload).select();
         if (error) return json({ error: error.message }, 500);
         return json(data, 201);
       }
@@ -4105,6 +4163,8 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
     const portfolioMatch = pathname.match(/^\/api\/portfolios\/([^/]+)$/);
     if (portfolioMatch) {
       const id = portfolioMatch[1];
+      const accessError = await requirePortfolioAccess(request, env, id);
+      if (accessError) return accessError;
       if (method === "GET") {
         const { data, error } = await db(env).from("portfolios").select("*").eq("id", id).single();
         if (error) return json({ error: error.message }, 404);
@@ -4112,7 +4172,12 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
       }
       if (method === "PUT") {
         const body = (await request.json()) as Record<string, unknown>;
-        const { data, error } = await db(env).from("portfolios").update(body).eq("id", id).select();
+        const payload = pickColumns(body, PORTFOLIO_WRITE_COLUMNS);
+        const { data, error } = await db(env)
+          .from("portfolios")
+          .update(payload)
+          .eq("id", id)
+          .select();
         if (error) return json({ error: error.message }, 500);
         return json(data);
       }
@@ -4632,15 +4697,24 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
     if (pathname === "/api/holdings") {
       if (method === "GET") {
         const portfolioId = url.searchParams.get("portfolio_id");
-        let query = db(env).from("holdings").select("*");
-        if (portfolioId) query = query.eq("portfolio_id", portfolioId);
-        const { data, error } = await query;
+        if (!portfolioId) return json({ error: "portfolio_id is required" }, 400);
+        const accessError = await requirePortfolioAccess(request, env, portfolioId);
+        if (accessError) return accessError;
+        const { data, error } = await db(env)
+          .from("holdings")
+          .select("*")
+          .eq("portfolio_id", portfolioId);
         if (error) return json({ error: error.message }, 500);
         return json(data);
       }
       if (method === "POST") {
         const body = (await request.json()) as Record<string, unknown>;
-        const { data, error } = await db(env).from("holdings").insert(body).select();
+        const portfolioId = String(body.portfolio_id ?? "");
+        if (!portfolioId) return json({ error: "portfolio_id is required" }, 400);
+        const accessError = await requirePortfolioAccess(request, env, portfolioId);
+        if (accessError) return accessError;
+        const payload = pickColumns(body, HOLDING_WRITE_COLUMNS);
+        const { data, error } = await db(env).from("holdings").insert(payload).select();
         if (error) return json({ error: error.message }, 500);
         const portfolioIds = Array.from(
           new Set((data ?? []).map((row) => String(row.portfolio_id ?? "")).filter(Boolean)),
@@ -4702,9 +4776,24 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
     const holdingMatch = pathname.match(/^\/api\/holdings\/([^/]+)$/);
     if (holdingMatch) {
       const id = holdingMatch[1];
+      // Resolve the holding's owning portfolio and verify access before any mutation.
+      const { data: existingHolding } = await db(env)
+        .from("holdings")
+        .select("portfolio_id")
+        .eq("id", id)
+        .maybeSingle();
+      const owningPortfolioId =
+        existingHolding?.portfolio_id == null ? null : String(existingHolding.portfolio_id);
+      if (!owningPortfolioId) return json({ error: "Holding not found" }, 404);
+      const accessError = await requirePortfolioAccess(request, env, owningPortfolioId);
+      if (accessError) return accessError;
+
       if (method === "PUT") {
         const body = (await request.json()) as Record<string, unknown>;
-        const { data, error } = await db(env).from("holdings").update(body).eq("id", id).select();
+        // Exclude portfolio_id so a holding cannot be moved into another portfolio here.
+        const payload = pickColumns(body, HOLDING_WRITE_COLUMNS);
+        delete payload.portfolio_id;
+        const { data, error } = await db(env).from("holdings").update(payload).eq("id", id).select();
         if (error) return json({ error: error.message }, 500);
         const portfolioIds = Array.from(
           new Set((data ?? []).map((row) => String(row.portfolio_id ?? "")).filter(Boolean)),
@@ -4713,16 +4802,9 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
         return json(data);
       }
       if (method === "DELETE") {
-        const { data: existingHolding } = await db(env)
-          .from("holdings")
-          .select("portfolio_id")
-          .eq("id", id)
-          .maybeSingle();
         const { error } = await db(env).from("holdings").delete().eq("id", id);
         if (error) return json({ error: error.message }, 500);
-        const portfolioId =
-          existingHolding?.portfolio_id == null ? null : String(existingHolding.portfolio_id);
-        if (portfolioId) await syncAndEnqueueGeography(env, portfolioId, "holding_change");
+        await syncAndEnqueueGeography(env, owningPortfolioId, "holding_change");
         return json({ deleted: true });
       }
     }
@@ -4730,8 +4812,8 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
     // Agent runs
     if (pathname === "/api/agent/runs") {
       if (method === "GET") {
-        const userId = url.searchParams.get("user_id");
-        if (!userId) return json({ error: "user_id is required" }, 400);
+        const userId = await getAuthenticatedUserId(request, env);
+        if (!userId) return json({ error: "Unauthorized" }, 401);
 
         const portfolioId = url.searchParams.get("portfolio_id");
         let query = db(env)
@@ -4752,8 +4834,10 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
           return json({ error: "Server misconfiguration: AGENT_RUNS_QUEUE binding is missing" }, 500);
         }
 
+        const userId = await getAuthenticatedUserId(request, env);
+        if (!userId) return json({ error: "Unauthorized" }, 401);
+
         const body = (await request.json()) as {
-          userId?: string;
           portfolioId?: string;
           triggerType?: AgentRunTriggerType;
           allPortfolios?: boolean;
@@ -4761,14 +4845,15 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
           forceNew?: boolean;
         };
 
-        if (!body.userId) return json({ error: "userId is required" }, 400);
         const triggerType = body.triggerType ?? "ondemand";
         if (!["scheduled", "ondemand"].includes(triggerType)) {
           return json({ error: "triggerType must be scheduled or ondemand" }, 400);
         }
 
+        // listUserPortfolioIds is already scoped to the authenticated user; a single
+        // target portfolio is verified for ownership before any run is created.
         const portfolioIds = body.allPortfolios
-          ? await listUserPortfolioIds(env, body.userId)
+          ? await listUserPortfolioIds(env, userId)
           : body.portfolioId
             ? [body.portfolioId]
             : [];
@@ -4777,10 +4862,17 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
           return json({ error: "No target portfolios found" }, 400);
         }
 
+        if (!body.allPortfolios) {
+          for (const portfolioId of portfolioIds) {
+            const accessError = await assertPortfolioAccess(env, portfolioId, userId);
+            if (accessError) return accessError;
+          }
+        }
+
         const runs: AgentRunRow[] = [];
         for (const portfolioId of portfolioIds) {
           const run = await createRun(env, {
-            userId: body.userId,
+            userId,
             portfolioId,
             triggerType,
             idempotencyKey: body.forceNew ? crypto.randomUUID() : body.idempotencyKey,
@@ -4807,8 +4899,8 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
 
     if (pathname === "/api/agent/settings") {
       if (method === "GET") {
-        const userId = url.searchParams.get("user_id");
-        if (!userId) return json({ error: "user_id is required" }, 400);
+        const userId = await getAuthenticatedUserId(request, env);
+        if (!userId) return json({ error: "Unauthorized" }, 401);
 
         const { data, error } = await db(env)
           .from("agent_user_settings")
@@ -4828,17 +4920,17 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
       }
 
       if (method === "PUT") {
+        const userId = await getAuthenticatedUserId(request, env);
+        if (!userId) return json({ error: "Unauthorized" }, 401);
         const body = (await request.json()) as {
-          userId?: string;
           timezone?: string;
           globalRunsPerDay?: number;
           autoApplyEnabled?: boolean;
           autoApplyMinConfidence?: number;
         };
-        if (!body.userId) return json({ error: "userId is required" }, 400);
 
         const payload = {
-          user_id: body.userId,
+          user_id: userId,
           timezone: body.timezone ?? "Europe/Paris",
           global_runs_per_day: Math.max(1, Math.min(3, Number(body.globalRunsPerDay ?? 2))),
           auto_apply_enabled: Boolean(body.autoApplyEnabled ?? false),
@@ -4860,8 +4952,8 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
 
     if (pathname === "/api/agent/portfolio-settings") {
       if (method === "GET") {
-        const userId = url.searchParams.get("user_id");
-        if (!userId) return json({ error: "user_id is required" }, 400);
+        const userId = await getAuthenticatedUserId(request, env);
+        if (!userId) return json({ error: "Unauthorized" }, 401);
 
         const { data, error } = await db(env)
           .from("agent_portfolio_settings")
@@ -4873,18 +4965,21 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
       }
 
       if (method === "PUT") {
+        const userId = await getAuthenticatedUserId(request, env);
+        if (!userId) return json({ error: "Unauthorized" }, 401);
         const body = (await request.json()) as {
-          userId?: string;
           portfolioId?: string;
           runsPerDayOverride?: number | null;
           agentEnabled?: boolean;
         };
-        if (!body.userId || !body.portfolioId) {
-          return json({ error: "userId and portfolioId are required" }, 400);
+        if (!body.portfolioId) {
+          return json({ error: "portfolioId is required" }, 400);
         }
+        const accessError = await assertPortfolioAccess(env, body.portfolioId, userId);
+        if (accessError) return accessError;
 
         const payload = {
-          user_id: body.userId,
+          user_id: userId,
           portfolio_id: body.portfolioId,
           runs_per_day_override:
             body.runsPerDayOverride == null
@@ -4905,8 +5000,8 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
 
     if (pathname === "/api/agent/metrics") {
       if (method !== "GET") return json({ error: "Method not allowed" }, 405);
-      const userId = url.searchParams.get("user_id");
-      if (!userId) return json({ error: "user_id is required" }, 400);
+      const userId = await getAuthenticatedUserId(request, env);
+      if (!userId) return json({ error: "Unauthorized" }, 401);
 
       const hours = Math.max(1, Math.min(168, Number(url.searchParams.get("hours") ?? 24)));
       const fromIso = new Date(Date.now() - hours * 60 * 60 * 1000).toISOString();
@@ -4925,8 +5020,8 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
 
     if (pathname === "/api/agent/feed") {
       if (method !== "GET") return json({ error: "Method not allowed" }, 405);
-      const userId = url.searchParams.get("user_id");
-      if (!userId) return json({ error: "user_id is required" }, 400);
+      const userId = await getAuthenticatedUserId(request, env);
+      if (!userId) return json({ error: "Unauthorized" }, 401);
       const limit = Math.max(1, Math.min(200, Number(url.searchParams.get("limit") ?? 50)));
 
       const { data, error } = await db(env)
@@ -5001,8 +5096,8 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
 
     if (pathname === "/api/agent/alerts") {
       if (method !== "GET") return json({ error: "Method not allowed" }, 405);
-      const userId = url.searchParams.get("user_id");
-      if (!userId) return json({ error: "user_id is required" }, 400);
+      const userId = await getAuthenticatedUserId(request, env);
+      if (!userId) return json({ error: "Unauthorized" }, 401);
 
       const hours = Math.max(1, Math.min(168, Number(url.searchParams.get("hours") ?? 24)));
       const queueDepthThreshold = Math.max(
@@ -5069,6 +5164,8 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
 
     if (pathname === "/api/agent/scheduled/fanout") {
       if (method !== "POST") return json({ error: "Method not allowed" }, 405);
+      const adminError = requireAdmin(request, env);
+      if (adminError) return adminError;
 
       const body = (await request.json().catch(() => ({}))) as {
         dryRun?: boolean;
@@ -5090,6 +5187,15 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
     const cancelRunMatch = pathname.match(/^\/api\/agent\/runs\/([^/]+)\/cancel$/);
     if (cancelRunMatch && method === "POST") {
       const runId = cancelRunMatch[1];
+      const userId = await getAuthenticatedUserId(request, env);
+      if (!userId) return json({ error: "Unauthorized" }, 401);
+      // Verify the run belongs to the caller before cancelling.
+      const { data: run } = await db(env)
+        .from("agent_runs")
+        .select("user_id")
+        .eq("id", runId)
+        .maybeSingle();
+      if (!run || String(run.user_id) !== userId) return json({ error: "Run not found" }, 404);
       const { data, error } = await db(env)
         .from("agent_runs")
         .update({
@@ -5105,10 +5211,13 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
     }
 
     // ---------------------------------------------------------------------------
-    // Debug endpoints (no auth — intended for local wrangler dev only)
+    // Debug endpoints — operator only. Gated by the ADMIN_SECRET shared secret
+    // (X-Admin-Secret header). Destructive / cost-incurring; never publicly reachable.
     // ---------------------------------------------------------------------------
 
     if (method === "POST" && pathname === "/api/_debug/run-news-fanout") {
+      const adminError = requireAdmin(request, env);
+      if (adminError) return adminError;
       try {
         // ?reset=true wipes existing clusters first (cascade clears the bridge) so a
         // test run reflects only the fresh fanout.
@@ -5124,6 +5233,8 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
 
 
     if (method === "POST" && pathname === "/api/_debug/run-polymarket-fanout") {
+      const adminError = requireAdmin(request, env);
+      if (adminError) return adminError;
       try {
         const result = await runPolymarketFanout(env);
         return json(result, 200);
@@ -5136,6 +5247,8 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
     //   ?type=weekly                       → run the weekly cron fanout (add &dryRun=true to preview)
     //   ?type=daily|weekly&portfolio_id=…  → generate one recap synchronously (force-regenerates)
     if (method === "POST" && pathname === "/api/_debug/run-recap-fanout") {
+      const adminError = requireAdmin(request, env);
+      if (adminError) return adminError;
       try {
         const type = (url.searchParams.get("type") ?? "daily") as RecapType;
         if (type !== "daily" && type !== "weekly") {
