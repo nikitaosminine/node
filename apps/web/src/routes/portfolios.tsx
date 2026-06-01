@@ -8,7 +8,7 @@ import { supabase } from "@/integrations/supabase/client";
 import { CreateCsvModal } from "@/components/create-csv-modal";
 import { CreateManualModal } from "@/components/create-manual-modal";
 import { EditPortfolioModal } from "@/components/edit-portfolio-modal";
-import { MOCK_PRICES, generateChartData } from "@/lib/mock-data";
+import { MOCK_PRICES } from "@/lib/mock-data";
 import { toast } from "sonner";
 import { LineChart, Line, ResponsiveContainer } from "recharts";
 import {
@@ -178,16 +178,25 @@ function PortfolioCard({
   const plPct = cost > 0 ? (pl / cost) * 100 : 0;
   const positive = pl >= 0;
 
-  // Use a numeric seed derived from portfolio id characters
-  const seed = portfolio.id.split("").reduce((s, c) => s + c.charCodeAt(0), 0);
-  const sparkPoints = useMemo(() => generateChartData("1M", seed % 100), [seed]);
+  const [sparkPoints, setSparkPoints] = useState<{ value: number }[]>([]);
+  useEffect(() => {
+    const thirtyDaysAgo = new Date();
+    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+    supabase
+      .from("portfolio_snapshots")
+      .select("date, total_value")
+      .eq("portfolio_id", portfolio.id)
+      .gte("date", thirtyDaysAgo.toISOString().slice(0, 10))
+      .order("date", { ascending: true })
+      .then(({ data }) => {
+        if (data && data.length >= 2) {
+          setSparkPoints(data.map((row) => ({ value: Number(row.total_value ?? 0) })));
+        }
+      });
+  }, [portfolio.id]);
 
   const topHoldings = [...portfolio.holdings]
-    .sort(
-      (a, b) =>
-        (MOCK_PRICES[b.ticker] ?? b.purchase_price) * b.quantity -
-        (MOCK_PRICES[a.ticker] ?? a.purchase_price) * a.quantity,
-    )
+    .sort((a, b) => b.purchase_price * b.quantity - a.purchase_price * a.quantity)
     .slice(0, 3);
   const extra = portfolio.holdings.length - 3;
 
@@ -269,7 +278,7 @@ function PortfolioCard({
             </div>
           )}
         </div>
-        <Sparkline points={sparkPoints} positive={positive} />
+        {sparkPoints.length >= 2 && <Sparkline points={sparkPoints} positive={positive} />}
       </div>
 
       {portfolio.holdings.length > 0 && (
@@ -644,7 +653,7 @@ export default function PortfoliosPage() {
             <PortfolioCard
               key={p.id}
               portfolio={p}
-              onClick={() => router.push(`/portfolios/${p.id}`)}
+              onClick={() => router.push(`/overview?portfolioId=${p.id}`)}
               onEdit={() => handleEditPortfolio(p)}
               onDelete={() => handleDeletePortfolio(p)}
               liveQuotes={liveQuotes}

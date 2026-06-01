@@ -2974,6 +2974,7 @@ async function recomputeSnapshots(env: Env, portfolioId: string): Promise<void> 
     total_value: number;
     cash_balance: number;
     securities_value: number;
+    twr_pct: number;
   }> = [];
 
   // Collect the union of all real trading days present in the price maps
@@ -2990,11 +2991,24 @@ async function recomputeSnapshots(env: Env, portfolioId: string): Promise<void> 
   }
   const tradingDays = Array.from(tradingDaySet).sort();
 
-  for (const date of tradingDays) {
+  const rawSnapshots = tradingDays.map((date) => ({
+    portfolio_id: portfolioId,
+    date,
+    ...computeSnapshotForDate(txns, pricesByTicker, date),
+  }));
+
+  const flowByDate = new Map<string, number>();
+  for (const txn of txns) {
+    if (txn.side !== "DEP" && txn.side !== "WD") continue;
+    const d = String(txn.date);
+    flowByDate.set(d, (flowByDate.get(d) ?? 0) + (txn.net_amount ?? 0));
+  }
+  const twrByDate = computeDailyTwrByDate(rawSnapshots, flowByDate);
+
+  for (const snap of rawSnapshots) {
     snapshots.push({
-      portfolio_id: portfolioId,
-      date,
-      ...computeSnapshotForDate(txns, pricesByTicker, date),
+      ...snap,
+      twr_pct: Math.round((twrByDate.get(snap.date) ?? 0) * 100) / 100,
     });
   }
   console.log("[recompute] snapshots built:", snapshots.length);
@@ -3035,14 +3049,37 @@ async function appendTodaySnapshot(env: Env, portfolioId: string): Promise<strin
   if (!latestTradingDay) return null;
 
   const date = latestTradingDay;
+  const snapshotData = computeSnapshotForDate(txns, pricesByTicker, date);
   await db(env).from("portfolio_snapshots").upsert(
-    {
-      portfolio_id: portfolioId,
-      date,
-      ...computeSnapshotForDate(txns, pricesByTicker, date),
-    },
+    { portfolio_id: portfolioId, date, ...snapshotData },
     { onConflict: "portfolio_id,date" },
   );
+
+  // Compute TWR incrementally from the previous snapshot
+  const { data: prevSnaps } = await db(env)
+    .from("portfolio_snapshots")
+    .select("date, total_value, twr_pct")
+    .eq("portfolio_id", portfolioId)
+    .lt("date", date)
+    .order("date", { ascending: false })
+    .limit(1);
+  const prev = prevSnaps?.[0];
+  const todayFlow = txns
+    .filter((t) => t.date === date && (t.side === "DEP" || t.side === "WD"))
+    .reduce((s, t) => s + (t.net_amount ?? 0), 0);
+  let twr_pct = 0;
+  if (prev && Number(prev.total_value) > 0) {
+    const prevIndex = 1 + Number(prev.twr_pct ?? 0) / 100;
+    const periodReturn = (snapshotData.total_value - todayFlow - Number(prev.total_value)) / Number(prev.total_value);
+    const newIndex = Number.isFinite(periodReturn) ? prevIndex * (1 + periodReturn) : prevIndex;
+    twr_pct = Math.round((newIndex - 1) * 100 * 100) / 100;
+  }
+  await db(env)
+    .from("portfolio_snapshots")
+    .update({ twr_pct })
+    .eq("portfolio_id", portfolioId)
+    .eq("date", date);
+
   await rebuildCurrentHoldings(env, portfolioId, typeByTicker, currencyByTicker);
   return date;
 }

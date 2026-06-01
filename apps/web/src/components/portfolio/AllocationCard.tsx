@@ -8,7 +8,7 @@ import { feature } from "topojson-client";
 import countriesAtlas from "world-atlas/countries-110m.json";
 import { supabase } from "@/integrations/supabase/client";
 import { toast } from "sonner";
-import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { InfinityLoop } from "@/components/loading-ui/infinity";
 import { formatCurrency, normalizeCurrencyCode } from "@/lib/currency";
@@ -348,7 +348,7 @@ function GeographyAllocation({
   currency: string;
 }) {
   const countries = useMemo(() => data?.countries ?? [], [data]);
-  const [otherOpen, setOtherOpen] = useState(false);
+  const [otherPopoverOpen, setOtherPopoverOpen] = useState(false);
   const { majorCountries, minorCountries, otherCountry } = useMemo(() => {
     const major = countries.filter((country) => country.percentage >= MINOR_COUNTRY_THRESHOLD);
     const minor = countries.filter((country) => country.percentage < MINOR_COUNTRY_THRESHOLD);
@@ -495,19 +495,17 @@ function GeographyAllocation({
               {listCountries.map((country, index) =>
                 country.countryCode === "OTHER" ? (
                   <li key="OTHER" className="min-w-0">
-                    <Collapsible open={otherOpen} onOpenChange={setOtherOpen}>
-                      <CollapsibleTrigger asChild>
+                    <Popover open={otherPopoverOpen} onOpenChange={setOtherPopoverOpen}>
+                      <PopoverTrigger asChild>
                         <button
                           type="button"
                           className="group w-full text-left"
-                          aria-label="Expand small country allocations"
+                          aria-label="Show small country allocations"
                         >
                           <div className="mb-1.5 flex items-center justify-between gap-3 text-xs">
                             <span className="flex min-w-0 items-center gap-2">
                               <ChevronRight
-                                className={`h-3.5 w-3.5 shrink-0 text-foreground-muted transition-transform group-hover:text-foreground ${
-                                  otherOpen ? "rotate-90" : ""
-                                }`}
+                                className="h-3.5 w-3.5 shrink-0 text-foreground-muted transition-colors group-hover:text-foreground"
                               />
                               <span className="truncate text-foreground">Other</span>
                               <span className="shrink-0 text-[10px] tabular-nums text-foreground-muted">
@@ -533,12 +531,19 @@ function GeographyAllocation({
                             </span>
                           </div>
                         </button>
-                      </CollapsibleTrigger>
-                      <CollapsibleContent>
-                        <div className="ml-5 mt-2 space-y-2 border-l border-hairline pl-3 pr-1">
+                      </PopoverTrigger>
+                      <PopoverContent
+                        side="right"
+                        sideOffset={24}
+                        className="w-72 max-h-96 overflow-y-auto rounded-xl border border-hairline bg-surface p-3 shadow-lg text-xs"
+                      >
+                        <p className="mb-2 text-[10px] font-semibold uppercase tracking-widest text-foreground-muted">
+                          Other · {minorCountries.length} countries
+                        </p>
+                        <div className="space-y-2">
                           {minorCountries.map((minorCountry) => (
                             <div key={minorCountry.countryCode} className="min-w-0">
-                              <div className="mb-1 flex items-center justify-between gap-3 text-xs">
+                              <div className="mb-1 flex items-center justify-between gap-3">
                                 <span className="flex min-w-0 items-center gap-2">
                                   <span className="font-mono text-[10px] text-foreground-muted">
                                     {minorCountry.countryCode}
@@ -565,8 +570,8 @@ function GeographyAllocation({
                             </div>
                           ))}
                         </div>
-                      </CollapsibleContent>
-                    </Collapsible>
+                      </PopoverContent>
+                    </Popover>
                   </li>
                 ) : (
                   renderCountryRow(country, index)

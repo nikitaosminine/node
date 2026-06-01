@@ -112,7 +112,7 @@ function SidebarInner({ collapsed }: { collapsed: boolean }) {
         <div className="mb-1 px-4">
           <Link
             href="/portfolios"
-            className="text-[11px] font-semibold uppercase tracking-widest text-foreground-muted/50 hover:text-foreground-muted transition-colors"
+            className="text-[11.5px] font-semibold uppercase tracking-widest text-foreground-muted hover:text-foreground transition-colors"
           >
             Portfolios
           </Link>
@@ -248,9 +248,9 @@ export function AppSidebar({ children }: { children: ReactNode }) {
             aria-label="Node home"
             className="flex min-w-0 items-center gap-2.5"
           >
-            <NodeLogo className="h-7 w-7 shrink-0" />
+            <NodeLogo className="h-8 w-8 shrink-0" />
             {!collapsed && (
-              <span className="truncate text-sm font-semibold tracking-tight">Node</span>
+              <span className="truncate text-[15px] font-semibold tracking-tight">Node</span>
             )}
           </Link>
         </div>

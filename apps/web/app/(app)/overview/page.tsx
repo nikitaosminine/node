@@ -135,6 +135,8 @@ function OverviewContent({ portfolioId }: { portfolioId: string }) {
   const [quotes, setQuotes] = useState<Record<string, LiveQuote>>({});
   const [fxRates, setFxRates] = useState<Record<string, number>>({});
   const [transactionRows, setTransactionRows] = useState<TransactionApiRow[]>([]);
+  const [prevDaySnapshot, setPrevDaySnapshot] = useState<number | null>(null);
+  const [ytdStartSnapshot, setYtdStartSnapshot] = useState<number | null>(null);
 
   // useMemo must be unconditional — before any early returns
   const realizedMetrics = useMemo(
@@ -143,6 +145,29 @@ function OverviewContent({ portfolioId }: { portfolioId: string }) {
   );
 
   const portfolioCurrency = normalizeCurrencyCode(portfolio?.currency) ?? DEFAULT_PORTFOLIO_CURRENCY;
+
+  const fetchSnapshots = useCallback(async () => {
+    const today = new Date().toISOString().slice(0, 10);
+    const year = new Date().getFullYear();
+    const [prevRes, ytdRes] = await Promise.all([
+      supabase
+        .from("portfolio_snapshots")
+        .select("total_value")
+        .eq("portfolio_id", portfolioId)
+        .lt("date", today)
+        .order("date", { ascending: false })
+        .limit(1),
+      supabase
+        .from("portfolio_snapshots")
+        .select("total_value")
+        .eq("portfolio_id", portfolioId)
+        .gte("date", `${year}-01-01`)
+        .order("date", { ascending: true })
+        .limit(1),
+    ]);
+    if (prevRes.data?.[0]) setPrevDaySnapshot(Number(prevRes.data[0].total_value));
+    if (ytdRes.data?.[0]) setYtdStartSnapshot(Number(ytdRes.data[0].total_value));
+  }, [portfolioId]);
 
   const fetchPortfolio = useCallback(async () => {
     const { data, error } = await supabase
@@ -251,7 +276,8 @@ function OverviewContent({ portfolioId }: { portfolioId: string }) {
 
   useEffect(() => {
     fetchPortfolio();
-  }, [fetchPortfolio]);
+    fetchSnapshots();
+  }, [fetchPortfolio, fetchSnapshots]);
 
   useEffect(() => {
     if (portfolio) fetchQuotes();
@@ -299,10 +325,36 @@ function OverviewContent({ portfolioId }: { portfolioId: string }) {
 
   const hasRealizedPnL = realizedMetrics.realizedCostBasis > 0;
 
+  const oneDayDelta = prevDaySnapshot !== null ? totalValue - prevDaySnapshot : null;
+  const oneDayPct = prevDaySnapshot !== null && prevDaySnapshot > 0
+    ? ((totalValue - prevDaySnapshot) / prevDaySnapshot) * 100
+    : null;
+
+  const ytdDelta = ytdStartSnapshot !== null ? totalValue - ytdStartSnapshot : null;
+  const ytdPct = ytdStartSnapshot !== null && ytdStartSnapshot > 0
+    ? (ytdDelta! / ytdStartSnapshot) * 100
+    : null;
+
   const KPIS = [
     {
       label: "Total value",
       value: formatCurrency(totalValue, portfolioCurrency),
+    },
+    {
+      label: "1 Day",
+      value: oneDayDelta !== null ? formatSignedCurrency(oneDayDelta, portfolioCurrency) : "—",
+      detail: oneDayPct !== null ? `${oneDayPct >= 0 ? "+" : ""}${oneDayPct.toFixed(2)}%` : undefined,
+      tone: oneDayDelta !== null
+        ? oneDayDelta > 0 ? ("positive" as const) : oneDayDelta < 0 ? ("negative" as const) : undefined
+        : undefined,
+    },
+    {
+      label: "YTD",
+      value: ytdDelta !== null ? formatSignedCurrency(ytdDelta, portfolioCurrency) : "—",
+      detail: ytdPct !== null ? `${ytdPct >= 0 ? "+" : ""}${ytdPct.toFixed(2)}%` : undefined,
+      tone: ytdDelta !== null
+        ? ytdDelta > 0 ? ("positive" as const) : ytdDelta < 0 ? ("negative" as const) : undefined
+        : undefined,
     },
     {
       label: "Unrealized P/L",
@@ -350,7 +402,7 @@ function OverviewContent({ portfolioId }: { portfolioId: string }) {
 
       {/* KPI strip — matches portfolio-detail style */}
       <div className="rounded-2xl border border-hairline bg-surface px-4 py-3">
-        <dl className="grid grid-cols-2 gap-x-4 gap-y-3 sm:grid-cols-3 xl:grid-cols-5">
+        <dl className="grid grid-cols-2 gap-x-3 gap-y-3 sm:grid-cols-4 xl:grid-cols-7">
           {KPIS.map((kpi, i) => (
             <div
               key={kpi.label}
