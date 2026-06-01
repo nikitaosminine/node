@@ -15,6 +15,7 @@ SUPABASE_URL = "https://sfqowvpuzsqgmwlecgdx.supabase.co"
 # wrangler secret put FRED_API_KEY
 # wrangler secret put EXA_SEARCH
 # wrangler secret put GEMINI_API_KEY   (daily/weekly recaps)
+# wrangler secret put ADMIN_SECRET   (REQUIRED: gates /api/_debug/* and /api/agent/scheduled/fanout)
 # Optional:
 # wrangler secret put GEMINI_MODEL  (default: gemini-3.5-flash)
 # wrangler secret put GEMINI_API_BASE_URL  (default: https://generativelanguage.googleapis.com/v1beta)
