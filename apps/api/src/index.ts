@@ -409,7 +409,7 @@ interface GeographyQueueMessage {
   portfolio_id: string;
   holding_id?: string;
   holding_ids?: string[];
-  reason?: "holding_change" | "transaction_import" | "snapshot_rebuild" | "manual_retry";
+  reason?: "holding_change" | "transaction_import" | "snapshot_rebuild" | "manual_retry" | "monthly_refresh";
 }
 
 type WorkerQueueMessage =
@@ -1022,6 +1022,20 @@ function resolveFastHoldingGeography(
   };
 }
 
+async function runGeographyMonthlyRefresh(env: Env): Promise<void> {
+  const { data, error } = await db(env).from("portfolios").select("id");
+  if (error) throw new Error(`monthly geography refresh portfolio lookup failed: ${error.message}`);
+  const portfolioIds = (data ?? []).map((r) => String(r.id));
+  await Promise.all(
+    portfolioIds.map((portfolioId) =>
+      enqueuePendingGeographyResearch(env, portfolioId, "monthly_refresh", {
+        force: true,
+        includeResearched: true,
+      }).catch((err) => console.error(`monthly geography refresh failed for ${portfolioId}:`, err)),
+    ),
+  );
+}
+
 async function recomputePortfolioGeography(env: Env, portfolioId: string): Promise<{
   checked: number;
   resolved: number;
@@ -1167,7 +1181,11 @@ async function recomputePortfolioGeography(env: Env, portfolioId: string): Promi
   };
 }
 
-async function pendingFundLikeHoldingIds(env: Env, portfolioId: string): Promise<string[]> {
+async function pendingFundLikeHoldingIds(
+  env: Env,
+  portfolioId: string,
+  options: { includeResearched?: boolean } = {},
+): Promise<string[]> {
   const client = db(env);
   const { data, error } = await client
     .from("holdings")
@@ -1184,6 +1202,8 @@ async function pendingFundLikeHoldingIds(env: Env, portfolioId: string): Promise
     }))
     .filter((holding) => isFundLikeAsset(holding.asset_type, holding.name, holding.ticker));
   if (fundHoldings.length === 0) return [];
+
+  if (options.includeResearched) return fundHoldings.map((holding) => holding.id);
 
   const holdingIds = fundHoldings.map((holding) => holding.id);
   const { data: allocations, error: allocationsError } = await client
@@ -1206,10 +1226,12 @@ async function enqueuePendingGeographyResearch(
   env: Env,
   portfolioId: string,
   reason: GeographyQueueMessage["reason"],
-  options: { force?: boolean } = {},
+  options: { force?: boolean; includeResearched?: boolean } = {},
 ): Promise<{ queued: boolean; pendingResearchCount: number; holdingIds: string[]; sentHoldingIds: string[] }> {
   const client = db(env);
-  const holdingIds = await pendingFundLikeHoldingIds(env, portfolioId);
+  const holdingIds = await pendingFundLikeHoldingIds(env, portfolioId, {
+    includeResearched: options.includeResearched,
+  });
   if (holdingIds.length === 0) {
     return { queued: false, pendingResearchCount: 0, holdingIds, sentHoldingIds: [] };
   }
@@ -4451,8 +4473,7 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
         if (method === "GET") return json(await getPortfolioGeography(env, portfolioId));
         if (method === "POST") {
           const result = await recomputePortfolioGeography(env, portfolioId);
-          const geography = await getPortfolioGeography(env, portfolioId, { useQuotes: false });
-          return json({ ...result, geography });
+          return json(result);
         }
       } catch (error) {
         return json({ error: error instanceof Error ? error.message : "Geography failed" }, 500);
@@ -4467,8 +4488,7 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
 
       try {
         const result = await syncAndEnqueueGeography(env, portfolioId, "holding_change");
-        const geography = await getPortfolioGeography(env, portfolioId, { useQuotes: false });
-        return json({ ...result, geography });
+        return json(result);
       } catch (error) {
         return json({ error: error instanceof Error ? error.message : "Geography enqueue failed" }, 500);
       }
@@ -4482,8 +4502,7 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
 
       try {
         const result = await repairPortfolioGeography(env, portfolioId);
-        const geography = await getPortfolioGeography(env, portfolioId, { useQuotes: false });
-        return json({ ...result, geography });
+        return json(result);
       } catch (error) {
         return json({ error: error instanceof Error ? error.message : "Geography repair failed" }, 500);
       }
@@ -5375,6 +5394,17 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
         await runWeeklyRecapFanout(env, { now: new Date(controller.scheduledTime) });
       } catch (error) {
         console.error("weekly recap fanout failed", error);
+      }
+      // Monthly ETF geography refresh — piggybacks on the hourly cron on the
+      // first of each month at UTC midnight (fires at 00:05). Re-researches all
+      // ETF holdings across all portfolios to pick up index rebalancing changes.
+      const scheduledDate = new Date(controller.scheduledTime);
+      if (scheduledDate.getUTCDate() === 1 && scheduledDate.getUTCHours() === 0) {
+        try {
+          await runGeographyMonthlyRefresh(env);
+        } catch (error) {
+          console.error("monthly geography refresh failed", error);
+        }
       }
     }
   },

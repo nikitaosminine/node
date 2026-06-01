@@ -597,6 +597,7 @@ export function AllocationCard({ portfolioId, sectorData, assetTypeData, currenc
         const headers = await authHeaders();
         const response = await fetch(`${API_BASE_URL}/api/portfolios/${portfolioId}/geography`, {
           headers,
+          cache: "no-store",
         });
         if (!response.ok) throw new Error("Failed to load geography");
         setGeography((await response.json()) as GeographyResponse);
@@ -615,15 +616,16 @@ export function AllocationCard({ portfolioId, sectorData, assetTypeData, currenc
     setGeoRefreshing(true);
     try {
       const headers = await authHeaders();
-      const response = await fetch(`${API_BASE_URL}/api/portfolios/${portfolioId}/geography`, {
-        method: "POST",
-        headers,
-      });
+      const response = await fetch(
+        `${API_BASE_URL}/api/portfolios/${portfolioId}/geography/enqueue`,
+        {
+          method: "POST",
+          headers,
+        },
+      );
       if (!response.ok) throw new Error("Failed to refresh geography");
-      const body = (await response.json()) as { geography?: GeographyResponse };
-      if (body.geography) setGeography(body.geography);
-      else await loadGeography();
-      toast.success("Direct geography refreshed");
+      await loadGeography();
+      toast.success("Geography refreshed and ETF research queued");
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Failed to refresh geography");
     } finally {
@@ -643,9 +645,7 @@ export function AllocationCard({ portfolioId, sectorData, assetTypeData, currenc
         },
       );
       if (!response.ok) throw new Error("Failed to queue geography research");
-      const body = (await response.json()) as { geography?: GeographyResponse };
-      if (body.geography) setGeography(body.geography);
-      else await loadGeography();
+      await loadGeography();
       toast.success("ETF geography research queued");
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Failed to queue geography research");
@@ -669,6 +669,14 @@ export function AllocationCard({ portfolioId, sectorData, assetTypeData, currenc
     }, 4000);
     return () => window.clearInterval(id);
   }, [geography?.queuedResearchCount, geography?.runningResearchCount, loadGeography, view]);
+
+  useEffect(() => {
+    if (view !== "geography" || !geography) return;
+    const id = window.setInterval(() => {
+      void loadGeography({ quiet: true });
+    }, 60_000);
+    return () => window.clearInterval(id);
+  }, [view, geography, loadGeography]);
 
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-2xl border border-hairline bg-surface p-4">
@@ -700,8 +708,7 @@ export function AllocationCard({ portfolioId, sectorData, assetTypeData, currenc
                 </button>
               </TooltipTrigger>
               <TooltipContent side="bottom" className="max-w-56 text-center">
-                <div>Refresh direct equity geography from ISIN.</div>
-                <div>ETF research runs automatically for new funds.</div>
+                <div>Refresh equity geography from ISIN and queue ETF underlying research.</div>
               </TooltipContent>
             </Tooltip>
           </TooltipProvider>
