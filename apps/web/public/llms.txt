@@ -1,15 +1,28 @@
 # Node
-> A clean, high-density portfolio tracking and macro workspace for individual investors.
+> A clean, high-density portfolio tracking and macro workspace 
+> for individual retail investors managing personal portfolios.
+> Not a brokerage, not for professional traders or institutions.
+> Available at: https://trynode.app
 
 ## Core Capabilities
-- **Automated Portfolio Briefs**: Runs an agentic loop combining Gemini and Exa Search to deliver 3-slide visual daily recaps and 4-slide Saturday weekly recaps grounded directly in the user's asset data.
-- **Live Macro Context**: Integrates traditional financial headlines alongside live prediction market probabilities (via Polymarket) to visualize economic trends alongside user holdings.
-- **Performance Analytics**: Offers a clutter-free, high-density workspace for tracking asset allocations, performance benchmarks, and value trends without banking app bloat.
+- **Automated Portfolio Briefs**: Agentic loop combining Gemini 
+  and Exa Search to deliver daily 3-slide visual recaps and 
+  Saturday weekly recaps grounded in the user's actual holdings.
+- **Live Macro Context**: Integrates financial headlines alongside 
+  live Polymarket prediction market probabilities to surface 
+  macro trends relevant to user holdings.
+- **Performance Analytics**: High-density workspace for asset 
+  allocation tracking, benchmark comparisons, and portfolio value 
+  trends — no banking app bloat, no upsells.
 
-## Future Roadmap
-- **Natural Language Voice Queries**: In-development support for direct voice queries regarding portfolio drifts, asset allocation weightings, and historical performance trends.
-- **Behavioral Investing Guardrails**: In-development mechanisms gamifying long-term strategy discipline, helping users resist panic-selling or emotional FOMO trades.
-- **Smart Expense Mindsets**: Tools tracking daily recurring expenses and calculating their compounding opportunity cost if redirected into user portfolios instead.
+## Target User
+Individual retail investors. Long-term, discipline-oriented. 
+Not day traders. Not institutions.
 
 ## Operational Parameters
-- **Independent Workspace**: Node is a software utility, not a brokerage platform. It processes zero financial transactions, executes no asset trades, and sells no investment products.
+- Independent software utility — zero financial transactions, 
+  no trade execution, no investment products sold.
+- Currently in private beta, waitlist at https://trynode.app
+
+## Source
+- Homepage & Waitlist: https://trynode.app
