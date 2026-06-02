@@ -1,0 +1,3 @@
+export const production = {"NEXT_PUBLIC_SUPABASE_URL":"https://sfqowvpuzsqgmwlecgdx.supabase.co","NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY":"sb_publishable_xcYBQwzQm7_Cv8eoqAI8rw_eFVLZiGp","NEXT_PUBLIC_API_URL":"https://binturong-api.nikita-osminine.workers.dev"};
+export const development = {"NEXT_PUBLIC_SUPABASE_URL":"https://sfqowvpuzsqgmwlecgdx.supabase.co","NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY":"sb_publishable_xcYBQwzQm7_Cv8eoqAI8rw_eFVLZiGp","NEXT_PUBLIC_API_URL":"https://binturong-api.nikita-osminine.workers.dev"};
+export const test = {"NEXT_PUBLIC_SUPABASE_URL":"https://sfqowvpuzsqgmwlecgdx.supabase.co","NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY":"sb_publishable_xcYBQwzQm7_Cv8eoqAI8rw_eFVLZiGp"};
