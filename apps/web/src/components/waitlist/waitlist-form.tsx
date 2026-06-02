@@ -107,7 +107,7 @@ export function WaitlistForm({ className }: { className?: string }) {
           type="submit"
           size="lg"
           // relative + overflow-hidden so the ::after shine pseudo-element is clipped
-          className="btn-shine relative h-11 shrink-0 overflow-hidden"
+          className="btn-shine relative h-11 shrink-0 overflow-hidden transition-transform duration-100 active:scale-[0.97]"
           disabled={loading}
         >
           <span className="relative z-10 flex items-center gap-2">

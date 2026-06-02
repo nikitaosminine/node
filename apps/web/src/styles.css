@@ -269,19 +269,25 @@
   }
 }
 
+/* Light mode: dark button → white streak */
 .btn-shine::after {
   content: "";
   position: absolute;
   inset: 0;
   width: 40%;
-  background: linear-gradient(
-    90deg,
-    transparent,
-    rgba(255, 255, 255, 0.18),
-    transparent
-  );
-  animation: btn-shine 2.8s ease-in-out infinite;
-  animation-delay: 0.8s;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.18), transparent);
+  transform: translateX(-100%) skewX(-12deg);
+  pointer-events: none;
+}
+
+/* Dark mode: light button → dark streak */
+.dark .btn-shine::after {
+  background: linear-gradient(90deg, transparent, rgba(0, 0, 0, 0.12), transparent);
+}
+
+/* Fire once on hover, stay off-screen when done (no looping) */
+.btn-shine:hover::after {
+  animation: btn-shine 0.7s ease-out forwards;
 }
 
 /* Rich text editor output (ThesisStack) */

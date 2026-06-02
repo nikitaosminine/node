@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { NodeLogo } from "@/components/node-logo";
 import { ThemeSwitcher } from "@/components/ThemeSwitcher";
+import { Button } from "@/components/ui/button";
 
 const SCROLL_THRESHOLD = 60;
 
@@ -19,13 +20,6 @@ export function WaitlistHeader() {
 
   return (
     <div className="sticky top-0 z-50 w-full">
-      {/*
-        Single element — transitions the same properties in both directions.
-        Switching entire className strings breaks CSS transitions because the
-        browser sees two different elements. Instead we keep one element and
-        animate max-width, padding, border-radius, and background via inline
-        style values toggled by the scrolled flag.
-      */}
       <div
         style={{
           maxWidth: scrolled ? "32rem" : "100%",
@@ -58,7 +52,8 @@ export function WaitlistHeader() {
             style={{
               width: scrolled ? "1.5rem" : "2.25rem",
               height: scrolled ? "1.5rem" : "2.25rem",
-              transition: "width 500ms cubic-bezier(0.4,0,0.2,1), height 500ms cubic-bezier(0.4,0,0.2,1)",
+              transition:
+                "width 500ms cubic-bezier(0.4,0,0.2,1), height 500ms cubic-bezier(0.4,0,0.2,1)",
             }}
           >
             <NodeLogo className="h-full w-full" />
@@ -74,12 +69,13 @@ export function WaitlistHeader() {
           </span>
         </div>
 
-        {/* Right: login link + theme toggle */}
+        {/* Right: muted hint text (expanded only) + Log in button + theme toggle */}
         <div className="flex items-center gap-3">
-          <p
+          {/* "Already have an invitation?" — fades out when collapsed */}
+          <span
             style={{
               opacity: scrolled ? 0 : 1,
-              maxWidth: scrolled ? "0px" : "400px",
+              maxWidth: scrolled ? "0px" : "260px",
               overflow: "hidden",
               whiteSpace: "nowrap",
               transition:
@@ -87,22 +83,24 @@ export function WaitlistHeader() {
             }}
             className="text-sm text-muted-foreground"
           >
-            Already have an invitation?{" "}
-            <Link href="/login" className="text-foreground transition-colors hover:underline">
-              Log in here
-            </Link>
-          </p>
-          <Link
-            href="/login"
+            Already have an invitation?
+          </span>
+
+          {/* Log in — always present as an outline button; shrinks on collapse */}
+          <Button
+            variant="outline"
+            size="sm"
+            asChild
             style={{
-              opacity: scrolled ? 1 : 0,
-              pointerEvents: scrolled ? "auto" : "none",
-              transition: "opacity 400ms cubic-bezier(0.4,0,0.2,1)",
+              fontSize: scrolled ? "0.75rem" : "0.875rem",
+              paddingLeft: scrolled ? "0.625rem" : undefined,
+              paddingRight: scrolled ? "0.625rem" : undefined,
+              transition: "font-size 500ms cubic-bezier(0.4,0,0.2,1), padding 500ms cubic-bezier(0.4,0,0.2,1)",
             }}
-            className="text-xs text-muted-foreground hover:text-foreground"
           >
-            Log in
-          </Link>
+            <Link href="/login">Log in</Link>
+          </Button>
+
           <ThemeSwitcher compact />
         </div>
       </div>
