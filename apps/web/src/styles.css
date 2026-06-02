@@ -259,6 +259,31 @@
   }
 }
 
+/* Waitlist button shine sweep */
+@keyframes btn-shine {
+  0% {
+    transform: translateX(-100%) skewX(-12deg);
+  }
+  100% {
+    transform: translateX(250%) skewX(-12deg);
+  }
+}
+
+.btn-shine::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  width: 40%;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    rgba(255, 255, 255, 0.18),
+    transparent
+  );
+  animation: btn-shine 2.8s ease-in-out infinite;
+  animation-delay: 0.8s;
+}
+
 /* Rich text editor output (ThesisStack) */
 .thesis-prose {
   font-size: 0.875rem;
