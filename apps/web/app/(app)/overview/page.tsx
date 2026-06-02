@@ -125,6 +125,52 @@ function NoPortfolioSelected() {
 }
 
 // ---------------------------------------------------------------------------
+// Loading skeleton — mirrors the loaded layout so first paint reserves the
+// same vertical space (prevents CLS as content swaps in). Used by both the
+// Suspense fallback and the in-component loading state.
+// ---------------------------------------------------------------------------
+
+function OverviewSkeleton() {
+  return (
+    <div className="mx-auto flex w-full max-w-[1500px] flex-col gap-6 px-6 pb-8 pt-4">
+      {/* Portfolio name */}
+      <div className="h-8 w-48 animate-pulse rounded bg-surface-2" />
+
+      {/* KPI strip — same container + grid as the real strip so its height
+          matches exactly at every breakpoint */}
+      <div className="rounded-2xl border border-hairline bg-surface px-4 py-3">
+        <dl className="grid grid-cols-2 gap-x-3 gap-y-3 sm:grid-cols-4 xl:grid-cols-7">
+          {Array.from({ length: 7 }).map((_, i) => (
+            <div
+              key={i}
+              className={`min-w-0 ${i > 0 ? "xl:border-l xl:border-hairline xl:pl-4" : ""}`}
+            >
+              <div className="h-[14px] w-20 animate-pulse rounded bg-surface-2" />
+              <div className="mt-1 h-[42px] w-28 animate-pulse rounded bg-surface-2" />
+            </div>
+          ))}
+        </dl>
+      </div>
+
+      {/* Chart card */}
+      <div className="h-[480px] animate-pulse rounded-2xl bg-surface-2" />
+
+      {/* Recap & insights row (two cards) */}
+      <div className="grid grid-cols-1 gap-6 md:grid-cols-2">
+        <div className="h-44 animate-pulse rounded-2xl bg-surface-2" />
+        <div className="h-44 animate-pulse rounded-2xl bg-surface-2" />
+      </div>
+
+      {/* News + Polymarket feeds */}
+      <div className="grid grid-cols-1 gap-6 md:grid-cols-2">
+        <div className="h-64 animate-pulse rounded-xl bg-surface-2" />
+        <div className="h-64 animate-pulse rounded-xl bg-surface-2" />
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Overview content (requires portfolioId)
 // ---------------------------------------------------------------------------
 
@@ -284,17 +330,7 @@ function OverviewContent({ portfolioId }: { portfolioId: string }) {
   }, [portfolio, fetchQuotes]);
 
   if (loading) {
-    return (
-      <div className="mx-auto flex w-full max-w-[1500px] flex-col gap-6 px-6 pb-8 pt-4">
-        <div className="h-8 w-48 animate-pulse rounded bg-surface-2" />
-        <div className="h-16 animate-pulse rounded-2xl bg-surface-2" />
-        <div className="h-[480px] animate-pulse rounded-2xl bg-surface-2" />
-        <div className="grid grid-cols-1 gap-6 md:grid-cols-2">
-          <div className="h-64 animate-pulse rounded-xl bg-surface-2" />
-          <div className="h-64 animate-pulse rounded-xl bg-surface-2" />
-        </div>
-      </div>
-    );
+    return <OverviewSkeleton />;
   }
 
   if (!portfolio) {
@@ -412,10 +448,10 @@ function OverviewContent({ portfolioId }: { portfolioId: string }) {
                 {kpi.label}
               </dt>
               {!marketReady ? (
-                <dd className="mt-1 h-[22px] w-28 animate-pulse rounded bg-surface-2" />
+                <dd className="mt-1 h-[42px] w-28 animate-pulse rounded bg-surface-2" />
               ) : (
                 <dd
-                  className={`mt-1 flex min-w-0 flex-col gap-1 font-mono leading-none tabular-nums ${
+                  className={`mt-1 flex min-h-[42px] min-w-0 flex-col gap-1 font-mono leading-none tabular-nums ${
                     "muted" in kpi && kpi.muted
                       ? "text-foreground-muted"
                       : "tone" in kpi && kpi.tone === "positive"
@@ -448,10 +484,7 @@ function OverviewContent({ portfolioId }: { portfolioId: string }) {
       </div>
 
       {/* Chart with explicit height */}
-      <div
-        className="flex flex-col rounded-2xl border border-hairline bg-surface p-5"
-        style={{ height: 480 }}
-      >
+      <div className="flex h-[480px] flex-col rounded-2xl border border-hairline bg-surface p-5">
         <div className="shrink-0 text-[11px] uppercase tracking-widest text-foreground-muted">
           Portfolio value
         </div>
@@ -487,13 +520,7 @@ function OverviewPage() {
 
 export default function Page() {
   return (
-    <Suspense
-      fallback={
-        <div className="flex flex-1 items-center justify-center p-8">
-          <div className="h-8 w-8 animate-pulse rounded-full bg-surface-2" />
-        </div>
-      }
-    >
+    <Suspense fallback={<OverviewSkeleton />}>
       <OverviewPage />
     </Suspense>
   );
