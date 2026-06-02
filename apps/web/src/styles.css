@@ -286,7 +286,7 @@
 
 /* Fire once on hover, stay off-screen when done (no looping) */
 .btn-shine:hover::after {
-  animation: btn-shine 0.7s ease-out forwards;
+  animation: btn-shine 1.4s ease-in-out forwards;
 }
 
 /* Rich text editor output (ThesisStack) */
