@@ -1,8 +1,7 @@
 import type { Metadata } from "next";
-import Link from "next/link";
 import { BarChart3, Globe, type LucideIcon, Mic, Newspaper, Receipt, ShieldCheck } from "lucide-react";
 import { NodeLogo } from "@/components/node-logo";
-import { ThemeSwitcher } from "@/components/ThemeSwitcher";
+import { WaitlistHeader } from "@/components/waitlist/waitlist-header";
 import { WaitlistForm } from "@/components/waitlist/waitlist-form";
 
 const SITE_URL = "https://trynode.app";
@@ -109,28 +108,13 @@ export default function WaitlistLandingPage() {
         dangerouslySetInnerHTML={{ __html: JSON.stringify(JSON_LD) }}
       />
 
-      {/* ── Header ─────────────────────────────────────────────── */}
-      <header className="border-b border-hairline bg-background">
-        <Container className="flex items-center justify-between py-5">
-          <div className="flex items-center gap-2.5">
-            <NodeLogo className="h-9 w-9" />
-            <span className="text-lg font-semibold tracking-tight">Node</span>
-          </div>
-          <div className="flex items-center gap-3">
-            <p className="text-sm text-muted-foreground">
-              Already have an invitation?{" "}
-              <Link href="/login" className="text-foreground transition-colors hover:underline">
-                Log in here
-              </Link>
-            </p>
-            <ThemeSwitcher compact />
-          </div>
-        </Container>
-      </header>
+      {/* ── Header — sticky, collapses to pill on scroll ──────── */}
+      <WaitlistHeader />
 
       {/* ── Hero — bg-background ────────────────────────────────── */}
       <section className="bg-background py-24 text-center sm:py-32">
         <Container>
+          <NodeLogo className="mx-auto mb-8 h-16 w-16" />
           <h1 className="mx-auto max-w-3xl text-4xl font-semibold tracking-tight sm:text-5xl">
             Track what you own.
             <br />
