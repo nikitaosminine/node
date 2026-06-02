@@ -78,6 +78,8 @@
 :root {
   --radius: 0.75rem;
   color-scheme: light;
+  /* Button shine: white streak on the dark light-mode button */
+  --btn-shine-color: rgba(255, 255, 255, 0.22);
 
   /* Light mode: minimal white workspace with a crisp teal accent. */
   --background: oklch(1 0 0);
@@ -150,6 +152,8 @@
 
 .dark {
   color-scheme: dark;
+  /* Button shine: dark streak on the light dark-mode button */
+  --btn-shine-color: rgba(0, 0, 0, 0.25);
 
   /* Dark mode: black-first, low-chrome surfaces, light text. */
   --background: oklch(0.09 0 0);
@@ -257,6 +261,32 @@
   to {
     transform: translateY(calc(100vh + 160px));
   }
+}
+
+/* Waitlist button shine sweep.
+   0→55%: streak sweeps across. 55→100%: invisible pause off-screen right.
+   The pause makes the repeat obvious — without it the instant reset
+   looks like the animation stopped. */
+@keyframes btn-shine {
+  0%   { transform: translateX(-100%) skewX(-12deg); }
+  40%  { transform: translateX(250%) skewX(-12deg); }
+  100% { transform: translateX(250%) skewX(-12deg); }
+}
+
+/* One rule, two themes — color swaps via --btn-shine-color in :root / .dark */
+.btn-shine::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  width: 40%;
+  background: linear-gradient(90deg, transparent, var(--btn-shine-color), transparent);
+  transform: translateX(-100%) skewX(-12deg);
+  pointer-events: none;
+}
+
+/* Fire once on hover, stay off-screen when done (no looping) */
+.btn-shine:hover::after {
+  animation: btn-shine 2.5s ease-out infinite;
 }
 
 /* Rich text editor output (ThesisStack) */

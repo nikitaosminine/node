@@ -40,12 +40,13 @@ export async function proxy(request: NextRequest) {
   const isAuthPage = pathname === "/login";
   const isRoot = pathname === "/";
 
-  // No valid session → keep them out of the app
-  if (!user && (isProtected || isRoot)) {
+  // No valid session → keep them out of the app. The root `/` is the public
+  // waitlist landing, so logged-out visitors are allowed to stay there.
+  if (!user && isProtected) {
     return NextResponse.redirect(new URL("/login", request.url));
   }
 
-  // Valid session → don't let them sit on /login or the bare root
+  // Valid session → don't let them sit on /login or the waitlist landing
   if (user && (isAuthPage || isRoot)) {
     return NextResponse.redirect(new URL("/portfolios", request.url));
   }
@@ -55,6 +56,6 @@ export async function proxy(request: NextRequest) {
 
 export const config = {
   matcher: [
-    "/((?!_next/static|_next/image|favicon.ico|brand|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)",
+    "/((?!_next/static|_next/image|favicon.ico|brand|robots.txt|sitemap.xml|llms.txt|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)",
   ],
 };
