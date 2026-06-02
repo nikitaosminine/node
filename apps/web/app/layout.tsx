@@ -24,6 +24,7 @@ const dmMono = DM_Mono({
 });
 
 export const metadata: Metadata = {
+  metadataBase: new URL("https://trynode.app"),
   title: "Node",
   description: "Premium agentic portfolio management",
   icons: [

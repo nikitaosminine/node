@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { NodeLogo } from "@/components/node-logo";
+import { ThemeSwitcher } from "@/components/ThemeSwitcher";
 import FallBeamBackground from "@/components/lightswind/fall-beam-background";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/hooks/use-auth";
@@ -62,6 +63,9 @@ export default function LoginPage() {
   return (
     <div className="relative flex min-h-screen items-center justify-center overflow-hidden bg-background px-4 text-foreground">
       <FallBeamBackground lineCount={24} beamColorClass="cyan-400" className="opacity-70" />
+      <div className="absolute right-4 top-4 z-20">
+        <ThemeSwitcher compact />
+      </div>
       <div className="relative z-10 w-full max-w-sm">
         {/* Logo */}
         <div className="mb-8 flex items-center justify-center gap-3">
