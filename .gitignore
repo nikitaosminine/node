@@ -43,3 +43,6 @@ apps/api/*.txt
 
 # OpenNext build output (legacy, unused on Vercel)
 apps/web/.open-next/
+
+# Cheat sheets
+WORKFLOW.md
