@@ -65,7 +65,6 @@ const ROADMAP = [
   },
 ];
 
-// JSON-LD for SEO + GEO: lets crawlers and AI agents cite Node cleanly.
 const JSON_LD = {
   "@context": "https://schema.org",
   "@type": "SoftwareApplication",
@@ -87,11 +86,18 @@ function FeatureCard({
   body: string;
 }) {
   return (
-    <div className="rounded-xl border border-border bg-card p-6 transition-all duration-300 hover:border-foreground/20">
+    <div className="rounded-xl border border-border bg-card p-6 shadow-sm transition-all duration-300 hover:border-foreground/30 hover:shadow-md">
       <Icon className="h-5 w-5 text-muted-foreground" />
       <h3 className="mt-4 text-base font-semibold tracking-tight">{title}</h3>
       <p className="mt-2 text-sm leading-relaxed text-muted-foreground">{body}</p>
     </div>
+  );
+}
+
+// Inner content wrapper — keeps text/cards within the readable max-width.
+function Container({ children, className = "" }: { children: React.ReactNode; className?: string }) {
+  return (
+    <div className={`mx-auto w-full max-w-5xl px-6 ${className}`}>{children}</div>
   );
 }
 
@@ -103,11 +109,11 @@ export default function WaitlistLandingPage() {
         dangerouslySetInnerHTML={{ __html: JSON.stringify(JSON_LD) }}
       />
 
-      <div className="mx-auto w-full max-w-5xl px-6">
-        {/* Header */}
-        <header className="flex items-center justify-between py-5">
-          <div className="flex items-center gap-2">
-            <NodeLogo className="h-7 w-7" />
+      {/* ── Header ─────────────────────────────────────────────── */}
+      <header className="border-b border-hairline bg-background">
+        <Container className="flex items-center justify-between py-5">
+          <div className="flex items-center gap-2.5">
+            <NodeLogo className="h-9 w-9" />
             <span className="text-lg font-semibold tracking-tight">Node</span>
           </div>
           <div className="flex items-center gap-3">
@@ -119,10 +125,12 @@ export default function WaitlistLandingPage() {
             </p>
             <ThemeSwitcher compact />
           </div>
-        </header>
+        </Container>
+      </header>
 
-        {/* Hero */}
-        <section className="border-t border-hairline py-20 text-center sm:py-28">
+      {/* ── Hero — bg-background ────────────────────────────────── */}
+      <section className="bg-background py-24 text-center sm:py-32">
+        <Container>
           <h1 className="mx-auto max-w-3xl text-4xl font-semibold tracking-tight sm:text-5xl">
             Track what you own.
             <br />
@@ -138,10 +146,12 @@ export default function WaitlistLandingPage() {
               Built for retail investors. No spam, just early access updates.
             </p>
           </div>
-        </section>
+        </Container>
+      </section>
 
-        {/* Core features */}
-        <section className="border-t border-hairline py-16 sm:py-20">
+      {/* ── Core features — bg-surface ──────────────────────────── */}
+      <section className="border-t border-hairline bg-surface py-16 sm:py-20">
+        <Container>
           <h2 className="mx-auto max-w-2xl text-center text-2xl font-semibold tracking-tight sm:text-3xl">
             Beyond basic stock charts. A focused workspace for your wealth.
           </h2>
@@ -150,10 +160,12 @@ export default function WaitlistLandingPage() {
               <FeatureCard key={f.title} {...f} />
             ))}
           </div>
-        </section>
+        </Container>
+      </section>
 
-        {/* Transparency & trust */}
-        <section className="border-t border-hairline py-16 text-center sm:py-20">
+      {/* ── Transparency & trust — bg-background ────────────────── */}
+      <section className="border-t border-hairline bg-background py-16 text-center sm:py-20">
+        <Container>
           <h2 className="mx-auto max-w-2xl text-2xl font-semibold tracking-tight sm:text-3xl">
             Built for execution, not speculation.
           </h2>
@@ -162,10 +174,12 @@ export default function WaitlistLandingPage() {
             transactions, execute no trades, and sell no financial products. Our only objective is
             providing unbiased data clarity to help you manage your investment habits.
           </p>
-        </section>
+        </Container>
+      </section>
 
-        {/* Roadmap */}
-        <section className="border-t border-hairline py-16 sm:py-20">
+      {/* ── Roadmap — bg-surface ────────────────────────────────── */}
+      <section className="border-t border-hairline bg-surface py-16 sm:py-20">
+        <Container>
           <h2 className="text-center text-2xl font-semibold tracking-tight sm:text-3xl">
             Where we are going.
           </h2>
@@ -174,10 +188,12 @@ export default function WaitlistLandingPage() {
               <FeatureCard key={r.title} {...r} />
             ))}
           </div>
-        </section>
+        </Container>
+      </section>
 
-        {/* Footer CTA */}
-        <section className="border-t border-hairline py-20 text-center sm:py-24">
+      {/* ── Footer CTA — bg-background ──────────────────────────── */}
+      <section className="border-t border-hairline bg-background py-20 text-center sm:py-24">
+        <Container>
           <h3 className="text-2xl font-semibold tracking-tight sm:text-3xl">
             Ready for a disciplined investing workflow?
           </h3>
@@ -187,12 +203,13 @@ export default function WaitlistLandingPage() {
           <div className="mx-auto mt-8 max-w-md">
             <WaitlistForm />
           </div>
-        </section>
+        </Container>
+      </section>
 
-        <footer className="border-t border-hairline py-8 text-center">
-          <p className="text-xs text-muted-foreground">© 2026 Node. All rights reserved.</p>
-        </footer>
-      </div>
+      {/* ── Footer ─────────────────────────────────────────────── */}
+      <footer className="border-t border-hairline bg-surface py-8 text-center">
+        <p className="text-xs text-muted-foreground">© 2026 Node. All rights reserved.</p>
+      </footer>
     </div>
   );
 }
