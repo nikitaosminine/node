@@ -78,6 +78,8 @@
 :root {
   --radius: 0.75rem;
   color-scheme: light;
+  /* Button shine: white streak on the dark light-mode button */
+  --btn-shine-color: rgba(255, 255, 255, 0.22);
 
   /* Light mode: minimal white workspace with a crisp teal accent. */
   --background: oklch(1 0 0);
@@ -150,6 +152,8 @@
 
 .dark {
   color-scheme: dark;
+  /* Button shine: dark streak on the light dark-mode button */
+  --btn-shine-color: rgba(0, 0, 0, 0.25);
 
   /* Dark mode: black-first, low-chrome surfaces, light text. */
   --background: oklch(0.09 0 0);
@@ -269,20 +273,15 @@
   }
 }
 
-/* Light mode: dark button → white streak */
+/* One rule, two themes — color swaps via --btn-shine-color in :root / .dark */
 .btn-shine::after {
   content: "";
   position: absolute;
   inset: 0;
   width: 40%;
-  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.18), transparent);
+  background: linear-gradient(90deg, transparent, var(--btn-shine-color), transparent);
   transform: translateX(-100%) skewX(-12deg);
   pointer-events: none;
-}
-
-/* Dark mode: light button → dark streak */
-.dark .btn-shine::after {
-  background: linear-gradient(90deg, transparent, rgba(0, 0, 0, 0.12), transparent);
 }
 
 /* Fire once on hover, stay off-screen when done (no looping) */
