@@ -4,7 +4,7 @@
   "type": "module",
   "scripts": {
     "dev": "next dev",
-    "build": "next build --webpack",
+    "build": "next build",
     "build:cf": "node scripts/cf-build.mjs",
     "start": "next start",
     "lint": "eslint ."
