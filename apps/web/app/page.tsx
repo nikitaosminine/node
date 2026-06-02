@@ -114,7 +114,10 @@ export default function WaitlistLandingPage() {
       {/* ── Hero — bg-background ────────────────────────────────── */}
       <section className="bg-background py-24 text-center sm:py-32">
         <Container>
-          <NodeLogo className="mx-auto mb-8 h-16 w-16" />
+          <div className="mb-8 flex items-center justify-center gap-3">
+            <NodeLogo className="h-16 w-16" />
+            <span className="text-4xl font-semibold tracking-tight sm:text-5xl">Node</span>
+          </div>
           <h1 className="mx-auto max-w-3xl text-4xl font-semibold tracking-tight sm:text-5xl">
             Track what you own.
             <br />
