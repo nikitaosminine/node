@@ -7,8 +7,6 @@ import Link from "next/link";
 import { BarChart3, Briefcase } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { OverviewSkeleton } from "@/components/skeletons/overview-skeleton";
-import { NewsFeed } from "@/components/feed/news-feed";
-import { PolymarketFeed } from "@/components/feed/polymarket-feed";
 import { RecapInsightsRow } from "@/components/recaps/recap-insights-row";
 import {
   convertCurrency,
@@ -38,6 +36,25 @@ const PortfolioChart = dynamic(
   {
     ssr: false,
     loading: () => <div className="h-full w-full animate-pulse rounded-lg bg-surface-2" />,
+  },
+);
+
+// Below-the-fold feeds: heavy client components that each fetch on mount. Defer
+// them so they don't compete for the main thread during initial hydration,
+// which lets the primary content (chart + KPIs) paint sooner (better LCP/SI).
+// Placeholders reserve the same h-64 box the loaded feeds occupy → no CLS.
+const NewsFeed = dynamic(
+  () => import("@/components/feed/news-feed").then((m) => m.NewsFeed),
+  {
+    ssr: false,
+    loading: () => <div className="h-64 animate-pulse rounded-xl bg-surface-2" />,
+  },
+);
+const PolymarketFeed = dynamic(
+  () => import("@/components/feed/polymarket-feed").then((m) => m.PolymarketFeed),
+  {
+    ssr: false,
+    loading: () => <div className="h-64 animate-pulse rounded-xl bg-surface-2" />,
   },
 );
 
