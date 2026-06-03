@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useMemo, useCallback } from "react";
+import dynamic from "next/dynamic";
 import { useRouter } from "next/navigation";
 import { MoreHorizontal, Pencil, Plus, Trash2, Upload } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -10,14 +11,13 @@ import { CreateManualModal } from "@/components/create-manual-modal";
 import { EditPortfolioModal } from "@/components/edit-portfolio-modal";
 import { MOCK_PRICES } from "@/lib/mock-data";
 import { toast } from "sonner";
-import { LineChart, Line, ResponsiveContainer } from "recharts";
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { OrbitRing } from "@/components/loading-ui/orbit-ring";
+import { PortfoliosSkeleton } from "@/components/skeletons/portfolios-skeleton";
 import {
   DEFAULT_PORTFOLIO_CURRENCY,
   convertCurrency,
@@ -134,24 +134,15 @@ function StatCard({
   );
 }
 
-function Sparkline({ points, positive }: { points: { value: number }[]; positive: boolean }) {
-  return (
-    <div style={{ width: 110, height: 34 }}>
-      <ResponsiveContainer width="100%" height="100%">
-        <LineChart data={points}>
-          <Line
-            type="monotone"
-            dataKey="value"
-            stroke={positive ? "oklch(0.72 0.19 145)" : "oklch(0.65 0.2 25)"}
-            strokeWidth={1.5}
-            dot={false}
-            isAnimationActive={false}
-          />
-        </LineChart>
-      </ResponsiveContainer>
-    </div>
-  );
-}
+// Lazy-loaded so recharts stays out of the initial /portfolios bundle. The
+// loading placeholder reserves the same 110×34 box to avoid layout shift.
+const Sparkline = dynamic(
+  () => import("@/components/portfolio-sparkline").then((m) => m.Sparkline),
+  {
+    ssr: false,
+    loading: () => <div style={{ width: 110, height: 34 }} />,
+  },
+);
 
 function PortfolioCard({
   portfolio,
@@ -566,12 +557,7 @@ export default function PortfoliosPage() {
   const returnPct = totalCost > 0 ? (totalPL / totalCost) * 100 : 0;
 
   if (loading) {
-    return (
-      <div className="flex h-64 items-center justify-center gap-2 text-sm text-muted-foreground">
-        <OrbitRing className="size-6" />
-        <span>Loading portfolios.</span>
-      </div>
-    );
+    return <PortfoliosSkeleton />;
   }
 
   return (

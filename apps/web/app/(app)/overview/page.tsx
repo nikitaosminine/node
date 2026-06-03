@@ -1,11 +1,12 @@
 "use client";
 
 import { useState, useEffect, useCallback, useMemo, Suspense } from "react";
+import dynamic from "next/dynamic";
 import { useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { BarChart3, Briefcase } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
-import { PortfolioChart } from "@/components/portfolio-chart";
+import { OverviewSkeleton } from "@/components/skeletons/overview-skeleton";
 import { NewsFeed } from "@/components/feed/news-feed";
 import { PolymarketFeed } from "@/components/feed/polymarket-feed";
 import { RecapInsightsRow } from "@/components/recaps/recap-insights-row";
@@ -28,6 +29,17 @@ import {
   type TransactionApiRow,
   computeRealizedSellPnL,
 } from "@/lib/portfolio-math";
+
+// Lazy-load the chart: it pulls in recharts + framer-motion, which we keep out
+// of the initial /overview bundle. The parent card reserves a fixed 480px, so
+// the loading placeholder swaps to the chart with no layout shift.
+const PortfolioChart = dynamic(
+  () => import("@/components/portfolio-chart").then((m) => m.PortfolioChart),
+  {
+    ssr: false,
+    loading: () => <div className="h-full w-full animate-pulse rounded-lg bg-surface-2" />,
+  },
+);
 
 // ---------------------------------------------------------------------------
 // Types
@@ -120,52 +132,6 @@ function NoPortfolioSelected() {
         <BarChart3 className="h-4 w-4" />
         Manage portfolios
       </Link>
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Loading skeleton — mirrors the loaded layout so first paint reserves the
-// same vertical space (prevents CLS as content swaps in). Used by both the
-// Suspense fallback and the in-component loading state.
-// ---------------------------------------------------------------------------
-
-function OverviewSkeleton() {
-  return (
-    <div className="mx-auto flex w-full max-w-[1500px] flex-col gap-6 px-6 pb-8 pt-4">
-      {/* Portfolio name */}
-      <div className="h-8 w-48 animate-pulse rounded bg-surface-2" />
-
-      {/* KPI strip — same container + grid as the real strip so its height
-          matches exactly at every breakpoint */}
-      <div className="rounded-2xl border border-hairline bg-surface px-4 py-3">
-        <dl className="grid grid-cols-2 gap-x-3 gap-y-3 sm:grid-cols-4 xl:grid-cols-7">
-          {Array.from({ length: 7 }).map((_, i) => (
-            <div
-              key={i}
-              className={`min-w-0 ${i > 0 ? "xl:border-l xl:border-hairline xl:pl-4" : ""}`}
-            >
-              <div className="h-[14px] w-20 animate-pulse rounded bg-surface-2" />
-              <div className="mt-1 h-[42px] w-28 animate-pulse rounded bg-surface-2" />
-            </div>
-          ))}
-        </dl>
-      </div>
-
-      {/* Chart card */}
-      <div className="h-[480px] animate-pulse rounded-2xl bg-surface-2" />
-
-      {/* Recap & insights row (two cards) */}
-      <div className="grid grid-cols-1 gap-6 md:grid-cols-2">
-        <div className="h-44 animate-pulse rounded-2xl bg-surface-2" />
-        <div className="h-44 animate-pulse rounded-2xl bg-surface-2" />
-      </div>
-
-      {/* News + Polymarket feeds */}
-      <div className="grid grid-cols-1 gap-6 md:grid-cols-2">
-        <div className="h-64 animate-pulse rounded-xl bg-surface-2" />
-        <div className="h-64 animate-pulse rounded-xl bg-surface-2" />
-      </div>
     </div>
   );
 }
