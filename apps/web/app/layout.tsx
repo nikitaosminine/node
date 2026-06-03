@@ -46,6 +46,11 @@ export const metadata: Metadata = {
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en" className={`${dmSans.variable} ${dmMono.variable}`} suppressHydrationWarning>
+      <head>
+        {/* Vercel Analytics/Speed Insights load their script from this origin;
+            preconnecting shaves ~90ms off the critical path (per Lighthouse). */}
+        <link rel="preconnect" href="https://va.vercel-scripts.com" />
+      </head>
       <body>
         <ThemeInitializer />
         {children}

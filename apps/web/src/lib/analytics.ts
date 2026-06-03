@@ -1,7 +1,12 @@
-import mixpanel from "mixpanel-browser";
 import type { User } from "@supabase/supabase-js";
 
-export function identifyUser(user: User) {
+// mixpanel-browser is loaded lazily (dynamic import) so it stays out of the
+// initial bundle and off the critical hydration path — it ran on load before,
+// causing a forced reflow (flagged by Lighthouse). These calls are
+// fire-and-forget from the auth hook, so returning a promise is fine.
+
+export async function identifyUser(user: User) {
+  const { default: mixpanel } = await import("mixpanel-browser");
   mixpanel.identify(user.id);
   const meta = user.user_metadata ?? {};
   mixpanel.people.set({
@@ -13,6 +18,7 @@ export function identifyUser(user: User) {
   });
 }
 
-export function resetAnalytics() {
+export async function resetAnalytics() {
+  const { default: mixpanel } = await import("mixpanel-browser");
   mixpanel.reset();
 }

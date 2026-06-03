@@ -1,13 +1,12 @@
 "use client";
 
 import { useState, useEffect, useCallback, useMemo, Suspense } from "react";
+import dynamic from "next/dynamic";
 import { useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { BarChart3, Briefcase } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
-import { PortfolioChart } from "@/components/portfolio-chart";
-import { NewsFeed } from "@/components/feed/news-feed";
-import { PolymarketFeed } from "@/components/feed/polymarket-feed";
+import { OverviewSkeleton } from "@/components/skeletons/overview-skeleton";
 import { RecapInsightsRow } from "@/components/recaps/recap-insights-row";
 import {
   convertCurrency,
@@ -28,6 +27,36 @@ import {
   type TransactionApiRow,
   computeRealizedSellPnL,
 } from "@/lib/portfolio-math";
+
+// Lazy-load the chart: it pulls in recharts + framer-motion, which we keep out
+// of the initial /overview bundle. The parent card reserves a fixed 480px, so
+// the loading placeholder swaps to the chart with no layout shift.
+const PortfolioChart = dynamic(
+  () => import("@/components/portfolio-chart").then((m) => m.PortfolioChart),
+  {
+    ssr: false,
+    loading: () => <div className="h-full w-full animate-pulse rounded-lg bg-surface-2" />,
+  },
+);
+
+// Below-the-fold feeds: heavy client components that each fetch on mount. Defer
+// them so they don't compete for the main thread during initial hydration,
+// which lets the primary content (chart + KPIs) paint sooner (better LCP/SI).
+// Placeholders reserve the same h-64 box the loaded feeds occupy → no CLS.
+const NewsFeed = dynamic(
+  () => import("@/components/feed/news-feed").then((m) => m.NewsFeed),
+  {
+    ssr: false,
+    loading: () => <div className="h-64 animate-pulse rounded-xl bg-surface-2" />,
+  },
+);
+const PolymarketFeed = dynamic(
+  () => import("@/components/feed/polymarket-feed").then((m) => m.PolymarketFeed),
+  {
+    ssr: false,
+    loading: () => <div className="h-64 animate-pulse rounded-xl bg-surface-2" />,
+  },
+);
 
 // ---------------------------------------------------------------------------
 // Types
@@ -284,17 +313,7 @@ function OverviewContent({ portfolioId }: { portfolioId: string }) {
   }, [portfolio, fetchQuotes]);
 
   if (loading) {
-    return (
-      <div className="mx-auto flex w-full max-w-[1500px] flex-col gap-6 px-6 pb-8 pt-4">
-        <div className="h-8 w-48 animate-pulse rounded bg-surface-2" />
-        <div className="h-16 animate-pulse rounded-2xl bg-surface-2" />
-        <div className="h-[480px] animate-pulse rounded-2xl bg-surface-2" />
-        <div className="grid grid-cols-1 gap-6 md:grid-cols-2">
-          <div className="h-64 animate-pulse rounded-xl bg-surface-2" />
-          <div className="h-64 animate-pulse rounded-xl bg-surface-2" />
-        </div>
-      </div>
-    );
+    return <OverviewSkeleton />;
   }
 
   if (!portfolio) {
@@ -412,10 +431,10 @@ function OverviewContent({ portfolioId }: { portfolioId: string }) {
                 {kpi.label}
               </dt>
               {!marketReady ? (
-                <dd className="mt-1 h-[22px] w-28 animate-pulse rounded bg-surface-2" />
+                <dd className="mt-1 h-[42px] w-28 animate-pulse rounded bg-surface-2" />
               ) : (
                 <dd
-                  className={`mt-1 flex min-w-0 flex-col gap-1 font-mono leading-none tabular-nums ${
+                  className={`mt-1 flex min-h-[42px] min-w-0 flex-col gap-1 font-mono leading-none tabular-nums ${
                     "muted" in kpi && kpi.muted
                       ? "text-foreground-muted"
                       : "tone" in kpi && kpi.tone === "positive"
@@ -448,10 +467,7 @@ function OverviewContent({ portfolioId }: { portfolioId: string }) {
       </div>
 
       {/* Chart with explicit height */}
-      <div
-        className="flex flex-col rounded-2xl border border-hairline bg-surface p-5"
-        style={{ height: 480 }}
-      >
+      <div className="flex h-[480px] flex-col rounded-2xl border border-hairline bg-surface p-5">
         <div className="shrink-0 text-[11px] uppercase tracking-widest text-foreground-muted">
           Portfolio value
         </div>
@@ -487,13 +503,7 @@ function OverviewPage() {
 
 export default function Page() {
   return (
-    <Suspense
-      fallback={
-        <div className="flex flex-1 items-center justify-center p-8">
-          <div className="h-8 w-8 animate-pulse rounded-full bg-surface-2" />
-        </div>
-      }
-    >
+    <Suspense fallback={<OverviewSkeleton />}>
       <OverviewPage />
     </Suspense>
   );
