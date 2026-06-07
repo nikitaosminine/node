@@ -5,9 +5,9 @@ import { WaitlistHeader } from "@/components/waitlist/waitlist-header";
 import { WaitlistForm } from "@/components/waitlist/waitlist-form";
 
 const SITE_URL = "https://trynode.app";
-const TITLE = "Node | AI-Native Portfolio Tracker & Macro Workspace";
+const TITLE = "Node | AI-Native Personal Finance Hub";
 const DESCRIPTION =
-  "A clean, high-density investing workspace for retail investors. Track portfolio trends, view automated market briefs, and monitor macro developments without the bloat.";
+  "The AI-native personal finance hub that explains your money. One clear view of your finances, with plain-language answers grounded in your data and real-world events.";
 
 export const metadata: Metadata = {
   metadataBase: new URL(SITE_URL),
@@ -31,36 +31,36 @@ export const metadata: Metadata = {
 const FEATURES = [
   {
     icon: Newspaper,
-    title: "Portfolio-Specific Briefs",
-    body: "Stop scrolling through generic financial news. Node runs an automated data loop to generate daily, bite-sized visual recaps and stories mapped directly to the specific stocks and ETFs you hold.",
+    title: "Recaps That Explain",
+    body: "Daily and weekly, Node turns what happened to your portfolio into plain language — what moved, and why. The brief you'd actually read, mapped to the exact holdings you own.",
   },
   {
     icon: Globe,
     title: "Live Macro Context",
-    body: "See how real-world events impact broader markets. Node integrates traditional news headlines alongside live prediction market probabilities, giving you a clearer picture of shifting economic trends.",
+    body: "See how real-world events impact your portfolio. Node integrates traditional news alongside live prediction market probabilities, giving you a clearer picture of shifting economic and market trends.",
   },
   {
     icon: BarChart3,
-    title: "Clear Performance Analytics",
-    body: "A high-density interface built strictly for tracking portfolio value trends, asset allocations, and performance benchmarks—without the visual clutter or hidden upsells of traditional banking apps.",
+    title: "One Clear View",
+    body: "Portfolio value, allocations, and benchmarks in a single high-density view — no clutter, no upsells, none of the noise of a banking app.",
   },
 ];
 
 const ROADMAP = [
   {
     icon: Mic,
-    title: "Natural Language Queries",
-    body: "Query your portfolio natively using your voice. Ask Node about monthly performance trends, category drifts, or macro exposure, and receive direct, data-grounded answers without digging through menus.",
+    title: "Ask It Anything",
+    body: "Talk to Node in plain language — how your month went, where you're drifting, what you're exposed to. And because it's built to remember you, the answers get more personal the longer you use it.",
   },
   {
     icon: ShieldCheck,
     title: "Behavioral Guardrails",
-    body: "Most consumer finance apps try to incentivize high trading volume. Node is being designed to reward long-term discipline—helping you track investment streaks, resist emotional panic-selling, and stick to your strategy.",
+    body: "Most apps reward trading more. Node is designed to reward discipline — tracking your streaks, helping you resist panic-selling, and keeping you on your strategy.",
   },
   {
     icon: Receipt,
-    title: "Smart Expense Mindsets",
-    body: "Connect daily recurring spending habits directly to your wealth goals. Node highlights the long-term opportunity cost of friction expenses, mapping out how automated changes compound when redirected into your portfolio.",
+    title: "Beyond Your Portfolio",
+    body: "Budget, spending, and goals join the picture — connecting everyday money decisions to your long-term wealth, so the whole hub reasons together.",
   },
 ];
 
@@ -119,18 +119,18 @@ export default function WaitlistLandingPage() {
             <span className="text-4xl font-semibold tracking-tight sm:text-5xl">Node</span>
           </div>
           <h1 className="mx-auto max-w-3xl text-4xl font-semibold tracking-tight sm:text-5xl">
-            Track what you own.
+            Your finances, explained.
             <br />
-            Understand why you own it.
+            At any time.
           </h1>
           <p className="mx-auto mt-6 max-w-2xl text-base text-muted-foreground sm:text-lg">
-            Node combines portfolio tracking, asset allocation analytics, and macro market
-            intelligence into a single, clutter-free workspace designed for individual investors.
+            The personal finance hub that knows you — bound to your data and aware of what's happening in the world. 
+            One clear view, and answers the moment you ask.
           </p>
           <div className="mx-auto mt-8 max-w-md">
             <WaitlistForm />
             <p className="mt-3 text-xs text-muted-foreground">
-              Built for retail investors. No spam, just early access updates.
+              Built for retail investors.
             </p>
           </div>
         </Container>
@@ -140,7 +140,7 @@ export default function WaitlistLandingPage() {
       <section className="border-t border-hairline bg-surface py-16 sm:py-20">
         <Container>
           <h2 className="mx-auto max-w-2xl text-center text-2xl font-semibold tracking-tight sm:text-3xl">
-            Beyond basic stock charts. A focused workspace for your wealth.
+            Not another dashboard. Node explains how and why your money is moving.
           </h2>
           <div className="mt-10 grid gap-4 sm:grid-cols-3">
             {FEATURES.map((f) => (
@@ -154,12 +154,12 @@ export default function WaitlistLandingPage() {
       <section className="border-t border-hairline bg-background py-16 text-center sm:py-20">
         <Container>
           <h2 className="mx-auto max-w-2xl text-2xl font-semibold tracking-tight sm:text-3xl">
-            Built for execution, not speculation.
+            Built for clarity, not commissions.
           </h2>
           <p className="mx-auto mt-6 max-w-2xl text-base leading-relaxed text-muted-foreground">
-            Node is an independent software tool, not a brokerage platform. We process no financial
-            transactions, execute no trades, and sell no financial products. Our only objective is
-            providing unbiased data clarity to help you manage your investment habits.
+          Node never touches your money — no trades, no transactions, nothing to sell you.
+          That independence is the point: with nothing to push, the only thing Node optimizes
+          for is whether you actually understand what's going on.
           </p>
         </Container>
       </section>
@@ -168,7 +168,7 @@ export default function WaitlistLandingPage() {
       <section className="border-t border-hairline bg-surface py-16 sm:py-20">
         <Container>
           <h2 className="text-center text-2xl font-semibold tracking-tight sm:text-3xl">
-            Where we are going.
+            Where Node is headed.
           </h2>
           <div className="mt-10 grid gap-4 sm:grid-cols-3">
             {ROADMAP.map((r) => (
@@ -182,10 +182,10 @@ export default function WaitlistLandingPage() {
       <section className="border-t border-hairline bg-background py-20 text-center sm:py-24">
         <Container>
           <h3 className="text-2xl font-semibold tracking-tight sm:text-3xl">
-            Ready for a disciplined investing workflow?
+            Finances that finally make sense.
           </h3>
           <p className="mx-auto mt-4 max-w-xl text-base text-muted-foreground">
-            Secure your spot on the waitlist today to get early access to the beta.
+            Join the waitlist for early access.
           </p>
           <div className="mx-auto mt-8 max-w-md">
             <WaitlistForm />

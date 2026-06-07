@@ -2,129 +2,97 @@
   <img src="./Node_assets/hexagon/node-logo-horizontal-white.svg" width="340" alt="Node logo" />
 </p>
 
-AI-native portfolio tracking app for retail investors.
-Node combines portfolio and thesis tracking, AI-assisted market intelligence into a clean and modern investing workspace designed for individual investors.
+<p align="center"><b>An AI-native personal finance app — built solo for now, and looking for the right people to build it with.</b></p>
 
-## Overview
+<p align="center">
+Node starts as a portfolio tracker that explains what's moving your money — and is being built toward a personal finance hub that remembers you. The bet: future users of personal finance tools would expect personalisation in form of persistent memory and voice interactions.
+</p>
 
-Traditional bank apps do not prioritize UX and do not treat them as products. Other options can sometimes feel overwhelming and try to do too many things at once. Node aims to bridge the gap between great UX and AI-driven utility and become a daily companinion for retail investors.
+---
 
-* Track and understand portfolio composition
-* Maintain and revisit investment theses
-* Connect macro events to portfolio impact
-* Receive briefs and insights in a stories format
-* Build more disciplined investing and spending habits
+## The problem
 
-This project was built as a product-first exploration of how AI agents can improve personal finance for an average retail investor.
+Two things are broken about how retail investors manage money today.
 
-## Current Features
+- **Incumbents have poor UX.** Bank apps don't treat their interfaces as products. The richer alternatives swing the other way — bloated, doing everything, still missing the simple things an individual investor actually wants. In France especially, there's a gap between a clean experience and genuine utility.
+- **Every tool is fragmented and stateless.** Your portfolio is in one app, your thesis in your head, your goals nowhere. Nothing connects them, and nothing *remembers* you. Each session starts from zero.
 
-* Clean UI
-* Portfolio value tracking: trends line and performance
-* Benchmark overlay
-* Detailed allocation breakdown
-* Live prices
-* Thesis-tracking AI agent
+Node closes both gaps: bridge great UX with AI-driven utility, and build a system that gets smarter the longer you use it.
 
-## Upcoming Features
+## What makes Node different
 
-* News feed tailored to the portfolio holdings
-* Polymarket feed with macro events to compliment the ongoing news
-* AI-driven daily/weekly market briefs
-* Portfolio notifications and insights (e.g. allocation drifts)
-* Smarter expense management
-* Gamification for good habit building
+- **UX and AI utility, together** — neither traded off for the other. That trade-off is the whole reason incumbents fall short.
+- **Numbers are computed, never hallucinated** — every figure, percentage, and chart is calculated in code. The model writes the narrative and reasons about meaning; it never invents the numbers. This is already how recaps work.
+- **Memory as the moat** *(the core architectural bet, in progress)* — Node is being built to accumulate longitudinal, user-specific context, so it surfaces the *delta* ("this changed") instead of repeating what you already know. The slick UI and agents are commodities; the accumulated personal memory is what becomes hard to leave.
 
-## Product Vision
+## Current features (live)
 
-The long-term vision is to create an AI-native platform where people can track their investment portfolios, stay macro-aware and build robust habits. Namely:
+- **Daily / weekly recaps** — plain-language explanations of what moved your portfolio and *why*, mapped to the exact holdings you own (agentic loop + deterministic data merge)
+- **Holdings-tailored news feed**
+- **Prediction-market feed** (Polymarket) for live macro context
+- **Benchmark overlay** with AI-suggested comparisons
+- **Allocation breakdown** — sector, asset type, geography
+- **Live prices**
+- **Notes** attached to individual holdings
+- Clean, high-density UI
+- *The Take* — a thesis-tracking agent (early/experimental)
 
-* Understand not only *what* they own, but *why* they own it
-* Track how macro developments affect their thesis and positions
-* Reduce manual portfolio maintenance
-* Develop and maintain investing strategies
-* Access powerful AI tools through frictionless UI
+## Roadmap
+
+**Next**
+- Persistent memory across the app — the "knows you" layer
+- Natural-language / voice queries — ask Node anything about your money
+- Portfolio notifications and insights (e.g. allocation-drift alerts)
+- Rules & strategies (weight targets, rebalancing)
+- Behavioral guardrails — rewarding discipline, not engagement
+
+**The bigger vision**
+- Expense management, budgets, and goals — beyond the portfolio
+- A voice agent that converses across every domain
+- An orchestration layer coordinating multiple specialised domain agents into a single financial companion
+
+## Why now
+
+In France, the average ETF investor has gone from roughly 60 years old in 2018 to about 38 by the end of 2025 (AMF). A generation is starting to invest — and European households still hold far less in equities than they could, with a large share of wealth sitting idle in low-return deposits. The demand is also shifting from tools that *display* data to tools that *interpret* it. Node is positioned as the understanding-and-memory layer for that arriving cohort — a patient bet placed slightly ahead of the wave.
+
+## Tech stack
+
+**Frontend** — Next.js 16, React 19, Tailwind CSS 4, Radix UI, Recharts, Framer Motion
+
+**Backend & infrastructure** — Node.js, Cloudflare Workers, Supabase (Postgres + pgvector)
+
+**AI models** *(optimising for cost / performance — xAI offers competitive models at a fraction of frontier pricing)*
+
+| Use case | Model |
+|---|---|
+| Daily / weekly recaps | `gemini-3.5-flash` |
+| The Take — main agent | `grok-4.20-0309-reasoning` |
+| The Take — sub-agent | `grok-4-1-fast-non-reasoning` |
+| CSV import normalization | `grok-4-1-fast-non-reasoning` |
+| Benchmark suggestions | `grok-4.20-0309-reasoning` |
+
+Other providers under evaluation: DeepSeek (v4 flash/pro), additional Gemini tiers.
 
 ## Why I'm building this
 
-I am building Node as a personal product initiative combining:
+Node is a personal product initiative combining product management, AI experimentation, personal finance, and UX thinking. It started from a simple observation: French incumbents offer subpar UX and lack features I actually wanted, while the alternatives were either too thin or too bloated. The market could use a better tool.
 
-* Product management
-* AI experimentation
-* Personal finance
-* UX thinking
+It's also how I'm learning the modern AI stack hands-on — agents, memory, RAG, orchestration, evals — by making real architectural decisions on a real product, end to end, rather than following tutorials.
 
-The project started from an observation that incubents in France offer a subpar user experience and lack some simple features. 
+## Status
 
-I saw that some apps lacked UX, some other were too bloated and didn't even have features I wanted.
-
-I think the market could use a better tool.
-
-This repository reflects both product exploration and hands-on execution across product design, feature definition, AI usage experimentation and implementation.
-
-## Tech Stack
-
-### Frontend
-
-* Next.js 16
-* React 19
-* Tailwind CSS 4
-* Radix UI
-* Recharts
-* Framer Motion
-
-### Backend & Infrastructure
-
-* Node.js
-* Cloudflare (Workers)
-* Supabase
-
-### AI models
-
-I'm still experimenting with different AI models. 
-
-Shortlisted providers:
-- Deepseek (Deekseek v4 flash/pro)
-- Google (Gemini 3.5 Flash)
-- xAI (Grok)
-
-I chose Grok as a starting point because xAI offers competitive models at a fraction of a cost of other frontier models from OpenAI or Anthropic and I am optimising for cost/performance.
-
-
-* Thesis agents
-  * grok-4.20-0309-reasoning - as main agent
-  * grok-4-1-fast-non-reasoning - as sub agent
-* Import CSV normalization
-  * grok-4-1-fast-non-reasoning
-* Benchmark suggestion
-  * grok-4.20-0309-reasoning
-
-* *Planned:*
-  * AI-driven briefs and recaps: gemini-3.5-flash (released May 19th, 2026) 
-
-
-## Current Status
-
-Node is currently an active work in progress.
-
-The repository may evolve significantly as the product direction matures.
-
-## Notes
-
-This repository is currently public for portfolio and demonstration purposes.
-
-As the product matures, parts of the implementation may become private or be significantly restructured.
+Active work in progress. The repository is public for portfolio and demonstration purposes and may evolve significantly as the product matures; parts of the implementation may later become private or be restructured.
 
 ## Screenshots *(first iteration, work in progress)*
 
-### **Main portfolio page with sector & asset type allocation and holdings table view**
+**Main portfolio page — sector & asset-type allocation with holdings table**
 
-<img width="1920" height="980" alt="Screenshot 2026-05-17 164401" src="https://github.com/user-attachments/assets/0dde30ef-30c9-4d0f-9627-20147da4fa6b" />
+<img width="1920" height="980" alt="Node portfolio page with allocation and holdings" src="https://github.com/user-attachments/assets/0dde30ef-30c9-4d0f-9627-20147da4fa6b" />
 
-### **Main portfolio page with geography breakdown and transactions table view**
+**Main portfolio page — geography breakdown with transactions table**
 
-<img width="1920" height="979" alt="Screenshot 2026-05-17 164533" src="https://github.com/user-attachments/assets/8fd8010e-e641-4a4a-92ca-77bb22f9c4df" />
+<img width="1920" height="979" alt="Node portfolio page with geography breakdown and transactions" src="https://github.com/user-attachments/assets/8fd8010e-e641-4a4a-92ca-77bb22f9c4df" />
 
-### **Thesis page *(branded as The Take)***
+**Thesis page — branded as The Take**
 
-<img width="1920" height="974" alt="Screenshot 2026-05-17 164912" src="https://github.com/user-attachments/assets/d8a8201e-2126-46a1-932f-95789e47181c" />
+<img width="1920" height="974" alt="Node thesis page, The Take" src="https://github.com/user-attachments/assets/d8a8201e-2126-46a1-932f-95789e47181c" />
