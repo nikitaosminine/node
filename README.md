@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="./Node_assets/hexagon/node-logo-horizontal-white.svg" width="340" alt="Node logo" />
+  <img src="./node_app_assets/hexagon/node-logo-horizontal-white.svg" width="340" alt="Node logo" />
 </p>
 
 <p align="center"><b>An AI-native personal finance app — built solo for now, and looking for the right people to build it with.</b></p>
