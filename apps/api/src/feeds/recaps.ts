@@ -58,6 +58,8 @@ interface Env {
   LANGSMITH_PROJECT?: string;
   // Override the LangSmith API base URL (e.g. EU region). Defaults to US.
   LANGSMITH_ENDPOINT?: string;
+  // Required for org-scoped API keys (sent as x-tenant-id).
+  LANGSMITH_WORKSPACE_ID?: string;
 }
 
 function db(env: Env): AnySupabaseClient {
@@ -71,11 +73,13 @@ function langsmithClient(env: Env): Client | null {
   if (!env.LANGSMITH_API_KEY) return null;
   return new Client({
     apiKey: env.LANGSMITH_API_KEY,
-    // Region-specific. US is the default; EU-region accounts must set
-    // LANGSMITH_ENDPOINT to https://eu.api.smith.langchain.com — a 403 on
-    // trace upload / token creation usually means the key's data region
-    // doesn't match this URL.
+    // Region-specific. US is the default; EU-region accounts set
+    // LANGSMITH_ENDPOINT to https://eu.api.smith.langchain.com.
     apiUrl: env.LANGSMITH_ENDPOINT ?? "https://api.smith.langchain.com",
+    // Required by LangSmith for org-scoped API keys (sent as x-tenant-id) —
+    // without it an org-scoped key gets 403 Forbidden. Harmless for
+    // workspace-scoped keys; omitted entirely when unset.
+    workspaceId: env.LANGSMITH_WORKSPACE_ID,
   });
 }
 

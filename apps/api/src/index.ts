@@ -50,6 +50,8 @@ export interface Env {
   LANGSMITH_PROJECT?: string;
   // Override the LangSmith API base URL (e.g. EU region). Defaults to US.
   LANGSMITH_ENDPOINT?: string;
+  // Required for org-scoped API keys (sent as x-tenant-id).
+  LANGSMITH_WORKSPACE_ID?: string;
   // Shared secret protecting operator-only routes (debug + scheduled fanout).
   ADMIN_SECRET?: string;
   // Comma-separated list of allowed browser origins for CORS. When unset, falls

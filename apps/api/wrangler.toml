@@ -22,6 +22,7 @@ SUPABASE_URL = "https://sfqowvpuzsqgmwlecgdx.supabase.co"
 # wrangler secret put LANGSMITH_API_KEY  (recap tracing; when unset, tracing is skipped)
 # wrangler secret put LANGSMITH_PROJECT  (default: node-recaps)
 # wrangler secret put LANGSMITH_ENDPOINT  (EU region: https://eu.api.smith.langchain.com; default: US)
+# wrangler secret put LANGSMITH_WORKSPACE_ID  (required for org-scoped API keys; sent as x-tenant-id)
 # wrangler secret put MAIN_AGENT_SYSTEM_PROMPT
 # wrangler secret put SUB_AGENT_SYSTEM_PROMPT
 # wrangler secret put SUB_AGENT_PLANNING_SYSTEM_PROMPT
