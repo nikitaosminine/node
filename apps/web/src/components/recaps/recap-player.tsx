@@ -3,13 +3,24 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { Pause, Play, X } from "lucide-react";
+import { toast } from "sonner";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
 import { RecapSlide } from "./recap-slide";
-import type { Recap } from "./types";
+import { postLangsmithScore, postSlideFeedback } from "./use-recap";
+import type { Recap, SlideVote } from "./types";
 
 const SLIDE_MS = 10_000;
 const TICK_MS = 50;
+
+// Build the initial optimistic-feedback map from the votes the API returned.
+function seedFeedback(recap: Recap): Map<number, SlideVote> {
+  const map = new Map<number, SlideVote>();
+  for (const f of recap.slide_feedback ?? []) {
+    map.set(f.slide_index, { score: f.score, comment: f.comment ?? "" });
+  }
+  return map;
+}
 
 interface RecapPlayerProps {
   recap: Recap;
@@ -25,14 +36,96 @@ export function RecapPlayer({ recap, open, onOpenChange }: RecapPlayerProps) {
   const [paused, setPaused] = useState(false);
   const dirRef = useRef(1); // animation direction
 
-  // Reset to the first slide whenever the player (re)opens.
+  // Per-slide optimistic feedback (score + comment). Seeded from the API on
+  // open and persisted through navigation — voting on slide 2 must not reset
+  // slide 1's thumb. committedRef tracks what's already saved server-side so a
+  // bare focus/blur doesn't re-POST an unchanged comment.
+  const [optimisticFeedback, setOptimisticFeedback] = useState<Map<number, SlideVote>>(() =>
+    seedFeedback(recap),
+  );
+  const committedRef = useRef<Map<number, string>>(new Map());
+  // Latest recap, read-only — lets the open effect re-seed without re-running
+  // when the parent updates recap identity (e.g. optimistic markSeen).
+  const recapRef = useRef(recap);
+  recapRef.current = recap;
+
+  // Reset position + re-seed feedback whenever the player (re)opens.
   useEffect(() => {
-    if (open) {
-      setIndex(0);
-      setProgress(0);
-      setPaused(false);
-    }
+    if (!open) return;
+    setIndex(0);
+    setProgress(0);
+    setPaused(false);
+    const seeded = seedFeedback(recapRef.current);
+    setOptimisticFeedback(seeded);
+    const committed = new Map<number, string>();
+    seeded.forEach((v, k) => committed.set(k, v.comment));
+    committedRef.current = committed;
   }, [open]);
+
+  const updateVote = useCallback((slideIndex: number, patch: Partial<SlideVote>) => {
+    setOptimisticFeedback((prev) => {
+      const nextMap = new Map(prev);
+      const cur = nextMap.get(slideIndex) ?? { score: null, comment: "" };
+      nextMap.set(slideIndex, { ...cur, ...patch });
+      return nextMap;
+    });
+  }, []);
+
+  // Thumb click: optimistic update, fire-and-forget LangSmith signal, primary
+  // Supabase write. Roll the thumb back and toast if the primary write fails.
+  const handleVote = useCallback(
+    (slideIndex: number, score: 1 | -1) => {
+      const prevVote = optimisticFeedback.get(slideIndex) ?? { score: null, comment: "" };
+      const comment = prevVote.comment;
+      updateVote(slideIndex, { score });
+      if (recap.feedback_token) postLangsmithScore(recap.feedback_token, score);
+      postSlideFeedback(recap.id, { slide_index: slideIndex, score, comment })
+        .then(() => {
+          committedRef.current.set(slideIndex, comment);
+        })
+        .catch(() => {
+          setOptimisticFeedback((prev) => {
+            const nextMap = new Map(prev);
+            nextMap.set(slideIndex, prevVote);
+            return nextMap;
+          });
+          toast.error("Couldn't save your feedback");
+        });
+    },
+    [optimisticFeedback, recap.id, recap.feedback_token, updateVote],
+  );
+
+  const handleCommentChange = useCallback(
+    (slideIndex: number, value: string) => updateVote(slideIndex, { comment: value }),
+    [updateVote],
+  );
+
+  // Comment input focus pauses auto-advance so the 10s timer can't fire and
+  // lose what the user is typing.
+  const handleCommentFocus = useCallback(() => setPaused(true), []);
+
+  // On blur (or Enter): resume, then persist the comment — but only when the
+  // slide has a vote (score is NOT NULL in the DB) and the text actually changed.
+  const handleCommentBlur = useCallback(
+    (slideIndex: number) => {
+      setPaused(false);
+      const vote = optimisticFeedback.get(slideIndex);
+      if (!vote || vote.score == null) return;
+      if (committedRef.current.get(slideIndex) === vote.comment) return;
+      postSlideFeedback(recap.id, {
+        slide_index: slideIndex,
+        score: vote.score,
+        comment: vote.comment,
+      })
+        .then(() => {
+          committedRef.current.set(slideIndex, vote.comment);
+        })
+        .catch(() => {
+          toast.error("Couldn't save your comment");
+        });
+    },
+    [optimisticFeedback, recap.id],
+  );
 
   const goTo = useCallback(
     (next: number, dir: number) => {
@@ -80,6 +173,9 @@ export function RecapPlayer({ recap, open, onOpenChange }: RecapPlayerProps) {
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
+      // Don't hijack keys while typing in the comment input.
+      const t = e.target;
+      if (t instanceof HTMLInputElement || t instanceof HTMLTextAreaElement) return;
       if (e.key === "ArrowRight") next();
       else if (e.key === "ArrowLeft") prev();
       else if (e.key === " ") {
@@ -93,6 +189,7 @@ export function RecapPlayer({ recap, open, onOpenChange }: RecapPlayerProps) {
 
   if (slides.length === 0) return null;
   const slide = slides[index];
+  const currentVote = optimisticFeedback.get(index) ?? { score: null, comment: "" };
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -139,18 +236,19 @@ export function RecapPlayer({ recap, open, onOpenChange }: RecapPlayerProps) {
           </button>
         </div>
 
-        {/* Tap zones for navigation */}
+        {/* Tap zones for navigation. Stop 80px above the bottom so they don't
+            sit over the feedback row (thumbs + comment) at the slide's foot. */}
         <button
           type="button"
           aria-label="Previous slide"
           onClick={prev}
-          className="absolute inset-y-0 left-0 z-10 w-1/3 cursor-default"
+          className="absolute left-0 top-0 bottom-[80px] z-10 w-1/3 cursor-default"
         />
         <button
           type="button"
           aria-label="Next slide"
           onClick={next}
-          className="absolute inset-y-0 right-0 z-10 w-1/3 cursor-default"
+          className="absolute right-0 top-0 bottom-[80px] z-10 w-1/3 cursor-default"
         />
 
         {/* Slide */}
@@ -165,7 +263,16 @@ export function RecapPlayer({ recap, open, onOpenChange }: RecapPlayerProps) {
               transition={{ duration: 0.25, ease: "easeOut" }}
               className="absolute inset-0"
             >
-              <RecapSlide slide={slide} />
+              <RecapSlide
+                slide={slide}
+                feedback={{
+                  vote: currentVote,
+                  onVote: (score) => handleVote(index, score),
+                  onCommentChange: (value) => handleCommentChange(index, value),
+                  onCommentFocus: handleCommentFocus,
+                  onCommentBlur: () => handleCommentBlur(index),
+                }}
+              />
             </motion.div>
           </AnimatePresence>
         </div>

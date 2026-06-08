@@ -1,9 +1,10 @@
 "use client";
 
-import { ArrowUpRight } from "lucide-react";
+import { ArrowUpRight, ThumbsDown, ThumbsUp } from "lucide-react";
+import { motion, useReducedMotion } from "framer-motion";
 import { cn } from "@/lib/utils";
 import { RecapChart } from "./recap-charts";
-import type { SlideKind, SlideSpec, SlideStat } from "./types";
+import type { SlideKind, SlideSpec, SlideStat, SlideVote } from "./types";
 
 const KIND_EYEBROW: Record<SlideKind, string> = {
   performance: "Your portfolio",
@@ -35,7 +36,88 @@ function StatRow({ stat, size }: { stat: SlideStat; size: "lg" | "sm" }) {
   );
 }
 
-export function RecapSlide({ slide }: { slide: SlideSpec }) {
+export interface RecapSlideFeedbackHandlers {
+  vote: SlideVote;
+  onVote: (score: 1 | -1) => void;
+  onCommentChange: (value: string) => void;
+  onCommentFocus: () => void;
+  onCommentBlur: () => void;
+}
+
+// "Help us improve" row: thumbs + comment. Sits below the sources footer.
+// Monochrome only — selected = filled icon + subtle surface pill (no
+// green/red; those are reserved for financial direction).
+function SlideFeedbackRow({
+  vote,
+  onVote,
+  onCommentChange,
+  onCommentFocus,
+  onCommentBlur,
+}: RecapSlideFeedbackHandlers) {
+  const reduceMotion = useReducedMotion();
+
+  return (
+    <div className="flex flex-col gap-2 border-t border-hairline pt-3">
+      <p className="text-[11px] text-foreground-muted">Help us improve</p>
+      <div className="flex items-center gap-2">
+        <motion.button
+          type="button"
+          aria-label="Thumbs up"
+          aria-pressed={vote.score === 1}
+          whileTap={reduceMotion ? undefined : { scale: 0.85 }}
+          onClick={() => onVote(1)}
+          className={cn(
+            "flex h-8 w-8 shrink-0 touch-manipulation items-center justify-center rounded-full transition-colors",
+            vote.score === 1
+              ? "bg-surface-2 text-foreground"
+              : "text-foreground-muted/50 hover:text-foreground-muted",
+          )}
+        >
+          <ThumbsUp className={cn("h-4 w-4", vote.score === 1 && "fill-current")} />
+        </motion.button>
+        <motion.button
+          type="button"
+          aria-label="Thumbs down"
+          aria-pressed={vote.score === -1}
+          whileTap={reduceMotion ? undefined : { scale: 0.85 }}
+          onClick={() => onVote(-1)}
+          className={cn(
+            "flex h-8 w-8 shrink-0 touch-manipulation items-center justify-center rounded-full transition-colors",
+            vote.score === -1
+              ? "bg-surface-2 text-foreground"
+              : "text-foreground-muted/50 hover:text-foreground-muted",
+          )}
+        >
+          <ThumbsDown className={cn("h-4 w-4", vote.score === -1 && "fill-current")} />
+        </motion.button>
+        <input
+          type="text"
+          value={vote.comment}
+          onChange={(e) => onCommentChange(e.target.value)}
+          onFocus={onCommentFocus}
+          onBlur={onCommentBlur}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              e.currentTarget.blur();
+            }
+          }}
+          placeholder="Add a comment…"
+          maxLength={2000}
+          className="min-h-[32px] flex-1 rounded-md border-0 bg-surface-2 px-3 text-[13px] text-foreground placeholder:text-foreground-muted/60 focus:outline-none focus:ring-1 focus:ring-ring"
+        />
+      </div>
+    </div>
+  );
+}
+
+export function RecapSlide({
+  slide,
+  feedback,
+}: {
+  slide: SlideSpec;
+  feedback: RecapSlideFeedbackHandlers;
+}) {
   const hasStats = slide.stats && slide.stats.length > 0;
   const hasCharts = slide.charts && slide.charts.length > 0;
 
@@ -107,6 +189,8 @@ export function RecapSlide({ slide }: { slide: SlideSpec }) {
           ))}
         </div>
       )}
+
+      <SlideFeedbackRow {...feedback} />
     </div>
   );
 }
