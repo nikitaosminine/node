@@ -19,6 +19,8 @@ SUPABASE_URL = "https://sfqowvpuzsqgmwlecgdx.supabase.co"
 # Optional:
 # wrangler secret put GEMINI_MODEL  (default: gemini-3.5-flash)
 # wrangler secret put GEMINI_API_BASE_URL  (default: https://generativelanguage.googleapis.com/v1beta)
+# wrangler secret put LANGSMITH_API_KEY  (recap tracing; when unset, tracing is skipped)
+# wrangler secret put LANGSMITH_PROJECT  (default: node-recaps)
 # wrangler secret put MAIN_AGENT_SYSTEM_PROMPT
 # wrangler secret put SUB_AGENT_SYSTEM_PROMPT
 # wrangler secret put SUB_AGENT_PLANNING_SYSTEM_PROMPT
