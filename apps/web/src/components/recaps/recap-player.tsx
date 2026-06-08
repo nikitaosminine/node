@@ -36,6 +36,26 @@ export function RecapPlayer({ recap, open, onOpenChange }: RecapPlayerProps) {
   const [paused, setPaused] = useState(false);
   const dirRef = useRef(1); // animation direction
 
+  // Transient per-slide save indicator: "saving" while a POST is in flight,
+  // "saved" briefly after it lands. The DB write is otherwise invisible, so
+  // this is the user's confirmation that a thumb/comment was sent.
+  const [saveStatus, setSaveStatus] = useState<{
+    index: number;
+    state: "saving" | "saved";
+  } | null>(null);
+  const savedTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const markSaved = useCallback((slideIndex: number) => {
+    setSaveStatus({ index: slideIndex, state: "saved" });
+    if (savedTimer.current) clearTimeout(savedTimer.current);
+    savedTimer.current = setTimeout(() => setSaveStatus(null), 1800);
+  }, []);
+  useEffect(
+    () => () => {
+      if (savedTimer.current) clearTimeout(savedTimer.current);
+    },
+    [],
+  );
+
   // Per-slide optimistic feedback (score + comment). Seeded from the API on
   // open and persisted through navigation — voting on slide 2 must not reset
   // slide 1's thumb. committedRef tracks what's already saved server-side so a
@@ -78,12 +98,15 @@ export function RecapPlayer({ recap, open, onOpenChange }: RecapPlayerProps) {
       const prevVote = optimisticFeedback.get(slideIndex) ?? { score: null, comment: "" };
       const comment = prevVote.comment;
       updateVote(slideIndex, { score });
+      setSaveStatus({ index: slideIndex, state: "saving" });
       if (recap.feedback_token) postLangsmithScore(recap.feedback_token, score);
       postSlideFeedback(recap.id, { slide_index: slideIndex, score, comment })
         .then(() => {
           committedRef.current.set(slideIndex, comment);
+          markSaved(slideIndex);
         })
         .catch(() => {
+          setSaveStatus(null);
           setOptimisticFeedback((prev) => {
             const nextMap = new Map(prev);
             nextMap.set(slideIndex, prevVote);
@@ -92,7 +115,7 @@ export function RecapPlayer({ recap, open, onOpenChange }: RecapPlayerProps) {
           toast.error("Couldn't save your feedback");
         });
     },
-    [optimisticFeedback, recap.id, recap.feedback_token, updateVote],
+    [optimisticFeedback, recap.id, recap.feedback_token, updateVote, markSaved],
   );
 
   const handleCommentChange = useCallback(
@@ -110,8 +133,15 @@ export function RecapPlayer({ recap, open, onOpenChange }: RecapPlayerProps) {
     (slideIndex: number) => {
       setPaused(false);
       const vote = optimisticFeedback.get(slideIndex);
-      if (!vote || vote.score == null) return;
+      if (!vote) return;
+      // A comment needs a vote (score is NOT NULL in the DB). Tell the user
+      // instead of silently dropping text they typed without picking a thumb.
+      if (vote.score == null) {
+        if (vote.comment.trim()) toast("Pick 👍 or 👎 to send your comment");
+        return;
+      }
       if (committedRef.current.get(slideIndex) === vote.comment) return;
+      setSaveStatus({ index: slideIndex, state: "saving" });
       postSlideFeedback(recap.id, {
         slide_index: slideIndex,
         score: vote.score,
@@ -119,12 +149,14 @@ export function RecapPlayer({ recap, open, onOpenChange }: RecapPlayerProps) {
       })
         .then(() => {
           committedRef.current.set(slideIndex, vote.comment);
+          markSaved(slideIndex);
         })
         .catch(() => {
+          setSaveStatus(null);
           toast.error("Couldn't save your comment");
         });
     },
-    [optimisticFeedback, recap.id],
+    [optimisticFeedback, recap.id, markSaved],
   );
 
   const goTo = useCallback(
@@ -190,12 +222,13 @@ export function RecapPlayer({ recap, open, onOpenChange }: RecapPlayerProps) {
   if (slides.length === 0) return null;
   const slide = slides[index];
   const currentVote = optimisticFeedback.get(index) ?? { score: null, comment: "" };
+  const currentSaveState = saveStatus?.index === index ? saveStatus.state : "idle";
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
         hideCloseButton
-        className="h-[640px] max-h-[88vh] w-[520px] max-w-[96vw] gap-0 overflow-hidden rounded-2xl border-hairline bg-surface p-0"
+        className="h-[720px] max-h-[90vh] w-[520px] max-w-[96vw] gap-0 overflow-hidden rounded-2xl border-hairline bg-surface p-0"
       >
         <DialogTitle className="sr-only">
           {recap.type === "weekly" ? "Weekly recap" : "Daily recap"}
@@ -267,6 +300,7 @@ export function RecapPlayer({ recap, open, onOpenChange }: RecapPlayerProps) {
                 slide={slide}
                 feedback={{
                   vote: currentVote,
+                  saveState: currentSaveState,
                   onVote: (score) => handleVote(index, score),
                   onCommentChange: (value) => handleCommentChange(index, value),
                   onCommentFocus: handleCommentFocus,

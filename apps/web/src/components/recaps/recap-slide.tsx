@@ -1,6 +1,6 @@
 "use client";
 
-import { ArrowUpRight, ThumbsDown, ThumbsUp } from "lucide-react";
+import { ArrowUpRight, Check, ThumbsDown, ThumbsUp } from "lucide-react";
 import { motion, useReducedMotion } from "framer-motion";
 import { cn } from "@/lib/utils";
 import { RecapChart } from "./recap-charts";
@@ -38,6 +38,7 @@ function StatRow({ stat, size }: { stat: SlideStat; size: "lg" | "sm" }) {
 
 export interface RecapSlideFeedbackHandlers {
   vote: SlideVote;
+  saveState: "idle" | "saving" | "saved";
   onVote: (score: 1 | -1) => void;
   onCommentChange: (value: string) => void;
   onCommentFocus: () => void;
@@ -49,6 +50,7 @@ export interface RecapSlideFeedbackHandlers {
 // green/red; those are reserved for financial direction).
 function SlideFeedbackRow({
   vote,
+  saveState,
   onVote,
   onCommentChange,
   onCommentFocus,
@@ -58,7 +60,18 @@ function SlideFeedbackRow({
 
   return (
     <div className="flex flex-col gap-2 border-t border-hairline pt-3">
-      <p className="text-[11px] text-foreground-muted">Help us improve</p>
+      <div className="flex h-4 items-center justify-between">
+        <p className="text-[11px] text-foreground-muted">Help us improve</p>
+        {saveState === "saving" && (
+          <span className="text-[11px] text-foreground-muted/70">Saving…</span>
+        )}
+        {saveState === "saved" && (
+          <span className="flex items-center gap-1 text-[11px] text-foreground-muted">
+            <Check className="h-3 w-3" />
+            Saved
+          </span>
+        )}
+      </div>
       <div className="flex items-center gap-2">
         <motion.button
           type="button"
@@ -147,7 +160,7 @@ export function RecapSlide({
 
         {/* Single chart (performance sparkline, macro bars) */}
         {slide.chart && !hasCharts && (
-          <div className="h-[180px] w-full shrink-0">
+          <div className="h-[160px] w-full shrink-0">
             <RecapChart chart={slide.chart} />
           </div>
         )}
