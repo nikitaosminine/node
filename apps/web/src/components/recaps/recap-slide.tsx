@@ -1,6 +1,6 @@
 "use client";
 
-import { ArrowUpRight, Check, ThumbsDown, ThumbsUp } from "lucide-react";
+import { ArrowUpRight, Check, CornerDownLeft, ThumbsDown, ThumbsUp } from "lucide-react";
 import { motion, useReducedMotion } from "framer-motion";
 import { cn } from "@/lib/utils";
 import { RecapChart } from "./recap-charts";
@@ -43,11 +43,12 @@ export interface RecapSlideFeedbackHandlers {
   onCommentChange: (value: string) => void;
   onCommentFocus: () => void;
   onCommentBlur: () => void;
+  onCommentSubmit: () => void;
 }
 
 // "Help us improve" row: thumbs + comment. Sits below the sources footer.
-// Monochrome only — selected = filled icon + subtle surface pill (no
-// green/red; those are reserved for financial direction).
+// Monochrome only — selected thumb uses the inverted button fill
+// (bg-foreground), no green/red (those are reserved for financial direction).
 function SlideFeedbackRow({
   vote,
   saveState,
@@ -55,6 +56,7 @@ function SlideFeedbackRow({
   onCommentChange,
   onCommentFocus,
   onCommentBlur,
+  onCommentSubmit,
 }: RecapSlideFeedbackHandlers) {
   const reduceMotion = useReducedMotion();
 
@@ -80,9 +82,9 @@ function SlideFeedbackRow({
           whileTap={reduceMotion ? undefined : { scale: 0.85 }}
           onClick={() => onVote(1)}
           className={cn(
-            "flex h-8 w-8 shrink-0 touch-manipulation items-center justify-center rounded-full transition-colors",
+            "flex h-10 w-10 shrink-0 touch-manipulation items-center justify-center rounded-full transition-colors",
             vote.score === 1
-              ? "bg-surface-2 text-foreground"
+              ? "bg-foreground text-background"
               : "text-foreground-muted/50 hover:text-foreground-muted",
           )}
         >
@@ -95,30 +97,46 @@ function SlideFeedbackRow({
           whileTap={reduceMotion ? undefined : { scale: 0.85 }}
           onClick={() => onVote(-1)}
           className={cn(
-            "flex h-8 w-8 shrink-0 touch-manipulation items-center justify-center rounded-full transition-colors",
+            "flex h-10 w-10 shrink-0 touch-manipulation items-center justify-center rounded-full transition-colors",
             vote.score === -1
-              ? "bg-surface-2 text-foreground"
+              ? "bg-foreground text-background"
               : "text-foreground-muted/50 hover:text-foreground-muted",
           )}
         >
           <ThumbsDown className={cn("h-4 w-4", vote.score === -1 && "fill-current")} />
         </motion.button>
-        <input
-          type="text"
-          value={vote.comment}
-          onChange={(e) => onCommentChange(e.target.value)}
-          onFocus={onCommentFocus}
-          onBlur={onCommentBlur}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") {
-              e.preventDefault();
-              e.currentTarget.blur();
-            }
-          }}
-          placeholder="Add a comment…"
-          maxLength={2000}
-          className="min-h-[32px] flex-1 rounded-md border-0 bg-surface-2 px-3 text-[13px] text-foreground placeholder:text-foreground-muted/60 focus:outline-none focus:ring-1 focus:ring-ring"
-        />
+        <div className="relative flex-1">
+          <input
+            type="text"
+            value={vote.comment}
+            onChange={(e) => onCommentChange(e.target.value)}
+            onFocus={onCommentFocus}
+            onBlur={onCommentBlur}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                e.currentTarget.blur();
+              }
+            }}
+            placeholder="Add a comment…"
+            maxLength={2000}
+            className="min-h-[40px] w-full rounded-md border-0 bg-surface-2 pl-3 pr-9 text-[13px] text-foreground placeholder:text-foreground-muted/60 focus:outline-none focus:ring-1 focus:ring-ring"
+          />
+          {vote.comment.trim().length > 0 && (
+            <button
+              type="button"
+              aria-label="Send comment"
+              title="Send (Enter)"
+              // Keep the input focused so blur-save and this click don't race;
+              // the click then triggers the explicit save.
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={onCommentSubmit}
+              className="absolute right-1.5 top-1/2 flex h-7 w-7 -translate-y-1/2 touch-manipulation items-center justify-center rounded-md text-foreground-muted transition-colors hover:bg-surface-elevated hover:text-foreground"
+            >
+              <CornerDownLeft className="h-3.5 w-3.5" />
+            </button>
+          )}
+        </div>
       </div>
     </div>
   );

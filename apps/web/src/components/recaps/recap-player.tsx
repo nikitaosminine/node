@@ -129,9 +129,10 @@ export function RecapPlayer({ recap, open, onOpenChange }: RecapPlayerProps) {
 
   // On blur (or Enter): resume, then persist the comment — but only when the
   // slide has a vote (score is NOT NULL in the DB) and the text actually changed.
-  const handleCommentBlur = useCallback(
+  // Persist a slide's comment. Shared by blur, Enter, and the send button;
+  // dedups on committedRef so repeated triggers don't re-POST.
+  const saveComment = useCallback(
     (slideIndex: number) => {
-      setPaused(false);
       const vote = optimisticFeedback.get(slideIndex);
       if (!vote) return;
       // A comment needs a vote (score is NOT NULL in the DB). Tell the user
@@ -157,6 +158,15 @@ export function RecapPlayer({ recap, open, onOpenChange }: RecapPlayerProps) {
         });
     },
     [optimisticFeedback, recap.id, markSaved],
+  );
+
+  // Comment input blur: resume auto-advance, then persist.
+  const handleCommentBlur = useCallback(
+    (slideIndex: number) => {
+      setPaused(false);
+      saveComment(slideIndex);
+    },
+    [saveComment],
   );
 
   const goTo = useCallback(
@@ -228,6 +238,9 @@ export function RecapPlayer({ recap, open, onOpenChange }: RecapPlayerProps) {
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
         hideCloseButton
+        // Don't auto-focus a control on open (Radix would focus the pause button,
+        // leaving a stray focus ring and letting Enter/Space activate it).
+        onOpenAutoFocus={(e) => e.preventDefault()}
         className="h-[720px] max-h-[90vh] w-[520px] max-w-[96vw] gap-0 overflow-hidden rounded-2xl border-hairline bg-surface p-0"
       >
         <DialogTitle className="sr-only">
@@ -274,12 +287,14 @@ export function RecapPlayer({ recap, open, onOpenChange }: RecapPlayerProps) {
         <button
           type="button"
           aria-label="Previous slide"
+          tabIndex={-1}
           onClick={prev}
           className="absolute bottom-[100px] left-0 top-0 z-10 w-1/3 cursor-default"
         />
         <button
           type="button"
           aria-label="Next slide"
+          tabIndex={-1}
           onClick={next}
           className="absolute bottom-[100px] right-0 top-0 z-10 w-1/3 cursor-default"
         />
@@ -305,6 +320,7 @@ export function RecapPlayer({ recap, open, onOpenChange }: RecapPlayerProps) {
                   onCommentChange: (value) => handleCommentChange(index, value),
                   onCommentFocus: handleCommentFocus,
                   onCommentBlur: () => handleCommentBlur(index),
+                  onCommentSubmit: () => saveComment(index),
                 }}
               />
             </motion.div>
