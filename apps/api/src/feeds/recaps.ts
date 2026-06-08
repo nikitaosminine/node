@@ -56,6 +56,8 @@ interface Env {
   // traced and no presigned feedback token is produced.
   LANGSMITH_API_KEY?: string;
   LANGSMITH_PROJECT?: string;
+  // Override the LangSmith API base URL (e.g. EU region). Defaults to US.
+  LANGSMITH_ENDPOINT?: string;
 }
 
 function db(env: Env): AnySupabaseClient {
@@ -69,7 +71,11 @@ function langsmithClient(env: Env): Client | null {
   if (!env.LANGSMITH_API_KEY) return null;
   return new Client({
     apiKey: env.LANGSMITH_API_KEY,
-    apiUrl: "https://api.smith.langchain.com",
+    // Region-specific. US is the default; EU-region accounts must set
+    // LANGSMITH_ENDPOINT to https://eu.api.smith.langchain.com — a 403 on
+    // trace upload / token creation usually means the key's data region
+    // doesn't match this URL.
+    apiUrl: env.LANGSMITH_ENDPOINT ?? "https://api.smith.langchain.com",
   });
 }
 

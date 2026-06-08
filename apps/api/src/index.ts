@@ -48,6 +48,8 @@ export interface Env {
   // identically when unset (no traces, feedback_token stored as null).
   LANGSMITH_API_KEY?: string;
   LANGSMITH_PROJECT?: string;
+  // Override the LangSmith API base URL (e.g. EU region). Defaults to US.
+  LANGSMITH_ENDPOINT?: string;
   // Shared secret protecting operator-only routes (debug + scheduled fanout).
   ADMIN_SECRET?: string;
   // Comma-separated list of allowed browser origins for CORS. When unset, falls
