@@ -84,7 +84,7 @@ function SlideFeedbackRow({
           className={cn(
             "flex h-10 w-10 shrink-0 touch-manipulation items-center justify-center rounded-full transition-colors",
             vote.score === 1
-              ? "bg-foreground text-background"
+              ? "bg-foreground/10 text-foreground"
               : "text-foreground-muted/50 hover:text-foreground-muted",
           )}
         >
@@ -99,7 +99,7 @@ function SlideFeedbackRow({
           className={cn(
             "flex h-10 w-10 shrink-0 touch-manipulation items-center justify-center rounded-full transition-colors",
             vote.score === -1
-              ? "bg-foreground text-background"
+              ? "bg-foreground/10 text-foreground"
               : "text-foreground-muted/50 hover:text-foreground-muted",
           )}
         >
@@ -157,7 +157,7 @@ export function RecapSlide({
       {/* Scrollable content. pt-14 clears the progress bars; content scrolls when
           it exceeds the dialog height so the pinned feedback footer below is never
           clipped (the dialog itself is overflow-hidden). */}
-      <div className="flex min-h-0 flex-1 flex-col gap-5 overflow-y-auto px-7 pb-4 pt-14">
+      <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto px-7 pb-4 pt-12">
         <p className="text-[11px] font-medium uppercase tracking-[0.18em] text-muted-foreground">
           {KIND_EYEBROW[slide.kind]}
         </p>
@@ -178,7 +178,7 @@ export function RecapSlide({
 
         {/* Single chart (performance sparkline, macro bars) */}
         {slide.chart && !hasCharts && (
-          <div className="h-[160px] w-full shrink-0">
+          <div className="h-[144px] w-full shrink-0">
             <RecapChart chart={slide.chart} />
           </div>
         )}

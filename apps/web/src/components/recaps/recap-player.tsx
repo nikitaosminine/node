@@ -241,7 +241,7 @@ export function RecapPlayer({ recap, open, onOpenChange }: RecapPlayerProps) {
         // Don't auto-focus a control on open (Radix would focus the pause button,
         // leaving a stray focus ring and letting Enter/Space activate it).
         onOpenAutoFocus={(e) => e.preventDefault()}
-        className="h-[720px] max-h-[90vh] w-[520px] max-w-[96vw] gap-0 overflow-hidden rounded-2xl border-hairline bg-surface p-0"
+        className="h-[800px] max-h-[92vh] w-[520px] max-w-[96vw] gap-0 overflow-hidden rounded-2xl border-hairline bg-surface p-0"
       >
         <DialogTitle className="sr-only">
           {recap.type === "weekly" ? "Weekly recap" : "Daily recap"}
@@ -288,15 +288,17 @@ export function RecapPlayer({ recap, open, onOpenChange }: RecapPlayerProps) {
           type="button"
           aria-label="Previous slide"
           tabIndex={-1}
+          onMouseDown={(e) => e.preventDefault()}
           onClick={prev}
-          className="absolute bottom-[100px] left-0 top-0 z-10 w-1/3 cursor-default"
+          className="absolute bottom-[100px] left-0 top-0 z-10 w-1/3 cursor-default outline-none focus-visible:outline-none"
         />
         <button
           type="button"
           aria-label="Next slide"
           tabIndex={-1}
+          onMouseDown={(e) => e.preventDefault()}
           onClick={next}
-          className="absolute bottom-[100px] right-0 top-0 z-10 w-1/3 cursor-default"
+          className="absolute bottom-[100px] right-0 top-0 z-10 w-1/3 cursor-default outline-none focus-visible:outline-none"
         />
 
         {/* Slide */}
