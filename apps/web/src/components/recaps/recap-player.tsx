@@ -236,19 +236,19 @@ export function RecapPlayer({ recap, open, onOpenChange }: RecapPlayerProps) {
           </button>
         </div>
 
-        {/* Tap zones for navigation. Stop 80px above the bottom so they don't
-            sit over the feedback row (thumbs + comment) at the slide's foot. */}
+        {/* Tap zones for navigation. Stop ~100px above the bottom so they don't
+            sit over the pinned feedback footer (thumbs + comment). */}
         <button
           type="button"
           aria-label="Previous slide"
           onClick={prev}
-          className="absolute left-0 top-0 bottom-[80px] z-10 w-1/3 cursor-default"
+          className="absolute bottom-[100px] left-0 top-0 z-10 w-1/3 cursor-default"
         />
         <button
           type="button"
           aria-label="Next slide"
           onClick={next}
-          className="absolute right-0 top-0 bottom-[80px] z-10 w-1/3 cursor-default"
+          className="absolute bottom-[100px] right-0 top-0 z-10 w-1/3 cursor-default"
         />
 
         {/* Slide */}
