@@ -83,16 +83,26 @@ It's also how I'm learning the modern AI stack hands-on — agents, memory, RAG,
 
 Active work in progress. The repository is public for portfolio and demonstration purposes and may evolve significantly as the product matures; parts of the implementation may later become private or be restructured.
 
-## Screenshots *(first iteration, work in progress)*
+## Screenshots *(work in progress)*
 
-**Main portfolio page — sector & asset-type allocation with holdings table**
+**Overview page**
+<a href="https://raw.githubusercontent.com/nikitaosminine/node/main/node_app_assets/screenshots/node_overview.png">
+  <img width="1920" height="980" alt="Node overview page" src="./node_app_assets/screenshots/node_overview.png" />
+</a>
 
-<img width="1920" height="980" alt="Node portfolio page with allocation and holdings" src="https://github.com/user-attachments/assets/0dde30ef-30c9-4d0f-9627-20147da4fa6b" />
+**Detail page - Sector & Asset-type allocations with holdings table**
+<a href="https://raw.githubusercontent.com/nikitaosminine/node/main/node_app_assets/screenshots/node_detail.png">
+  <img width="1920" height="979" alt="Node detail page" src="./node_app_assets/screenshots/node_detail.png" />
+</a>
 
-**Main portfolio page — geography breakdown with transactions table**
-
-<img width="1920" height="979" alt="Node portfolio page with geography breakdown and transactions" src="https://github.com/user-attachments/assets/8fd8010e-e641-4a4a-92ca-77bb22f9c4df" />
-
-**Thesis page — branded as The Take**
-
-<img width="1920" height="974" alt="Node thesis page, The Take" src="https://github.com/user-attachments/assets/d8a8201e-2126-46a1-932f-95789e47181c" />
+**AI-driven recaps**
+<table>
+  <tr>
+    <td><a href="https://raw.githubusercontent.com/nikitaosminine/node/main/node_app_assets/screenshots/node_wrecap_1.png"><img src="./node_app_assets/screenshots/node_wrecap_1.png" /></a></td>
+    <td><a href="https://raw.githubusercontent.com/nikitaosminine/node/main/node_app_assets/screenshots/node_wrecap_2.png"><img src="./node_app_assets/screenshots/node_wrecap_2.png" /></a></td>
+  </tr>
+  <tr>
+    <td><a href="https://raw.githubusercontent.com/nikitaosminine/node/main/node_app_assets/screenshots/node_wrecap_3.png"><img src="./node_app_assets/screenshots/node_wrecap_3.png" /></a></td>
+    <td><a href="https://raw.githubusercontent.com/nikitaosminine/node/main/node_app_assets/screenshots/node_wrecap_4.png"><img src="./node_app_assets/screenshots/node_wrecap_4.png" /></a></td>
+  </tr>
+</table>
