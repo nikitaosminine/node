@@ -1293,8 +1293,9 @@ export async function generateRecap(
       try {
         await rt.end(undefined, err instanceof Error ? err.message : String(err));
         await rt.patchRun();
+        await lsClient?.flush(); // send the error run before the Worker exits
       } catch (patchErr) {
-        console.error("[recaps] LangSmith patchRun (error path) failed:", patchErr);
+        console.error("[recaps] LangSmith patchRun/flush (error path) failed:", patchErr);
       }
     }
     throw err; // generation failure is real — let the queue retry / mark failed
@@ -1305,32 +1306,21 @@ export async function generateRecap(
     try {
       await rt.end({ status: "ready", slides: llm.slides.length });
       await rt.patchRun();
+      // CRITICAL on CF Workers: flush the batched run events before the
+      // request context tears down. Without this the create + end/outputs
+      // never send and the run is left "pending"/"incomplete" with an empty
+      // output field.
+      await lsClient?.flush();
     } catch (patchErr) {
-      console.error("[recaps] LangSmith patchRun failed:", patchErr);
+      console.error("[recaps] LangSmith patchRun/flush failed:", patchErr);
     }
   }
 
-  // Presigned feedback token — one recap-level "user_score" signal to
-  // LangSmith. Per-slide detail stays in Supabase. Best-effort: null when
-  // LangSmith is unconfigured or the call fails.
-  let feedbackToken: string | null = null;
-  if (lsClient && langsmithRunId) {
-    try {
-      const tok = await lsClient.createPresignedFeedbackToken(langsmithRunId, "user_score", {
-        expiration: { days: 90 }, // recaps persist; the 3h default is too short
-        feedbackConfig: {
-          type: "categorical",
-          categories: [
-            { value: 1, label: "👍" },
-            { value: -1, label: "👎" },
-          ],
-        },
-      });
-      feedbackToken = tok.url;
-    } catch (err) {
-      console.error("[recaps] createPresignedFeedbackToken failed for run", langsmithRunId, err);
-    }
-  }
+  // Per-slide user feedback lives in Supabase (recap_slide_feedback), correlated
+  // to this run via langsmith_run_id. We deliberately do NOT push a recap-level
+  // "user_score" to LangSmith: the presigned-token channel appends on every
+  // click (re-votes pollute the aggregate) and a single score can't represent
+  // per-slide sentiment. A proper idempotent run metric belongs in the eval loop.
 
   // Merge any sources the agent retrieved into ctx for assembleSlides.
   const mergedCtx: GatheredContext = {
@@ -1358,7 +1348,6 @@ export async function generateRecap(
       },
       generated_at: new Date().toISOString(),
       error: null,
-      feedback_token: feedbackToken,
       langsmith_run_id: langsmithRunId,
     })
     .eq("id", recapId);

@@ -36,21 +36,6 @@ export async function postSlideFeedback(
 }
 
 /**
- * Secondary, best-effort signal to LangSmith via the recap's presigned token
- * (no auth header — the token is the auth). Supabase already holds the vote,
- * so failures here are swallowed (token expiry, LangSmith outage).
- */
-export function postLangsmithScore(feedbackToken: string, score: 1 | -1): void {
-  fetch(feedbackToken, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ score }),
-  }).catch((err) => {
-    console.warn("[recaps] LangSmith feedback token POST failed:", err);
-  });
-}
-
-/**
  * Fetches the latest ready recap for a portfolio (weekly preferred on
  * weekends, else the most recent of either type). Exposes a `markSeen`
  * that clears the "new" indicator.

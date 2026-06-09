@@ -7,7 +7,7 @@ import { toast } from "sonner";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
 import { RecapSlide } from "./recap-slide";
-import { postLangsmithScore, postSlideFeedback } from "./use-recap";
+import { postSlideFeedback } from "./use-recap";
 import type { Recap, SlideVote } from "./types";
 
 const SLIDE_MS = 10_000;
@@ -99,7 +99,6 @@ export function RecapPlayer({ recap, open, onOpenChange }: RecapPlayerProps) {
       const comment = prevVote.comment;
       updateVote(slideIndex, { score });
       setSaveStatus({ index: slideIndex, state: "saving" });
-      if (recap.feedback_token) postLangsmithScore(recap.feedback_token, score);
       postSlideFeedback(recap.id, { slide_index: slideIndex, score, comment })
         .then(() => {
           committedRef.current.set(slideIndex, comment);
@@ -115,7 +114,7 @@ export function RecapPlayer({ recap, open, onOpenChange }: RecapPlayerProps) {
           toast.error("Couldn't save your feedback");
         });
     },
-    [optimisticFeedback, recap.id, recap.feedback_token, updateVote, markSaved],
+    [optimisticFeedback, recap.id, updateVote, markSaved],
   );
 
   const handleCommentChange = useCallback(
