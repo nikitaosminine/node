@@ -3,13 +3,24 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { Pause, Play, X } from "lucide-react";
+import { toast } from "sonner";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
 import { RecapSlide } from "./recap-slide";
-import type { Recap } from "./types";
+import { postSlideFeedback } from "./use-recap";
+import type { Recap, SlideVote } from "./types";
 
 const SLIDE_MS = 10_000;
 const TICK_MS = 50;
+
+// Build the initial optimistic-feedback map from the votes the API returned.
+function seedFeedback(recap: Recap): Map<number, SlideVote> {
+  const map = new Map<number, SlideVote>();
+  for (const f of recap.slide_feedback ?? []) {
+    map.set(f.slide_index, { score: f.score, comment: f.comment ?? "" });
+  }
+  return map;
+}
 
 interface RecapPlayerProps {
   recap: Recap;
@@ -25,14 +36,137 @@ export function RecapPlayer({ recap, open, onOpenChange }: RecapPlayerProps) {
   const [paused, setPaused] = useState(false);
   const dirRef = useRef(1); // animation direction
 
-  // Reset to the first slide whenever the player (re)opens.
+  // Transient per-slide save indicator: "saving" while a POST is in flight,
+  // "saved" briefly after it lands. The DB write is otherwise invisible, so
+  // this is the user's confirmation that a thumb/comment was sent.
+  const [saveStatus, setSaveStatus] = useState<{
+    index: number;
+    state: "saving" | "saved";
+  } | null>(null);
+  const savedTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const markSaved = useCallback((slideIndex: number) => {
+    setSaveStatus({ index: slideIndex, state: "saved" });
+    if (savedTimer.current) clearTimeout(savedTimer.current);
+    savedTimer.current = setTimeout(() => setSaveStatus(null), 1800);
+  }, []);
+  useEffect(
+    () => () => {
+      if (savedTimer.current) clearTimeout(savedTimer.current);
+    },
+    [],
+  );
+
+  // Per-slide optimistic feedback (score + comment). Seeded from the API on
+  // open and persisted through navigation — voting on slide 2 must not reset
+  // slide 1's thumb. committedRef tracks what's already saved server-side so a
+  // bare focus/blur doesn't re-POST an unchanged comment.
+  const [optimisticFeedback, setOptimisticFeedback] = useState<Map<number, SlideVote>>(() =>
+    seedFeedback(recap),
+  );
+  const committedRef = useRef<Map<number, string>>(new Map());
+  // Latest recap, read-only — lets the open effect re-seed without re-running
+  // when the parent updates recap identity (e.g. optimistic markSeen).
+  const recapRef = useRef(recap);
+  recapRef.current = recap;
+
+  // Reset position + re-seed feedback whenever the player (re)opens.
   useEffect(() => {
-    if (open) {
-      setIndex(0);
-      setProgress(0);
-      setPaused(false);
-    }
+    if (!open) return;
+    setIndex(0);
+    setProgress(0);
+    setPaused(false);
+    const seeded = seedFeedback(recapRef.current);
+    setOptimisticFeedback(seeded);
+    const committed = new Map<number, string>();
+    seeded.forEach((v, k) => committed.set(k, v.comment));
+    committedRef.current = committed;
   }, [open]);
+
+  const updateVote = useCallback((slideIndex: number, patch: Partial<SlideVote>) => {
+    setOptimisticFeedback((prev) => {
+      const nextMap = new Map(prev);
+      const cur = nextMap.get(slideIndex) ?? { score: null, comment: "" };
+      nextMap.set(slideIndex, { ...cur, ...patch });
+      return nextMap;
+    });
+  }, []);
+
+  // Thumb click: optimistic update, fire-and-forget LangSmith signal, primary
+  // Supabase write. Roll the thumb back and toast if the primary write fails.
+  const handleVote = useCallback(
+    (slideIndex: number, score: 1 | -1) => {
+      const prevVote = optimisticFeedback.get(slideIndex) ?? { score: null, comment: "" };
+      const comment = prevVote.comment;
+      updateVote(slideIndex, { score });
+      setSaveStatus({ index: slideIndex, state: "saving" });
+      postSlideFeedback(recap.id, { slide_index: slideIndex, score, comment })
+        .then(() => {
+          committedRef.current.set(slideIndex, comment);
+          markSaved(slideIndex);
+        })
+        .catch(() => {
+          setSaveStatus(null);
+          setOptimisticFeedback((prev) => {
+            const nextMap = new Map(prev);
+            nextMap.set(slideIndex, prevVote);
+            return nextMap;
+          });
+          toast.error("Couldn't save your feedback");
+        });
+    },
+    [optimisticFeedback, recap.id, updateVote, markSaved],
+  );
+
+  const handleCommentChange = useCallback(
+    (slideIndex: number, value: string) => updateVote(slideIndex, { comment: value }),
+    [updateVote],
+  );
+
+  // Comment input focus pauses auto-advance so the 10s timer can't fire and
+  // lose what the user is typing.
+  const handleCommentFocus = useCallback(() => setPaused(true), []);
+
+  // On blur (or Enter): resume, then persist the comment — but only when the
+  // slide has a vote (score is NOT NULL in the DB) and the text actually changed.
+  // Persist a slide's comment. Shared by blur, Enter, and the send button;
+  // dedups on committedRef so repeated triggers don't re-POST.
+  const saveComment = useCallback(
+    (slideIndex: number) => {
+      const vote = optimisticFeedback.get(slideIndex);
+      if (!vote) return;
+      // A comment needs a vote (score is NOT NULL in the DB). Tell the user
+      // instead of silently dropping text they typed without picking a thumb.
+      if (vote.score == null) {
+        if (vote.comment.trim()) toast("Pick 👍 or 👎 to send your comment");
+        return;
+      }
+      if (committedRef.current.get(slideIndex) === vote.comment) return;
+      setSaveStatus({ index: slideIndex, state: "saving" });
+      postSlideFeedback(recap.id, {
+        slide_index: slideIndex,
+        score: vote.score,
+        comment: vote.comment,
+      })
+        .then(() => {
+          committedRef.current.set(slideIndex, vote.comment);
+          markSaved(slideIndex);
+        })
+        .catch(() => {
+          setSaveStatus(null);
+          toast.error("Couldn't save your comment");
+        });
+    },
+    [optimisticFeedback, recap.id, markSaved],
+  );
+
+  // Comment input blur: resume auto-advance, then persist.
+  const handleCommentBlur = useCallback(
+    (slideIndex: number) => {
+      setPaused(false);
+      saveComment(slideIndex);
+    },
+    [saveComment],
+  );
 
   const goTo = useCallback(
     (next: number, dir: number) => {
@@ -80,6 +214,9 @@ export function RecapPlayer({ recap, open, onOpenChange }: RecapPlayerProps) {
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
+      // Don't hijack keys while typing in the comment input.
+      const t = e.target;
+      if (t instanceof HTMLInputElement || t instanceof HTMLTextAreaElement) return;
       if (e.key === "ArrowRight") next();
       else if (e.key === "ArrowLeft") prev();
       else if (e.key === " ") {
@@ -93,12 +230,17 @@ export function RecapPlayer({ recap, open, onOpenChange }: RecapPlayerProps) {
 
   if (slides.length === 0) return null;
   const slide = slides[index];
+  const currentVote = optimisticFeedback.get(index) ?? { score: null, comment: "" };
+  const currentSaveState = saveStatus?.index === index ? saveStatus.state : "idle";
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
         hideCloseButton
-        className="h-[640px] max-h-[88vh] w-[520px] max-w-[96vw] gap-0 overflow-hidden rounded-2xl border-hairline bg-surface p-0"
+        // Don't auto-focus a control on open (Radix would focus the pause button,
+        // leaving a stray focus ring and letting Enter/Space activate it).
+        onOpenAutoFocus={(e) => e.preventDefault()}
+        className="h-[800px] max-h-[92vh] w-[520px] max-w-[96vw] gap-0 overflow-hidden rounded-2xl border-hairline bg-surface p-0"
       >
         <DialogTitle className="sr-only">
           {recap.type === "weekly" ? "Weekly recap" : "Daily recap"}
@@ -139,18 +281,23 @@ export function RecapPlayer({ recap, open, onOpenChange }: RecapPlayerProps) {
           </button>
         </div>
 
-        {/* Tap zones for navigation */}
+        {/* Tap zones for navigation. Stop ~100px above the bottom so they don't
+            sit over the pinned feedback footer (thumbs + comment). */}
         <button
           type="button"
           aria-label="Previous slide"
+          tabIndex={-1}
+          onMouseDown={(e) => e.preventDefault()}
           onClick={prev}
-          className="absolute inset-y-0 left-0 z-10 w-1/3 cursor-default"
+          className="absolute bottom-[100px] left-0 top-0 z-10 w-1/3 cursor-default outline-none focus-visible:outline-none"
         />
         <button
           type="button"
           aria-label="Next slide"
+          tabIndex={-1}
+          onMouseDown={(e) => e.preventDefault()}
           onClick={next}
-          className="absolute inset-y-0 right-0 z-10 w-1/3 cursor-default"
+          className="absolute bottom-[100px] right-0 top-0 z-10 w-1/3 cursor-default outline-none focus-visible:outline-none"
         />
 
         {/* Slide */}
@@ -165,7 +312,18 @@ export function RecapPlayer({ recap, open, onOpenChange }: RecapPlayerProps) {
               transition={{ duration: 0.25, ease: "easeOut" }}
               className="absolute inset-0"
             >
-              <RecapSlide slide={slide} />
+              <RecapSlide
+                slide={slide}
+                feedback={{
+                  vote: currentVote,
+                  saveState: currentSaveState,
+                  onVote: (score) => handleVote(index, score),
+                  onCommentChange: (value) => handleCommentChange(index, value),
+                  onCommentFocus: handleCommentFocus,
+                  onCommentBlur: () => handleCommentBlur(index),
+                  onCommentSubmit: () => saveComment(index),
+                }}
+              />
             </motion.div>
           </AnimatePresence>
         </div>

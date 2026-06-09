@@ -44,6 +44,14 @@ export interface Env {
   GEMINI_API_KEY?: string;
   GEMINI_MODEL?: string;
   GEMINI_API_BASE_URL?: string;
+  // LangSmith tracing for recap generation. Optional — the app behaves
+  // identically when unset (no traces, feedback_token stored as null).
+  LANGSMITH_API_KEY?: string;
+  LANGSMITH_PROJECT?: string;
+  // Override the LangSmith API base URL (e.g. EU region). Defaults to US.
+  LANGSMITH_ENDPOINT?: string;
+  // Required for org-scoped API keys (sent as x-tenant-id).
+  LANGSMITH_WORKSPACE_ID?: string;
   // Shared secret protecting operator-only routes (debug + scheduled fanout).
   ADMIN_SECRET?: string;
   // Comma-separated list of allowed browser origins for CORS. When unset, falls
@@ -5399,13 +5407,19 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
     if (method === "GET" && pathname === "/api/recaps") {
       const portfolioId = url.searchParams.get("portfolio_id") ?? "";
       if (!portfolioId) return json({ error: "portfolio_id is required" }, 400);
-      const accessError = await requirePortfolioAccess(request, env, portfolioId);
+      // Need the userId (not just ownership) to attach the caller's own
+      // per-slide feedback, so resolve it explicitly here.
+      const userId = await getAuthenticatedUserId(request, env);
+      if (!userId) return json({ error: "Unauthorized" }, 401);
+      const accessError = await assertPortfolioAccess(env, portfolioId, userId);
       if (accessError) return accessError;
 
       const type = url.searchParams.get("type");
       let query = db(env)
         .from("recaps")
-        .select("id, type, period_start, period_end, status, slides, generated_at, seen_at")
+        .select(
+          "id, type, period_start, period_end, status, slides, generated_at, seen_at, feedback_token, langsmith_run_id",
+        )
         .eq("portfolio_id", portfolioId)
         .eq("status", "ready");
       if (type === "daily" || type === "weekly") query = query.eq("type", type);
@@ -5416,7 +5430,20 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
         .limit(1)
         .maybeSingle();
       if (error) return json({ error: error.message }, 500);
-      return json(data ?? null, 200);
+      if (!data) return json(null, 200);
+
+      // Attach the caller's per-slide feedback for this recap. Supplementary —
+      // a query error (e.g. migration not yet applied) degrades to [] rather
+      // than failing the whole recap fetch.
+      const { data: slideFeedback, error: fbError } = await db(env)
+        .from("recap_slide_feedback")
+        .select("slide_index, score, comment")
+        .eq("recap_id", data.id)
+        .eq("user_id", userId);
+      if (fbError) {
+        console.error("[recaps] slide_feedback fetch failed:", fbError.message);
+      }
+      return json({ ...data, slide_feedback: slideFeedback ?? [] }, 200);
     }
 
     // GET /api/recaps/list?portfolio_id=...&limit=20 → recap history
@@ -5455,6 +5482,63 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
         .from("recaps")
         .update({ seen_at: new Date().toISOString() })
         .eq("id", recapId);
+      if (error) return json({ error: error.message }, 500);
+      return json({ ok: true }, 200);
+    }
+
+    // POST /api/recaps/:id/feedback → upsert per-slide thumbs + comment.
+    // Body: { slide_index: number, score: 1 | -1, comment?: string }
+    // One row per (recap, user, slide); re-voting / editing the comment
+    // upserts (last write wins). user_id always comes from the bearer token.
+    const recapFeedbackMatch = pathname.match(/^\/api\/recaps\/([^/]+)\/feedback$/);
+    if (method === "POST" && recapFeedbackMatch) {
+      const recapId = decodeURIComponent(recapFeedbackMatch[1]);
+
+      const userId = await getAuthenticatedUserId(request, env);
+      if (!userId) return json({ error: "Unauthorized" }, 401);
+
+      const client = db(env);
+      const { data: recap } = await client
+        .from("recaps")
+        .select("portfolio_id, slides")
+        .eq("id", recapId)
+        .maybeSingle();
+      if (!recap) return json({ error: "recap not found" }, 404);
+
+      const accessError = await assertPortfolioAccess(env, String(recap.portfolio_id), userId);
+      if (accessError) return accessError;
+
+      let body: { slide_index?: unknown; score?: unknown; comment?: unknown };
+      try {
+        body = (await request.json()) as typeof body;
+      } catch {
+        return json({ error: "Invalid JSON body" }, 400);
+      }
+
+      const slideIndex = Number(body.slide_index);
+      const score = Number(body.score);
+      const slideCount = Array.isArray(recap.slides) ? recap.slides.length : 0;
+      if (!Number.isInteger(slideIndex) || slideIndex < 0 || (slideCount > 0 && slideIndex >= slideCount)) {
+        return json({ error: "slide_index out of range" }, 400);
+      }
+      if (score !== 1 && score !== -1) {
+        return json({ error: "score must be 1 or -1" }, 400);
+      }
+      // Client sends the current comment alongside every vote (and the current
+      // score alongside every comment edit), so the upsert overwrites both.
+      const comment = typeof body.comment === "string" ? body.comment.slice(0, 2000) : null;
+
+      const { error } = await client.from("recap_slide_feedback").upsert(
+        {
+          recap_id: recapId,
+          portfolio_id: String(recap.portfolio_id),
+          user_id: userId,
+          slide_index: slideIndex,
+          score,
+          comment,
+        },
+        { onConflict: "recap_id,user_id,slide_index" },
+      );
       if (error) return json({ error: error.message }, 500);
       return json({ ok: true }, 200);
     }

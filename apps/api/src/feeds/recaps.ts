@@ -16,6 +16,9 @@
 // ============================================================
 
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
+import { RunTree } from "langsmith";
+import { withRunTree } from "langsmith/traceable";
+import { langsmithClient } from "../llm/langsmith";
 import {
   invokeGeminiStructured,
   invokeGeminiWithTools,
@@ -50,6 +53,14 @@ interface Env {
   GEMINI_API_KEY?: string;
   GEMINI_MODEL?: string;
   GEMINI_API_BASE_URL?: string;
+  // Optional — when unset, recap generation runs identically but is not
+  // traced and no presigned feedback token is produced.
+  LANGSMITH_API_KEY?: string;
+  LANGSMITH_PROJECT?: string;
+  // Override the LangSmith API base URL (e.g. EU region). Defaults to US.
+  LANGSMITH_ENDPOINT?: string;
+  // Required for org-scoped API keys (sent as x-tenant-id).
+  LANGSMITH_WORKSPACE_ID?: string;
 }
 
 function db(env: Env): AnySupabaseClient {
@@ -1168,46 +1179,134 @@ export async function generateRecap(
     watch: ctx.watch,
   };
 
-  let llm: RecapLlmOutput;
-  let usage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
-  let toolCallLog: ToolCallRecord[] = [];
+  // The agentic path with static single-shot fallback. Extracted to a closure
+  // so it can run inside a LangSmith run-tree context (withRunTree) — that is
+  // what makes the wrapped Gemini calls nest as child spans. The body is
+  // unchanged from the un-traced version; tracing is purely additive.
+  const runGeneration = async (): Promise<{
+    llm: RecapLlmOutput;
+    usage: { promptTokens: number; completionTokens: number; totalTokens: number };
+    toolCallLog: ToolCallRecord[];
+  }> => {
+    let llm: RecapLlmOutput;
+    let usage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
+    let toolCallLog: ToolCallRecord[] = [];
 
-  try {
-    // --- Agentic path ---
-    const handlers = buildAgentToolHandlers(env, client, recap.portfolio_id, ctx, collectedSources);
-    const agentResult = await invokeGeminiWithTools(env, {
-      system: buildAgentSystemPrompt(ctx.type),
-      user: buildUserPrompt(ctx),
-      tools: buildAgentTools(ctx.type),
-      handlers,
-      terminalTool: "write_slides",
-      maxIterations: ctx.type === "daily" ? 5 : 6,
-    });
+    try {
+      // --- Agentic path ---
+      const handlers = buildAgentToolHandlers(env, client, recap.portfolio_id, ctx, collectedSources);
+      const agentResult = await invokeGeminiWithTools(env, {
+        system: buildAgentSystemPrompt(ctx.type),
+        user: buildUserPrompt(ctx),
+        tools: buildAgentTools(ctx.type),
+        handlers,
+        terminalTool: "write_slides",
+        maxIterations: ctx.type === "daily" ? 5 : 6,
+      });
 
-    // Extract slides from the write_slides tool call output.
-    const rawSlides = agentResult.output.slides;
-    if (!Array.isArray(rawSlides)) throw new Error("Agent write_slides did not include slides[]");
-    llm = { slides: rawSlides as RecapLlmOutput["slides"] };
-    usage = agentResult.usage;
-    toolCallLog = agentResult.toolCalls;
-    console.log(`[recaps] agentic path: ${toolCallLog.length} tool calls`);
-  } catch (err) {
-    // --- Fallback: static single-shot path ---
-    if (err instanceof MaxIterationsError) {
-      toolCallLog = err.toolCalls;
-      console.warn(`[recaps] agent hit max iterations (${toolCallLog.length} calls), falling back to static path`);
-    } else {
-      console.warn(`[recaps] agent error, falling back:`, err instanceof Error ? err.message : err);
+      // Extract slides from the write_slides tool call output.
+      const rawSlides = agentResult.output.slides;
+      if (!Array.isArray(rawSlides)) throw new Error("Agent write_slides did not include slides[]");
+      llm = { slides: rawSlides as RecapLlmOutput["slides"] };
+      usage = agentResult.usage;
+      toolCallLog = agentResult.toolCalls;
+      console.log(`[recaps] agentic path: ${toolCallLog.length} tool calls`);
+    } catch (err) {
+      // --- Fallback: static single-shot path ---
+      if (err instanceof MaxIterationsError) {
+        toolCallLog = err.toolCalls;
+        console.warn(`[recaps] agent hit max iterations (${toolCallLog.length} calls), falling back to static path`);
+      } else {
+        console.warn(`[recaps] agent error, falling back:`, err instanceof Error ? err.message : err);
+      }
+
+      const staticResult = await invokeGeminiStructured(env, {
+        system: buildStaticSystemPrompt(ctx.type),
+        user: buildUserPrompt(ctx),
+        schema: buildLlmSchema(ctx.type),
+      });
+      llm = parseLlmOutput(staticResult.text);
+      usage = staticResult.usage;
     }
 
-    const staticResult = await invokeGeminiStructured(env, {
-      system: buildStaticSystemPrompt(ctx.type),
-      user: buildUserPrompt(ctx),
-      schema: buildLlmSchema(ctx.type),
+    return { llm, usage, toolCallLog };
+  };
+
+  // --- LangSmith tracing (additive) ---
+  // Create the parent run BEFORE generation so child spans attach. Every
+  // LangSmith call is best-effort: a failure logs and degrades to the
+  // un-traced path — recap generation must never break because of tracing.
+  const lsClient = langsmithClient(env);
+  let langsmithRunId: string | null = null;
+  let rt: RunTree | null = null;
+  if (lsClient) {
+    langsmithRunId = crypto.randomUUID();
+    rt = new RunTree({
+      name: "recap-generation",
+      // "chain" (orchestration), not "llm" — avoids token-table rendering
+      // artifacts on a span that wraps HTTP + JSON assembly.
+      run_type: "chain",
+      id: langsmithRunId,
+      project_name: env.LANGSMITH_PROJECT ?? "node-recaps",
+      client: lsClient,
+      tracingEnabled: true,
+      inputs: {
+        recap_type: recap.type,
+        portfolio_id: recap.portfolio_id,
+        model: geminiModel(env),
+      },
     });
-    llm = parseLlmOutput(staticResult.text);
-    usage = staticResult.usage;
+    try {
+      await rt.postRun();
+    } catch (err) {
+      console.error("[recaps] LangSmith postRun failed — continuing untraced:", err);
+      rt = null;
+      langsmithRunId = null;
+    }
   }
+
+  let generated: {
+    llm: RecapLlmOutput;
+    usage: { promptTokens: number; completionTokens: number; totalTokens: number };
+    toolCallLog: ToolCallRecord[];
+  };
+  try {
+    generated = rt ? await withRunTree(rt, runGeneration) : await runGeneration();
+  } catch (err) {
+    if (rt) {
+      try {
+        await rt.end(undefined, err instanceof Error ? err.message : String(err));
+        await rt.patchRun();
+        await lsClient?.flush(); // send the error run before the Worker exits
+      } catch (patchErr) {
+        console.error("[recaps] LangSmith patchRun/flush (error path) failed:", patchErr);
+      }
+    }
+    throw err; // generation failure is real — let the queue retry / mark failed
+  }
+  const { llm, usage, toolCallLog } = generated;
+
+  if (rt) {
+    try {
+      // Log the generated slides as the run output so the recap is
+      // evaluatable in LangSmith, not just a status + count.
+      await rt.end({ status: "ready", slide_count: llm.slides.length, slides: llm.slides });
+      await rt.patchRun();
+      // CRITICAL on CF Workers: flush the batched run events before the
+      // request context tears down. Without this the create + end/outputs
+      // never send and the run is left "pending"/"incomplete" with an empty
+      // output field.
+      await lsClient?.flush();
+    } catch (patchErr) {
+      console.error("[recaps] LangSmith patchRun/flush failed:", patchErr);
+    }
+  }
+
+  // Per-slide user feedback lives in Supabase (recap_slide_feedback), correlated
+  // to this run via langsmith_run_id. We deliberately do NOT push a recap-level
+  // "user_score" to LangSmith: the presigned-token channel appends on every
+  // click (re-votes pollute the aggregate) and a single score can't represent
+  // per-slide sentiment. A proper idempotent run metric belongs in the eval loop.
 
   // Merge any sources the agent retrieved into ctx for assembleSlides.
   const mergedCtx: GatheredContext = {
@@ -1235,6 +1334,7 @@ export async function generateRecap(
       },
       generated_at: new Date().toISOString(),
       error: null,
+      langsmith_run_id: langsmithRunId,
     })
     .eq("id", recapId);
 

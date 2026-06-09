@@ -19,6 +19,23 @@ async function authHeaders(): Promise<HeadersInit> {
 }
 
 /**
+ * Primary feedback write: upserts the caller's vote (+ comment) for one slide.
+ * Throws on non-2xx so the caller can roll back optimistic state and toast.
+ */
+export async function postSlideFeedback(
+  recapId: string,
+  payload: { slide_index: number; score: 1 | -1; comment: string },
+): Promise<void> {
+  const headers = await authHeaders();
+  const res = await fetch(`${API_BASE_URL}/api/recaps/${recapId}/feedback`, {
+    method: "POST",
+    headers: { ...headers, "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(`feedback failed: ${res.status}`);
+}
+
+/**
  * Fetches the latest ready recap for a portfolio (weekly preferred on
  * weekends, else the most recent of either type). Exposes a `markSeen`
  * that clears the "new" indicator.

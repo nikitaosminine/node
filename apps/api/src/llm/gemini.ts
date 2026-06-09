@@ -9,7 +9,16 @@
 // IMPORTANT: Gemini function-calling and responseMimeType/
 // responseSchema cannot be used together. The agentic mode uses
 // write_slides as the terminal tool to deliver structured output.
+//
+// Both invoke* functions are wrapped with LangSmith `traceable` so
+// they appear as child spans under the recap-generation run. Tracing
+// is a no-op passthrough unless called within an active run-tree
+// context (set by withRunTree in generateRecap when LANGSMITH_API_KEY
+// is configured) — so the un-traced path is unchanged. processInputs
+// redacts `env` so the API key never reaches LangSmith.
 // ============================================================
+
+import { traceable } from "langsmith/traceable";
 
 export interface GeminiEnv {
   GEMINI_API_KEY?: string;
@@ -73,7 +82,7 @@ export function geminiModel(env: GeminiEnv): string {
  * The caller parses + validates the returned text. Transient failures are
  * left to the queue's retry (single attempt here, like invokeGrok).
  */
-export async function invokeGeminiStructured(
+async function invokeGeminiStructuredImpl(
   env: GeminiEnv,
   args: { system: string; user: string; schema: GeminiSchema; temperature?: number },
 ): Promise<StructuredResult> {
@@ -123,6 +132,29 @@ export async function invokeGeminiStructured(
     },
   };
 }
+
+/**
+ * Traceable wrapper. Logs the prompt + temperature (NOT `env`, which holds
+ * the API key) and the token usage. A no-op passthrough outside a run-tree
+ * context, so callers that don't trace are unaffected.
+ */
+export const invokeGeminiStructured = traceable(invokeGeminiStructuredImpl, {
+  name: "gemini.structured",
+  run_type: "llm",
+  processInputs: (inputs) => {
+    const a = ((inputs as { args?: unknown[] }).args?.[1] ?? {}) as {
+      system?: string;
+      user?: string;
+      temperature?: number;
+    };
+    return { system: a.system, user: a.user, temperature: a.temperature ?? 0.3 };
+  },
+  processOutputs: (outputs) => {
+    const r = outputs as Partial<StructuredResult>;
+    // Log the model's actual text so the run is evaluatable, not just metrics.
+    return { text: r.text, usage: r.usage };
+  },
+});
 
 // ---------------------------------------------------------------------------
 // Gemini function-calling (agentic mode)
@@ -206,7 +238,7 @@ interface GeminiToolCallResponse {
  *
  * On MaxIterationsError the caller should fall back to invokeGeminiStructured.
  */
-export async function invokeGeminiWithTools(
+async function invokeGeminiWithToolsImpl(
   env: GeminiEnv,
   args: {
     system: string;
@@ -311,3 +343,37 @@ export async function invokeGeminiWithTools(
 
   throw new MaxIterationsError(toolCalls);
 }
+
+/**
+ * Traceable wrapper for the agentic loop. run_type "chain" (it orchestrates
+ * multiple LLM turns + tool calls, not a single completion). Logs the prompt,
+ * terminal tool, and declared tool names — never `env` or the handler
+ * closures. No-op passthrough outside a run-tree context.
+ */
+export const invokeGeminiWithTools = traceable(invokeGeminiWithToolsImpl, {
+  name: "gemini.agentic",
+  run_type: "chain",
+  processInputs: (inputs) => {
+    const a = ((inputs as { args?: unknown[] }).args?.[1] ?? {}) as {
+      system?: string;
+      user?: string;
+      tools?: GeminiFunctionDeclaration[];
+      terminalTool?: string;
+      maxIterations?: number;
+      temperature?: number;
+    };
+    return {
+      system: a.system,
+      user: a.user,
+      terminal_tool: a.terminalTool,
+      tools: a.tools?.map((t) => t.name),
+      max_iterations: a.maxIterations,
+      temperature: a.temperature ?? 0.3,
+    };
+  },
+  processOutputs: (outputs) => {
+    const r = outputs as Partial<AgentResult>;
+    // Log the generated slides (the write_slides output), not just metrics.
+    return { output: r.output, usage: r.usage, tool_calls: r.toolCalls?.map((t) => t.tool) };
+  },
+});

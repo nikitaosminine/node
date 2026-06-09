@@ -48,6 +48,21 @@ export interface SlideSpec {
   sources?: SlideSource[];
 }
 
+// One stored per-slide vote as returned by GET /api/recaps (the caller's own
+// feedback). score is always 1 or -1 (the DB column is NOT NULL CHECK).
+export interface SlideFeedback {
+  slide_index: number;
+  score: 1 | -1;
+  comment: string | null;
+}
+
+// Optimistic per-slide state held by the player. score is nullable here
+// because a slide may be unvoted (or have only a draft comment).
+export interface SlideVote {
+  score: 1 | -1 | null;
+  comment: string;
+}
+
 export interface Recap {
   id: string;
   type: RecapType;
@@ -57,6 +72,12 @@ export interface Recap {
   slides: SlideSpec[];
   generated_at: string | null;
   seen_at: string | null;
+  // LangSmith presigned feedback URL (overall signal). Null when LangSmith
+  // is not configured or token generation failed.
+  feedback_token: string | null;
+  langsmith_run_id: string | null;
+  // The caller's stored per-slide votes (empty array when none).
+  slide_feedback: SlideFeedback[];
 }
 
 // Map a slide color token to a CSS custom property usable by recharts.
