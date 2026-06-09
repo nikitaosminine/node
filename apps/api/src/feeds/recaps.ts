@@ -1304,7 +1304,9 @@ export async function generateRecap(
 
   if (rt) {
     try {
-      await rt.end({ status: "ready", slides: llm.slides.length });
+      // Log the generated slides as the run output so the recap is
+      // evaluatable in LangSmith, not just a status + count.
+      await rt.end({ status: "ready", slide_count: llm.slides.length, slides: llm.slides });
       await rt.patchRun();
       // CRITICAL on CF Workers: flush the batched run events before the
       // request context tears down. Without this the create + end/outputs

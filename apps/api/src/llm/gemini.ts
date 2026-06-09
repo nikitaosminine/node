@@ -151,7 +151,8 @@ export const invokeGeminiStructured = traceable(invokeGeminiStructuredImpl, {
   },
   processOutputs: (outputs) => {
     const r = outputs as Partial<StructuredResult>;
-    return { usage: r.usage, text_length: r.text?.length };
+    // Log the model's actual text so the run is evaluatable, not just metrics.
+    return { text: r.text, usage: r.usage };
   },
 });
 
@@ -372,6 +373,7 @@ export const invokeGeminiWithTools = traceable(invokeGeminiWithToolsImpl, {
   },
   processOutputs: (outputs) => {
     const r = outputs as Partial<AgentResult>;
-    return { usage: r.usage, tool_calls: r.toolCalls?.map((t) => t.tool) };
+    // Log the generated slides (the write_slides output), not just metrics.
+    return { output: r.output, usage: r.usage, tool_calls: r.toolCalls?.map((t) => t.tool) };
   },
 });
