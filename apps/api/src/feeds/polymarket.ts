@@ -1,4 +1,7 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
+import { RunTree } from "langsmith";
+import { traceable, withRunTree } from "langsmith/traceable";
+import { langsmithClient } from "../llm/langsmith";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnySupabaseClient = SupabaseClient<any, any, any>;
@@ -15,6 +18,11 @@ interface Env {
   GROK_NORMALIZATION_API_KEY?: string;
   GROK_API_BASE_URL?: string;
   POLYMARKET_GAMMA_BASE_URL?: string;
+  // Optional LangSmith tracing — when unset, curation runs identically untraced.
+  LANGSMITH_API_KEY?: string;
+  LANGSMITH_PROJECT?: string;
+  LANGSMITH_ENDPOINT?: string;
+  LANGSMITH_WORKSPACE_ID?: string;
 }
 
 interface PortfolioRow {
@@ -193,7 +201,7 @@ function getGrokBaseUrl(env: Env): string {
   return (env.GROK_API_BASE_URL || "https://api.x.ai/v1").replace(/\/$/, "");
 }
 
-async function invokeGrok(env: Env, systemPrompt: string, userPrompt: string): Promise<string> {
+async function invokeGrokImpl(env: Env, systemPrompt: string, userPrompt: string): Promise<string> {
   const apiKey = env.GROK_MAIN_API_KEY ?? env.GROK_SUB_API_KEY ?? env.GROK_NORMALIZATION_API_KEY;
   if (!apiKey) throw new Error("[polymarket] No Grok API key available");
 
@@ -223,6 +231,19 @@ async function invokeGrok(env: Env, systemPrompt: string, userPrompt: string): P
   if (!content) throw new Error("Grok response did not include content");
   return content;
 }
+
+// Traceable wrapper. Logs the prompts + raw model output (NOT `env`, which holds
+// the API key). A no-op passthrough outside a run-tree context, so untraced
+// callers are unaffected; nests as a child span when run inside withRunTree.
+const invokeGrok = traceable(invokeGrokImpl, {
+  name: "grok.score",
+  run_type: "llm",
+  processInputs: (inputs) => {
+    const args = (inputs as { args?: unknown[] }).args ?? [];
+    return { system: args[1], user: args[2] };
+  },
+  processOutputs: (outputs) => ({ text: outputs }),
+});
 
 function extractJsonArray(raw: string): unknown[] {
   const trimmed = raw.trim();
@@ -895,7 +916,66 @@ export async function runPolymarketFanout(env: Env): Promise<{
       } else {
         const { profileSummary } = await buildPortfolioProfile(client, portfolioId, holdings);
 
-        const rawScored = await scoreRotatingCandidates(env, profileSummary, rotatingCandidates);
+        // --- LangSmith tracing (additive, attributed to this portfolio/user) ---
+        // One run per portfolio per fanout. portfolio_id + user_id in the inputs
+        // make every run attributable in the LangSmith dashboard without storing
+        // the run id. Every LangSmith call is best-effort; curation never breaks.
+        const lsClient = langsmithClient(env);
+        let curationRun: RunTree | null = null;
+        if (lsClient) {
+          curationRun = new RunTree({
+            name: "polymarket-curation",
+            run_type: "chain",
+            id: crypto.randomUUID(),
+            project_name: env.LANGSMITH_PROJECT ?? "node-polymarket",
+            client: lsClient,
+            tracingEnabled: true,
+            inputs: {
+              portfolio_id: portfolioId,
+              user_id: portfolio.user_id,
+              model: "grok-4.20-0309-non-reasoning",
+              candidate_count: rotatingCandidates.length,
+            },
+          });
+          try {
+            await curationRun.postRun();
+          } catch (e) {
+            console.error("[polymarket] LangSmith postRun failed — continuing untraced:", e);
+            curationRun = null;
+          }
+        }
+
+        let rawScored: GrokScoreItem[];
+        try {
+          rawScored = curationRun
+            ? await withRunTree(curationRun, () =>
+                scoreRotatingCandidates(env, profileSummary, rotatingCandidates),
+              )
+            : await scoreRotatingCandidates(env, profileSummary, rotatingCandidates);
+        } catch (err) {
+          if (curationRun && lsClient) {
+            try {
+              await curationRun.end(undefined, err instanceof Error ? err.message : String(err));
+              await curationRun.patchRun();
+              await lsClient.flush();
+            } catch (e) {
+              console.error("[polymarket] LangSmith patch/flush (error path) failed:", e);
+            }
+          }
+          throw err;
+        }
+
+        if (curationRun && lsClient) {
+          try {
+            // Output = the curated picks (what needs steering), so the run is evaluatable.
+            await curationRun.end({ scored: rawScored, count: rawScored.length });
+            await curationRun.patchRun();
+            // Flush before the Worker tears down — see llm/langsmith.ts.
+            await lsClient.flush();
+          } catch (e) {
+            console.error("[polymarket] LangSmith patch/flush failed:", e);
+          }
+        }
 
         if (rawScored.length === 0) {
           errors.push(`portfolio ${portfolioId}: Grok scoring returned 0 results — using volume fallback`);

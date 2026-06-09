@@ -16,8 +16,9 @@
 // ============================================================
 
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
-import { Client, RunTree } from "langsmith";
+import { RunTree } from "langsmith";
 import { withRunTree } from "langsmith/traceable";
+import { langsmithClient } from "../llm/langsmith";
 import {
   invokeGeminiStructured,
   invokeGeminiWithTools,
@@ -64,23 +65,6 @@ interface Env {
 
 function db(env: Env): AnySupabaseClient {
   return createClient(env.SUPABASE_URL, env.SUPABASE_SERVICE_KEY);
-}
-
-// LangSmith client — null when not configured, so tracing is opt-in and the
-// generation path is identical without it. Instantiated per request from the
-// Worker env binding (no module-load env access in CF Workers).
-function langsmithClient(env: Env): Client | null {
-  if (!env.LANGSMITH_API_KEY) return null;
-  return new Client({
-    apiKey: env.LANGSMITH_API_KEY,
-    // Region-specific. US is the default; EU-region accounts set
-    // LANGSMITH_ENDPOINT to https://eu.api.smith.langchain.com.
-    apiUrl: env.LANGSMITH_ENDPOINT ?? "https://api.smith.langchain.com",
-    // Required by LangSmith for org-scoped API keys (sent as x-tenant-id) —
-    // without it an org-scoped key gets 403 Forbidden. Harmless for
-    // workspace-scoped keys; omitted entirely when unset.
-    workspaceId: env.LANGSMITH_WORKSPACE_ID,
-  });
 }
 
 // ---------------------------------------------------------------------------
