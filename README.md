@@ -2,7 +2,7 @@
   <img src="./node_app_assets/hexagon/node-logo-horizontal-white.svg" width="340" alt="Node logo" />
 </p>
 
-<p align="center"><b>An AI-native personal finance app — built solo for now, and looking for the right people to build it with.</b></p>
+<p align="center"><b>An AI-native personal finance app that I'm building solo for now.</b></p>
 
 <p align="center">
 Node starts as a portfolio tracker that explains what's moving your money — and is being built toward a personal finance hub that remembers you. The bet: future users of personal finance tools would expect personalisation in form of persistent memory and voice interactions.
