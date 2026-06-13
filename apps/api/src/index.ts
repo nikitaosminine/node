@@ -20,6 +20,7 @@ import {
 import { runNewsFanout } from "./feeds/news";
 import { runPolymarketFanout, NON_FINANCIAL_RE, TAG_IDS, isShortTermMarket } from "./feeds/polymarket";
 import { generateRecap } from "./feeds/recaps";
+import { langsmithClient } from "./llm/langsmith";
 import type { RecapQueueMessage, RecapType } from "./feeds/recap-types";
 
 export interface Env {
@@ -45,7 +46,7 @@ export interface Env {
   GEMINI_MODEL?: string;
   GEMINI_API_BASE_URL?: string;
   // LangSmith tracing for recap generation. Optional — the app behaves
-  // identically when unset (no traces, feedback_token stored as null).
+  // identically when unset (no traces, no per-slide feedback pushed back).
   LANGSMITH_API_KEY?: string;
   LANGSMITH_PROJECT?: string;
   // Override the LangSmith API base URL (e.g. EU region). Defaults to US.
@@ -71,6 +72,23 @@ function json(body: unknown, status = 200): Response {
 
 function db(env: Env) {
   return createClient(env.SUPABASE_URL, env.SUPABASE_SERVICE_KEY);
+}
+
+// Deterministic UUID from a stable input string (SHA-256 → UUID format).
+// Used to give LangSmith feedback an idempotent feedbackId: the same
+// (run, user, slide) always maps to the same UUID, so re-votes UPSERT the
+// feedback instead of appending a new row (the bug that retired the old
+// presigned-token channel). Labeled v5 for format validity only — we use
+// SHA-256, not SHA-1; only stability matters here, not RFC-4122 derivation.
+async function deterministicUuid(input: string): Promise<string> {
+  const digest = new Uint8Array(
+    await crypto.subtle.digest("SHA-256", new TextEncoder().encode(input)),
+  );
+  const b = digest.slice(0, 16);
+  b[6] = (b[6] & 0x0f) | 0x50; // version 5
+  b[8] = (b[8] & 0x3f) | 0x80; // RFC-4122 variant
+  const hex = Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
 function parseSymbols(raw: string | null): string[] {
@@ -5418,7 +5436,7 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
       let query = db(env)
         .from("recaps")
         .select(
-          "id, type, period_start, period_end, status, slides, generated_at, seen_at, feedback_token, langsmith_run_id",
+          "id, type, period_start, period_end, status, slides, generated_at, seen_at, langsmith_run_id",
         )
         .eq("portfolio_id", portfolioId)
         .eq("status", "ready");
@@ -5500,7 +5518,7 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
       const client = db(env);
       const { data: recap } = await client
         .from("recaps")
-        .select("portfolio_id, slides")
+        .select("portfolio_id, slides, langsmith_run_id")
         .eq("id", recapId)
         .maybeSingle();
       if (!recap) return json({ error: "recap not found" }, 404);
@@ -5540,6 +5558,44 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
         { onConflict: "recap_id,user_id,slide_index" },
       );
       if (error) return json({ error: error.message }, 500);
+
+      // Retroactively attach this vote to the recap's already-recorded
+      // LangSmith trace. Best-effort and fully decoupled from the Supabase
+      // write above (which is the source of truth): a LangSmith outage,
+      // an unconfigured key, or an untraced recap must never fail the save.
+      //
+      // Idempotent by design: feedbackId = uuid(run, user, slide), so a
+      // re-vote (👍→👎) UPDATES the same feedback instead of appending a new
+      // one — the exact pollution that retired the old presigned-token path.
+      // One feedback key per slide (slide_<n>_score) keeps per-slide sentiment
+      // distinct on the run instead of collapsing to a single recap score.
+      const langsmithRunId =
+        typeof recap.langsmith_run_id === "string" ? recap.langsmith_run_id : null;
+      if (langsmithRunId) {
+        const lsClient = langsmithClient(env);
+        if (lsClient) {
+          try {
+            const feedbackId = await deterministicUuid(
+              `${langsmithRunId}:${userId}:${slideIndex}`,
+            );
+            await lsClient.createFeedback(langsmithRunId, `slide_${slideIndex}_score`, {
+              score,
+              comment: comment ?? undefined,
+              feedbackId,
+            });
+            // CF Workers: flush the batched event before the request context
+            // tears down, or the feedback never sends.
+            await lsClient.flush();
+          } catch (err) {
+            console.error(
+              "[recaps] LangSmith createFeedback failed for run",
+              langsmithRunId,
+              err,
+            );
+          }
+        }
+      }
+
       return json({ ok: true }, 200);
     }
 

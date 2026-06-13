@@ -72,9 +72,8 @@ export interface Recap {
   slides: SlideSpec[];
   generated_at: string | null;
   seen_at: string | null;
-  // LangSmith presigned feedback URL (overall signal). Null when LangSmith
-  // is not configured or token generation failed.
-  feedback_token: string | null;
+  // The LangSmith run that produced this recap. Per-slide votes are pushed
+  // back to this trace (best-effort) and correlated to it during evals.
   langsmith_run_id: string | null;
   // The caller's stored per-slide votes (empty array when none).
   slide_feedback: SlideFeedback[];
