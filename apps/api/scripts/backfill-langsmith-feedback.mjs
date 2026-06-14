@@ -133,7 +133,7 @@ async function main() {
     .from("recap_slide_feedback")
     .select(
       "recap_id, user_id, slide_index, score, comment, " +
-        "recaps!inner(langsmith_run_id, type, period_start, period_end)",
+        "recaps!inner(langsmith_run_id, type, period_start, period_end, slides)",
     )
     .order("recap_id", { ascending: true })
     .order("slide_index", { ascending: true });
@@ -174,7 +174,11 @@ async function main() {
   let failed = 0;
   for (const r of withTrace) {
     const runId = r.recaps.langsmith_run_id;
-    const key = `slide_${r.slide_index}_score`;
+    // Key by slide KIND (performance/macro/mover/watch), not the 0-based index.
+    // Mirrors the live handler; falls back to the index if the kind is missing.
+    const slides = Array.isArray(r.recaps.slides) ? r.recaps.slides : [];
+    const kind = slides[r.slide_index]?.kind;
+    const key = typeof kind === "string" ? `${kind}_score` : `slide_${r.slide_index}_score`;
     const tag = `recap ${r.recap_id} slide ${r.slide_index} (${r.recaps.type} ${r.recaps.period_start}→${r.recaps.period_end}) score=${r.score}`;
     if (args.dryRun) {
       console.log(`  [dry-run] would push ${key} to run ${runId} — ${tag}`);
@@ -185,6 +189,15 @@ async function main() {
       const feedbackId = await deterministicUuid(
         `${runId}:${r.user_id}:${r.slide_index}`,
       );
+      // Feedback keys are immutable in LangSmith, so re-keying (e.g. an old
+      // slide_<n>_score entry → <kind>_score) requires delete + recreate under
+      // the same deterministic id. Delete is best-effort: a 404 just means no
+      // prior entry existed (first run), which is fine.
+      try {
+        await ls.deleteFeedback(feedbackId);
+      } catch {
+        /* no prior feedback under this id — nothing to remove */
+      }
       await ls.createFeedback(runId, key, {
         score: r.score,
         // Empty string (not undefined) so a cleared comment overwrites any

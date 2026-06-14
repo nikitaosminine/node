@@ -5578,7 +5578,15 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
             const feedbackId = await deterministicUuid(
               `${langsmithRunId}:${userId}:${slideIndex}`,
             );
-            await lsClient.createFeedback(langsmithRunId, `slide_${slideIndex}_score`, {
+            // Key feedback by the slide's KIND (performance/macro/mover/watch),
+            // not its 0-based array index — self-documenting in the LangSmith UI
+            // and comparable across recaps. Each kind is unique within a recap.
+            // Falls back to the index if the kind is somehow missing.
+            const slideKind =
+              Array.isArray(recap.slides) && recap.slides[slideIndex]?.kind;
+            const feedbackKey =
+              typeof slideKind === "string" ? `${slideKind}_score` : `slide_${slideIndex}_score`;
+            await lsClient.createFeedback(langsmithRunId, feedbackKey, {
               score,
               // Always send the comment field (empty string when the user has
               // none / just cleared it) so clearing a comment propagates to the
