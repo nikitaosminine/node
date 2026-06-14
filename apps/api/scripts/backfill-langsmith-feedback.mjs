@@ -187,7 +187,9 @@ async function main() {
       );
       await ls.createFeedback(runId, key, {
         score: r.score,
-        comment: r.comment ?? undefined,
+        // Empty string (not undefined) so a cleared comment overwrites any
+        // stale one on the trace — mirrors the live handler.
+        comment: r.comment ?? "",
         feedbackId,
       });
       pushed += 1;

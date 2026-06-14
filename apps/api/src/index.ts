@@ -5580,7 +5580,10 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
             );
             await lsClient.createFeedback(langsmithRunId, `slide_${slideIndex}_score`, {
               score,
-              comment: comment ?? undefined,
+              // Always send the comment field (empty string when the user has
+              // none / just cleared it) so clearing a comment propagates to the
+              // trace instead of leaving the prior one stale.
+              comment: comment ?? "",
               feedbackId,
             });
             // CF Workers: flush the batched event before the request context
