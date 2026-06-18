@@ -13,7 +13,7 @@ const PROTECTED = ["/portfolios", "/the-take", "/settings", "/overview"];
 export async function proxy(request: NextRequest) {
   // This response object is what we return; Supabase may write refreshed
   // auth cookies onto it via setAll below.
-  let response = NextResponse.next({ request });
+  const response = NextResponse.next({ request });
 
   const supabase = createServerClient(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY, {
     cookies: {
