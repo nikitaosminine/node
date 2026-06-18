@@ -18,6 +18,7 @@ import { Calendar } from "@/components/ui/calendar";
 import { format } from "date-fns";
 import { cn } from "@/lib/utils";
 import { normalizeCurrencyCode } from "@/lib/currency";
+import { API_BASE_URL } from "@/lib/api";
 
 interface Props {
   open: boolean;
@@ -34,12 +35,6 @@ interface AssetSearchResult {
   assetType: string;
   currency: string | null;
 }
-
-const API_BASE_URL =
-  process.env.NEXT_PUBLIC_API_URL ??
-  (process.env.NODE_ENV === "production"
-    ? "https://binturong-api.nikita-osminine.workers.dev"
-    : "http://localhost:8787");
 
 export function AddHoldingModal({
   open,

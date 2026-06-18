@@ -18,6 +18,7 @@ import Papa from "papaparse";
 import { toast } from "sonner";
 import { CurrencySelect } from "@/components/currency-select";
 import { DEFAULT_PORTFOLIO_CURRENCY, normalizeCurrencyCode } from "@/lib/currency";
+import { API_BASE_URL } from "@/lib/api";
 
 interface AssetSearchResult {
   ticker: string;
@@ -138,12 +139,6 @@ function pickBestSearchMatch(
 
   return matches[0];
 }
-
-const API_BASE_URL =
-  process.env.NEXT_PUBLIC_API_URL ??
-  (process.env.NODE_ENV === "production"
-    ? "https://binturong-api.nikita-osminine.workers.dev"
-    : "http://localhost:8787");
 
 interface Props {
   open: boolean;

@@ -27,12 +27,7 @@ import { TextShimmer } from "@/components/loading-ui/text-shimmer";
 import { supabase } from "@/integrations/supabase/client";
 import { cn } from "@/lib/utils";
 import { formatCurrency, normalizeCurrencyCode } from "@/lib/currency";
-
-const API_BASE_URL =
-  process.env.NEXT_PUBLIC_API_URL ??
-  (process.env.NODE_ENV === "production"
-    ? "https://binturong-api.nikita-osminine.workers.dev"
-    : "http://localhost:8787");
+import { API_BASE_URL } from "@/lib/api";
 
 interface ChartSeries {
   date: string;

@@ -6,7 +6,7 @@ import { useThesisContext } from "@/contexts/thesis-context";
 import { motion, useReducedMotion } from "framer-motion";
 import { Thesis } from "@/lib/thesis";
 import { useAuth } from "@/hooks/use-auth";
-import { authHeaders } from "@/lib/api";
+import { API_BASE_URL, authHeaders } from "@/lib/api";
 import { TakePageHeader } from "@/components/take/take-page-header";
 import { Button } from "@/components/ui/button";
 import { TakeToolbar, FilterTab } from "@/components/take/take-toolbar";
@@ -45,8 +45,6 @@ const PERIOD_FILTERS: PeriodFilter[] = ["All", "Last week", "Last month"];
 
 type SortOrder = "desc" | "asc";
 const PILL_TRANSITION = { type: "spring" as const, stiffness: 420, damping: 34, mass: 0.7 };
-const API_BASE_URL =
-  process.env.NEXT_PUBLIC_API_URL ?? "https://binturong-api.nikita-osminine.workers.dev";
 
 export default function ThesesPage() {
   const { theses, openDrawer, openModal } = useThesisContext();

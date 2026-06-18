@@ -23,12 +23,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { TextShimmer } from "@/components/loading-ui/text-shimmer";
-
-const API_BASE_URL =
-  process.env.NEXT_PUBLIC_API_URL ??
-  (process.env.NODE_ENV === "production"
-    ? "https://binturong-api.nikita-osminine.workers.dev"
-    : "http://localhost:8787");
+import { API_BASE_URL } from "@/lib/api";
 
 export type Side = "BUY" | "SELL" | "DEP" | "WD" | "DIV" | "FEE";
 

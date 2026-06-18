@@ -22,12 +22,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-
-const API_BASE_URL =
-  process.env.NEXT_PUBLIC_API_URL ??
-  (process.env.NODE_ENV === "production"
-    ? "https://binturong-api.nikita-osminine.workers.dev"
-    : "http://localhost:8787");
+import { API_BASE_URL } from "@/lib/api";
 
 type Side = "BUY" | "SELL" | "DEP" | "WD" | "DIV" | "FEE";
 

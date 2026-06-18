@@ -6,12 +6,7 @@ import { NewsCard, type NewsMatch } from "@/components/feed/news-card";
 import { FeedShell } from "@/components/feed/feed-shell";
 import { CategoryPills } from "@/components/feed/category-pills";
 import { ExpandableSearch } from "@/components/feed/expandable-search";
-
-const API_BASE_URL =
-  process.env.NEXT_PUBLIC_API_URL ??
-  (process.env.NODE_ENV === "production"
-    ? "https://binturong-api.nikita-osminine.workers.dev"
-    : "http://localhost:8787");
+import { API_BASE_URL } from "@/lib/api";
 
 const POLL_INTERVAL_MS = 5 * 60 * 1000; // 5 min
 
