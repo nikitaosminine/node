@@ -95,7 +95,7 @@ export function geminiModel(env: GeminiEnv): string {
  */
 async function invokeGeminiStructuredImpl(
   env: GeminiEnv,
-  args: { system: string; user: string; schema: GeminiSchema; temperature?: number },
+  args: { system: string; user: string; schema: GeminiSchema },
 ): Promise<StructuredResult> {
   if (!env.GEMINI_API_KEY) throw new Error("Missing GEMINI_API_KEY");
   const model = geminiModel(env);
@@ -110,8 +110,9 @@ async function invokeGeminiStructuredImpl(
     body: JSON.stringify({
       systemInstruction: { parts: [{ text: args.system }] },
       contents: [{ role: "user", parts: [{ text: args.user }] }],
+      // No temperature/top_p/top_k: Gemini 3.x reasoning is tuned for the
+      // default sampling; overriding it can degrade output quality.
       generationConfig: {
-        temperature: args.temperature ?? 0.3,
         responseMimeType: "application/json",
         responseSchema: args.schema,
       },
@@ -145,9 +146,9 @@ async function invokeGeminiStructuredImpl(
 }
 
 /**
- * Traceable wrapper. Logs the prompt + temperature (NOT `env`, which holds
- * the API key) and the token usage. A no-op passthrough outside a run-tree
- * context, so callers that don't trace are unaffected.
+ * Traceable wrapper. Logs the prompt (NOT `env`, which holds the API key) and
+ * the token usage. A no-op passthrough outside a run-tree context, so callers
+ * that don't trace are unaffected.
  */
 export const invokeGeminiStructured = traceable(invokeGeminiStructuredImpl, {
   name: "gemini.structured",
@@ -156,9 +157,8 @@ export const invokeGeminiStructured = traceable(invokeGeminiStructuredImpl, {
     const a = ((inputs as { args?: unknown[] }).args?.[1] ?? {}) as {
       system?: string;
       user?: string;
-      temperature?: number;
     };
-    return { system: a.system, user: a.user, temperature: a.temperature ?? 0.3 };
+    return { system: a.system, user: a.user };
   },
   processOutputs: (outputs) => {
     const r = outputs as Partial<StructuredResult>;
