@@ -6,6 +6,7 @@
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "cf-typegen": "wrangler types",
+    "typecheck": "tsc --noEmit",
     "eval:agent": "node ./scripts/eval-agent-runs.mjs",
     "check:fetch-auth": "bash ./scripts/check-fetch-auth.sh"
   },
