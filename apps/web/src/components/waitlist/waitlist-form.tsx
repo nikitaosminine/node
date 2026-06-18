@@ -65,11 +65,7 @@ export function WaitlistForm({ className }: { className?: string }) {
 
   return (
     <div className={cn("w-full", className)}>
-      <form
-        onSubmit={handleSubmit}
-        className="flex w-full flex-col gap-2 sm:flex-row"
-        noValidate
-      >
+      <form onSubmit={handleSubmit} className="flex w-full flex-col gap-2 sm:flex-row" noValidate>
         <label htmlFor={emailId} className="sr-only">
           Email address
         </label>
@@ -123,11 +119,7 @@ export function WaitlistForm({ className }: { className?: string }) {
         </Button>
       </form>
       {fieldError && (
-        <p
-          id={`${emailId}-error`}
-          role="alert"
-          className="mt-1.5 text-left text-xs text-negative"
-        >
+        <p id={`${emailId}-error`} role="alert" className="mt-1.5 text-left text-xs text-negative">
           {fieldError}
         </p>
       )}

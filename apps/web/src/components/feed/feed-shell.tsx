@@ -86,9 +86,7 @@ export function FeedShell({
             <h2 className="text-2xl font-semibold tracking-tight">{title}</h2>
 
             {/* Subtitle */}
-            {subtitle && (
-              <p className="text-[13px] text-foreground-muted">{subtitle}</p>
-            )}
+            {subtitle && <p className="text-[13px] text-foreground-muted">{subtitle}</p>}
           </div>
 
           {/* Right controls: optional slot + refresh */}

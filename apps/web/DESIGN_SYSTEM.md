@@ -41,35 +41,35 @@ expecting an established accent system.
 
 ### Core / semantic
 
-| Token | Utility | Light | Dark |
-|---|---|---|---|
-| `--background` | `bg-background` | `oklch(1 0 0)` | `oklch(0.09 0 0)` |
-| `--foreground` | `text-foreground` | `oklch(0.16 0.004 260)` | `oklch(0.96 0 0)` |
-| `--foreground-muted` | `text-foreground-muted` | `oklch(0.5 0.01 260)` | `oklch(0.72 0 0)` |
-| `--primary` | `fill-primary` (radio dot only) | `var(--accent-teal)` | `var(--accent-teal)` |
-| `--primary-foreground` | `*-primary-foreground` | `oklch(0.99 0 0)` | `oklch(0.09 0 0)` |
-| `--secondary` | `bg-secondary` | `var(--surface-2)` | `var(--surface-2)` |
-| `--secondary-foreground` | — | `var(--foreground)` | `var(--foreground)` |
-| `--muted` | `bg-muted` | `var(--surface-2)` | `var(--surface-2)` |
-| `--muted-foreground` | `text-muted-foreground` | `var(--foreground-muted)` | `var(--foreground-muted)` |
-| `--accent` | `bg-accent` | `var(--surface-2)` | `var(--surface-2)` |
-| `--accent-foreground` | — | `var(--foreground)` | `var(--foreground)` |
-| `--card` | `bg-card` | `var(--surface)` | `var(--surface)` |
-| `--popover` | `bg-popover` | `var(--surface-elevated)` | `var(--surface-elevated)` |
-| `--destructive` | `bg-destructive` | `var(--negative)` | `var(--negative)` |
-| `--destructive-foreground` | — | `oklch(0.98 0 0)` | `oklch(0.98 0 0)` |
-| `--border` | `border-border` | `var(--hairline)` | `var(--hairline)` |
-| `--input` | `border-input` | `var(--hairline)` | `var(--hairline)` |
-| `--ring` | `ring-ring` | `oklch(0.36 0 0 / 40%)` | `oklch(1 0 0 / 32%)` |
+| Token                      | Utility                         | Light                     | Dark                      |
+| -------------------------- | ------------------------------- | ------------------------- | ------------------------- |
+| `--background`             | `bg-background`                 | `oklch(1 0 0)`            | `oklch(0.09 0 0)`         |
+| `--foreground`             | `text-foreground`               | `oklch(0.16 0.004 260)`   | `oklch(0.96 0 0)`         |
+| `--foreground-muted`       | `text-foreground-muted`         | `oklch(0.5 0.01 260)`     | `oklch(0.72 0 0)`         |
+| `--primary`                | `fill-primary` (radio dot only) | `var(--accent-teal)`      | `var(--accent-teal)`      |
+| `--primary-foreground`     | `*-primary-foreground`          | `oklch(0.99 0 0)`         | `oklch(0.09 0 0)`         |
+| `--secondary`              | `bg-secondary`                  | `var(--surface-2)`        | `var(--surface-2)`        |
+| `--secondary-foreground`   | —                               | `var(--foreground)`       | `var(--foreground)`       |
+| `--muted`                  | `bg-muted`                      | `var(--surface-2)`        | `var(--surface-2)`        |
+| `--muted-foreground`       | `text-muted-foreground`         | `var(--foreground-muted)` | `var(--foreground-muted)` |
+| `--accent`                 | `bg-accent`                     | `var(--surface-2)`        | `var(--surface-2)`        |
+| `--accent-foreground`      | —                               | `var(--foreground)`       | `var(--foreground)`       |
+| `--card`                   | `bg-card`                       | `var(--surface)`          | `var(--surface)`          |
+| `--popover`                | `bg-popover`                    | `var(--surface-elevated)` | `var(--surface-elevated)` |
+| `--destructive`            | `bg-destructive`                | `var(--negative)`         | `var(--negative)`         |
+| `--destructive-foreground` | —                               | `oklch(0.98 0 0)`         | `oklch(0.98 0 0)`         |
+| `--border`                 | `border-border`                 | `var(--hairline)`         | `var(--hairline)`         |
+| `--input`                  | `border-input`                  | `var(--hairline)`         | `var(--hairline)`         |
+| `--ring`                   | `ring-ring`                     | `oklch(0.36 0 0 / 40%)`   | `oklch(1 0 0 / 32%)`      |
 
 ### Surfaces
 
-| Token | Utility | Light | Dark |
-|---|---|---|---|
-| `--surface` | `bg-surface` | `oklch(0.985 0.002 260)` | `oklch(0.13 0 0)` |
-| `--surface-2` | `bg-surface-2` | `oklch(0.96 0.003 260)` | `oklch(0.18 0 0)` |
-| `--surface-elevated` | `bg-surface-elevated` | `oklch(1 0 0)` | `oklch(0.22 0 0)` |
-| `--hairline` | `border-hairline` | `oklch(0.88 0.006 260)` | `oklch(1 0 0 / 10%)` |
+| Token                | Utility               | Light                    | Dark                 |
+| -------------------- | --------------------- | ------------------------ | -------------------- |
+| `--surface`          | `bg-surface`          | `oklch(0.985 0.002 260)` | `oklch(0.13 0 0)`    |
+| `--surface-2`        | `bg-surface-2`        | `oklch(0.96 0.003 260)`  | `oklch(0.18 0 0)`    |
+| `--surface-elevated` | `bg-surface-elevated` | `oklch(1 0 0)`           | `oklch(0.22 0 0)`    |
+| `--hairline`         | `border-hairline`     | `oklch(0.88 0.006 260)`  | `oklch(1 0 0 / 10%)` |
 
 ### Signal
 
@@ -80,43 +80,43 @@ consumed only as raw `var()`: `var(--accent-teal)` in the portfolio chart
 (`lightswind/fall-beam-background.tsx:61`). They also back `--primary` and
 `--sidebar-ring`. See "Color philosophy" above.
 
-| Token | Utility | Light | Dark |
-|---|---|---|---|
-| `--accent-teal` | — (raw `var()` only) | `oklch(0.66 0.13 180)` | `oklch(0.78 0.14 180)` |
+| Token                | Utility              | Light                        | Dark                         |
+| -------------------- | -------------------- | ---------------------------- | ---------------------------- |
+| `--accent-teal`      | — (raw `var()` only) | `oklch(0.66 0.13 180)`       | `oklch(0.78 0.14 180)`       |
 | `--accent-teal-soft` | — (raw `var()` only) | `oklch(0.66 0.13 180 / 12%)` | `oklch(0.78 0.14 180 / 18%)` |
-| `--positive` | `text-positive` | `oklch(0.58 0.14 155)` | `oklch(0.78 0.15 155)` |
-| `--negative` | `text-negative` | `oklch(0.58 0.2 25)` | `oklch(0.7 0.2 25)` |
-| `--chart-accent` | — | `#0a0a0a` | `#ffffff` |
+| `--positive`         | `text-positive`      | `oklch(0.58 0.14 155)`       | `oklch(0.78 0.15 155)`       |
+| `--negative`         | `text-negative`      | `oklch(0.58 0.2 25)`         | `oklch(0.7 0.2 25)`          |
+| `--chart-accent`     | —                    | `#0a0a0a`                    | `#ffffff`                    |
 
 ### Chart series (`--chart-1..5`)
 
-| Token | Light | Dark |
-|---|---|---|
+| Token       | Light                  | Dark                   |
+| ----------- | ---------------------- | ---------------------- |
 | `--chart-1` | `oklch(0.66 0.13 180)` | `oklch(0.78 0.14 180)` |
-| `--chart-2` | `oklch(0.6 0.14 225)` | `oklch(0.72 0.15 225)` |
-| `--chart-3` | `oklch(0.66 0.15 75)` | `oklch(0.78 0.15 75)` |
+| `--chart-2` | `oklch(0.6 0.14 225)`  | `oklch(0.72 0.15 225)` |
+| `--chart-3` | `oklch(0.66 0.15 75)`  | `oklch(0.78 0.15 75)`  |
 | `--chart-4` | `oklch(0.62 0.16 310)` | `oklch(0.74 0.17 310)` |
-| `--chart-5` | `oklch(0.62 0.17 35)` | `oklch(0.72 0.18 35)` |
+| `--chart-5` | `oklch(0.62 0.17 35)`  | `oklch(0.72 0.18 35)`  |
 
 ### Benchmark series
 
 Portfolio comparison lines (`portfolio-chart.tsx`). Hex categorical palette,
 brightened in dark mode for legibility on dark backgrounds.
 
-| Token | Utility | Light | Dark |
-|---|---|---|---|
-| `--benchmark-amber` | `text-benchmark-amber` | `#f5a524` | `#f7b94e` |
+| Token                | Utility                 | Light     | Dark      |
+| -------------------- | ----------------------- | --------- | --------- |
+| `--benchmark-amber`  | `text-benchmark-amber`  | `#f5a524` | `#f7b94e` |
 | `--benchmark-violet` | `text-benchmark-violet` | `#b978f2` | `#cb98f6` |
-| `--benchmark-rose` | `text-benchmark-rose` | `#f75f85` | `#fa83a0` |
-| `--benchmark-sky` | `text-benchmark-sky` | `#14b8e6` | `#3cc6ef` |
+| `--benchmark-rose`   | `text-benchmark-rose`   | `#f75f85` | `#fa83a0` |
+| `--benchmark-sky`    | `text-benchmark-sky`    | `#14b8e6` | `#3cc6ef` |
 
 ### Allocation palette (`--alloc-1..6`)
 
 Treemaps and chips. Each step has a paired `-text` color for contrast. The ramp
 inverts between light and dark.
 
-| Token | Light bg / text | Dark bg / text |
-|---|---|---|
+| Token       | Light bg / text       | Dark bg / text        |
+| ----------- | --------------------- | --------------------- |
 | `--alloc-1` | `#050505` / `#ffffff` | `#f5f5f5` / `#000000` |
 | `--alloc-2` | `#2f2f2f` / `#ffffff` | `#b8b8b8` / `#000000` |
 | `--alloc-3` | `#676767` / `#ffffff` | `#7a7a7a` / `#000000` |
@@ -148,18 +148,18 @@ Fonts are loaded via `next/font/google` in `app/layout.tsx` and exposed as
 `--font-sans` / `--font-mono` (utilities `font-sans`, `font-mono`). `font-sans` is
 the body default (`@layer base`), with antialiased smoothing.
 
-| Family | Variable | Stack | Weights loaded |
-|---|---|---|---|
-| **DM Sans** (body/UI) | `--font-dm-sans` | `var(--font-dm-sans), -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif` | 400, 500, 600 |
-| **DM Mono** (numerals/code) | `--font-dm-mono` | `var(--font-dm-mono), ui-monospace, monospace` | 400, 500 |
+| Family                      | Variable         | Stack                                                                            | Weights loaded |
+| --------------------------- | ---------------- | -------------------------------------------------------------------------------- | -------------- |
+| **DM Sans** (body/UI)       | `--font-dm-sans` | `var(--font-dm-sans), -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif` | 400, 500, 600  |
+| **DM Mono** (numerals/code) | `--font-dm-mono` | `var(--font-dm-mono), ui-monospace, monospace`                                   | 400, 500       |
 
 ### Weights — only three exist
 
-| Tailwind class | Weight | Use |
-|---|---|---|
-| `font-normal` | 400 | Body text |
-| `font-medium` | 500 | Default for buttons, labels, most UI text |
-| `font-semibold` | 600 | Headings, badges, emphasis |
+| Tailwind class  | Weight | Use                                       |
+| --------------- | ------ | ----------------------------------------- |
+| `font-normal`   | 400    | Body text                                 |
+| `font-medium`   | 500    | Default for buttons, labels, most UI text |
+| `font-semibold` | 600    | Headings, badges, emphasis                |
 
 **Do not use `font-bold`, `font-light`, or any weight outside 400/500/600** — those
 weights are not loaded and will render as a faux/synthetic weight. If you need a new
@@ -175,13 +175,13 @@ underlined; `strong` 600. Defined in `src/styles.css`.
 
 Base `--radius: 0.75rem`. Scale (utilities `rounded-sm` … `rounded-4xl`):
 
-| Token | Value |
-|---|---|
-| `--radius-sm` | `calc(var(--radius) - 4px)` |
-| `--radius-md` | `calc(var(--radius) - 2px)` |
-| `--radius-lg` | `var(--radius)` (0.75rem) |
-| `--radius-xl` | `calc(var(--radius) + 4px)` |
-| `--radius-2xl` | `calc(var(--radius) + 8px)` |
+| Token          | Value                        |
+| -------------- | ---------------------------- |
+| `--radius-sm`  | `calc(var(--radius) - 4px)`  |
+| `--radius-md`  | `calc(var(--radius) - 2px)`  |
+| `--radius-lg`  | `var(--radius)` (0.75rem)    |
+| `--radius-xl`  | `calc(var(--radius) + 4px)`  |
+| `--radius-2xl` | `calc(var(--radius) + 8px)`  |
 | `--radius-3xl` | `calc(var(--radius) + 12px)` |
 | `--radius-4xl` | `calc(var(--radius) + 16px)` |
 
@@ -215,11 +215,13 @@ slider, sonner, switch, table, tabs, textarea, toggle, toggle-group, tooltip.
 
 **`Button`** (`buttonVariants`) — base includes `text-sm font-medium`, focus ring,
 auto `size-4` SVGs.
+
 - variants: `default` (foreground/background), `destructive`, `outline`, `secondary`,
   `ghost`, `link`
 - sizes: `default` (h-9), `sm` (h-8, text-xs), `lg` (h-10), `icon` (h-9 w-9)
 
 **`Badge`** (`badgeVariants`) — base `text-xs font-semibold`, rounded-md.
+
 - variants: `default`, `secondary`, `destructive`, `outline`
 
 ## Motion & variants

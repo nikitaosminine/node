@@ -17,11 +17,7 @@ import {
 import { NodeLogo } from "@/components/node-logo";
 import { ThemeSwitcher } from "@/components/ThemeSwitcher";
 import { supabase } from "@/integrations/supabase/client";
-import {
-  Collapsible,
-  CollapsibleContent,
-  CollapsibleTrigger,
-} from "@/components/ui/collapsible";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -144,10 +140,7 @@ function SidebarInner({ collapsed }: { collapsed: boolean }) {
 
           return (
             <li key={p.id}>
-              <Collapsible
-                open={isExpanded}
-                onOpenChange={(open) => setOpenId(open ? p.id : null)}
-              >
+              <Collapsible open={isExpanded} onOpenChange={(open) => setOpenId(open ? p.id : null)}>
                 {/* Portfolio trigger row — never carries an "active" background.
                     Active state is conveyed by the highlighted sub-item only. */}
                 <CollapsibleTrigger asChild>

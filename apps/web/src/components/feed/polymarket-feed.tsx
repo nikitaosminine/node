@@ -4,7 +4,11 @@ import { useState, useEffect, useCallback, useMemo, type ReactNode } from "react
 import { TrendingUp, Pin, CalendarDays } from "lucide-react";
 import { formatDistanceToNow, isPast } from "date-fns";
 import { FeedShell } from "@/components/feed/feed-shell";
-import { CategoryPills, POLYMARKET_TABS, type PolymarketTabId } from "@/components/feed/category-pills";
+import {
+  CategoryPills,
+  POLYMARKET_TABS,
+  type PolymarketTabId,
+} from "@/components/feed/category-pills";
 import { ExpandableSearch } from "@/components/feed/expandable-search";
 
 const API_BASE_URL =
@@ -70,8 +74,7 @@ function dedupeByEvent(matches: PolymarketMatch[]): PolymarketMatch[] {
   };
 
   for (const match of matches) {
-    const key =
-      match.polymarket_markets.event_id ?? match.polymarket_markets.condition_id;
+    const key = match.polymarket_markets.event_id ?? match.polymarket_markets.condition_id;
     const existing = seen.get(key);
     if (!existing) {
       seen.set(key, match);
@@ -98,9 +101,7 @@ function endDateLabel(iso: string | null): string | null {
 }
 
 function polymarketHref(m: PolymarketMarket): string {
-  return m.event_slug
-    ? `https://polymarket.com/event/${m.event_slug}`
-    : "https://polymarket.com";
+  return m.event_slug ? `https://polymarket.com/event/${m.event_slug}` : "https://polymarket.com";
 }
 
 /** Compact volume label, e.g. "$2.4M" / "$840k" / "$120" */
@@ -207,9 +208,7 @@ function MarketRow({
         <div className="flex min-w-0 flex-1 flex-col gap-1.5">
           {/* Question + pinned badge */}
           <div className="flex items-start gap-1.5">
-            {isPinned && (
-              <Pin className="mt-0.5 h-3 w-3 shrink-0 text-foreground-muted/60" />
-            )}
+            {isPinned && <Pin className="mt-0.5 h-3 w-3 shrink-0 text-foreground-muted/60" />}
             <h3 className="line-clamp-2 text-[15px] font-medium leading-snug text-foreground">
               {market.question}
             </h3>
@@ -220,9 +219,7 @@ function MarketRow({
 
           {/* Footer: reason + volume + end date */}
           <div className="flex min-w-0 items-center justify-between gap-2 text-[11px] text-foreground-muted/70">
-            {reason && !isPinned && (
-              <span className="min-w-0 line-clamp-2 italic">{reason}</span>
-            )}
+            {reason && !isPinned && <span className="min-w-0 line-clamp-2 italic">{reason}</span>}
             <div className="ml-auto flex shrink-0 items-center gap-2.5">
               {volLabel && <span className="tabular-nums">{volLabel} vol</span>}
               {endLabel && (
@@ -330,16 +327,16 @@ export function PolymarketFeed({ portfolioId }: PolymarketFeedProps) {
       setCategoryMarkets(data);
       setLastUpdated(new Date());
     } catch (err) {
-      setCategoryError(
-        err instanceof Error ? err.message : "Couldn't load markets, retrying…",
-      );
+      setCategoryError(err instanceof Error ? err.message : "Couldn't load markets, retrying…");
     } finally {
       setCategoryLoading(false);
     }
   }, []);
 
   // Initial load + polling
-  useEffect(() => { fetchPersonalized(true); }, [fetchPersonalized]);
+  useEffect(() => {
+    fetchPersonalized(true);
+  }, [fetchPersonalized]);
 
   useEffect(() => {
     const id = setInterval(() => {
@@ -379,8 +376,7 @@ export function PolymarketFeed({ portfolioId }: PolymarketFeedProps) {
   // ---------------------------------------------------------------------------
 
   const isPersonalized = activeTab === "personalized";
-  const personalizedCount =
-    personalizedData.pinned.length + personalizedData.rotating.length;
+  const personalizedCount = personalizedData.pinned.length + personalizedData.rotating.length;
   const count = isPersonalized ? personalizedCount : categoryMarkets.length;
   const hasData = count > 0;
   const isLoading = isPersonalized ? personalizedLoading : categoryLoading;
@@ -413,11 +409,7 @@ export function PolymarketFeed({ portfolioId }: PolymarketFeedProps) {
             ariaLabel="Market category"
           />
         </div>
-        <ExpandableSearch
-          value={search}
-          onChange={setSearch}
-          placeholder="Search markets…"
-        />
+        <ExpandableSearch value={search} onChange={setSearch} placeholder="Search markets…" />
       </div>
     </div>
   );
@@ -429,11 +421,7 @@ export function PolymarketFeed({ portfolioId }: PolymarketFeedProps) {
   // Body content (only rendered when not showing skeletons)
   let body: ReactNode;
   if (currentError && !hasData) {
-    body = (
-      <li className="px-4 py-8 text-center text-sm text-foreground-muted">
-        {currentError}
-      </li>
-    );
+    body = <li className="px-4 py-8 text-center text-sm text-foreground-muted">{currentError}</li>;
   } else if (!hasData) {
     body = (
       <li className="flex flex-col items-center gap-3 px-4 py-10 text-center">
@@ -482,20 +470,16 @@ export function PolymarketFeed({ portfolioId }: PolymarketFeedProps) {
     );
   } else {
     const filtered = categoryMarkets.filter((m) => filterMarket(m.question));
-    body = filtered.length > 0 ? (
-      filtered.map((market) => (
-        <MarketRow
-          key={market.condition_id}
-          market={market}
-          isPinned={false}
-          reason={null}
-        />
-      ))
-    ) : (
-      <li className="px-4 py-8 text-center text-sm text-foreground-muted">
-        No markets match your search.
-      </li>
-    );
+    body =
+      filtered.length > 0 ? (
+        filtered.map((market) => (
+          <MarketRow key={market.condition_id} market={market} isPinned={false} reason={null} />
+        ))
+      ) : (
+        <li className="px-4 py-8 text-center text-sm text-foreground-muted">
+          No markets match your search.
+        </li>
+      );
   }
 
   return (

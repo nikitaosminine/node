@@ -23,10 +23,7 @@ import {
   upsertCachedFxRates,
   upsertCachedQuotes,
 } from "@/lib/market-cache";
-import {
-  type TransactionApiRow,
-  computeRealizedSellPnL,
-} from "@/lib/portfolio-math";
+import { type TransactionApiRow, computeRealizedSellPnL } from "@/lib/portfolio-math";
 
 // Lazy-load the chart: it pulls in recharts + framer-motion, which we keep out
 // of the initial /overview bundle. The parent card reserves a fixed 480px, so
@@ -43,13 +40,10 @@ const PortfolioChart = dynamic(
 // them so they don't compete for the main thread during initial hydration,
 // which lets the primary content (chart + KPIs) paint sooner (better LCP/SI).
 // Placeholders reserve the same h-64 box the loaded feeds occupy → no CLS.
-const NewsFeed = dynamic(
-  () => import("@/components/feed/news-feed").then((m) => m.NewsFeed),
-  {
-    ssr: false,
-    loading: () => <div className="h-64 animate-pulse rounded-xl bg-surface-2" />,
-  },
-);
+const NewsFeed = dynamic(() => import("@/components/feed/news-feed").then((m) => m.NewsFeed), {
+  ssr: false,
+  loading: () => <div className="h-64 animate-pulse rounded-xl bg-surface-2" />,
+});
 const PolymarketFeed = dynamic(
   () => import("@/components/feed/polymarket-feed").then((m) => m.PolymarketFeed),
   {
@@ -168,12 +162,10 @@ function OverviewContent({ portfolioId }: { portfolioId: string }) {
   const [ytdStartSnapshot, setYtdStartSnapshot] = useState<number | null>(null);
 
   // useMemo must be unconditional — before any early returns
-  const realizedMetrics = useMemo(
-    () => computeRealizedSellPnL(transactionRows),
-    [transactionRows],
-  );
+  const realizedMetrics = useMemo(() => computeRealizedSellPnL(transactionRows), [transactionRows]);
 
-  const portfolioCurrency = normalizeCurrencyCode(portfolio?.currency) ?? DEFAULT_PORTFOLIO_CURRENCY;
+  const portfolioCurrency =
+    normalizeCurrencyCode(portfolio?.currency) ?? DEFAULT_PORTFOLIO_CURRENCY;
 
   const fetchSnapshots = useCallback(async () => {
     const today = new Date().toISOString().slice(0, 10);
@@ -223,7 +215,7 @@ function OverviewContent({ portfolioId }: { portfolioId: string }) {
         token ? { headers: { Authorization: `Bearer ${token}` } } : {},
       );
       if (txRes.ok) {
-        const txBody = await txRes.json() as { transactions?: TransactionApiRow[] };
+        const txBody = (await txRes.json()) as { transactions?: TransactionApiRow[] };
         setTransactionRows(txBody.transactions ?? []);
       }
     } catch {
@@ -345,14 +337,14 @@ function OverviewContent({ portfolioId }: { portfolioId: string }) {
   const hasRealizedPnL = realizedMetrics.realizedCostBasis > 0;
 
   const oneDayDelta = prevDaySnapshot !== null ? totalValue - prevDaySnapshot : null;
-  const oneDayPct = prevDaySnapshot !== null && prevDaySnapshot > 0
-    ? ((totalValue - prevDaySnapshot) / prevDaySnapshot) * 100
-    : null;
+  const oneDayPct =
+    prevDaySnapshot !== null && prevDaySnapshot > 0
+      ? ((totalValue - prevDaySnapshot) / prevDaySnapshot) * 100
+      : null;
 
   const ytdDelta = ytdStartSnapshot !== null ? totalValue - ytdStartSnapshot : null;
-  const ytdPct = ytdStartSnapshot !== null && ytdStartSnapshot > 0
-    ? (ytdDelta! / ytdStartSnapshot) * 100
-    : null;
+  const ytdPct =
+    ytdStartSnapshot !== null && ytdStartSnapshot > 0 ? (ytdDelta! / ytdStartSnapshot) * 100 : null;
 
   const KPIS = [
     {
@@ -362,25 +354,41 @@ function OverviewContent({ portfolioId }: { portfolioId: string }) {
     {
       label: "1 Day",
       value: oneDayDelta !== null ? formatSignedCurrency(oneDayDelta, portfolioCurrency) : "—",
-      detail: oneDayPct !== null ? `${oneDayPct >= 0 ? "+" : ""}${oneDayPct.toFixed(2)}%` : undefined,
-      tone: oneDayDelta !== null
-        ? oneDayDelta > 0 ? ("positive" as const) : oneDayDelta < 0 ? ("negative" as const) : undefined
-        : undefined,
+      detail:
+        oneDayPct !== null ? `${oneDayPct >= 0 ? "+" : ""}${oneDayPct.toFixed(2)}%` : undefined,
+      tone:
+        oneDayDelta !== null
+          ? oneDayDelta > 0
+            ? ("positive" as const)
+            : oneDayDelta < 0
+              ? ("negative" as const)
+              : undefined
+          : undefined,
     },
     {
       label: "YTD",
       value: ytdDelta !== null ? formatSignedCurrency(ytdDelta, portfolioCurrency) : "—",
       detail: ytdPct !== null ? `${ytdPct >= 0 ? "+" : ""}${ytdPct.toFixed(2)}%` : undefined,
-      tone: ytdDelta !== null
-        ? ytdDelta > 0 ? ("positive" as const) : ytdDelta < 0 ? ("negative" as const) : undefined
-        : undefined,
+      tone:
+        ytdDelta !== null
+          ? ytdDelta > 0
+            ? ("positive" as const)
+            : ytdDelta < 0
+              ? ("negative" as const)
+              : undefined
+          : undefined,
     },
     {
       label: "Unrealized P/L",
       value: formatSignedCurrency(unrealizedPL, portfolioCurrency),
       detail: `${unrealizedPct >= 0 ? "+" : ""}${unrealizedPct.toFixed(2)}%`,
       badge: "open" as const,
-      tone: unrealizedPL > 0 ? ("positive" as const) : unrealizedPL < 0 ? ("negative" as const) : undefined,
+      tone:
+        unrealizedPL > 0
+          ? ("positive" as const)
+          : unrealizedPL < 0
+            ? ("negative" as const)
+            : undefined,
     },
     {
       label: "Realized P/L",

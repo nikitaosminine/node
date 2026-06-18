@@ -504,9 +504,7 @@ function GeographyAllocation({
                         >
                           <div className="mb-1.5 flex items-center justify-between gap-3 text-xs">
                             <span className="flex min-w-0 items-center gap-2">
-                              <ChevronRight
-                                className="h-3.5 w-3.5 shrink-0 text-foreground-muted transition-colors group-hover:text-foreground"
-                              />
+                              <ChevronRight className="h-3.5 w-3.5 shrink-0 text-foreground-muted transition-colors group-hover:text-foreground" />
                               <span className="truncate text-foreground">Other</span>
                               <span className="shrink-0 text-[10px] tabular-nums text-foreground-muted">
                                 {minorCountries.length}
@@ -585,7 +583,14 @@ function GeographyAllocation({
   );
 }
 
-export function AllocationCard({ portfolioId, sectorData, assetTypeData, currency, initialView, hideViewToggle }: Props) {
+export function AllocationCard({
+  portfolioId,
+  sectorData,
+  assetTypeData,
+  currency,
+  initialView,
+  hideViewToggle,
+}: Props) {
   const displayCurrency = normalizeCurrencyCode(currency);
   const [view, setView] = useState<View>(initialView ?? "classic");
   const [geography, setGeography] = useState<GeographyResponse | null>(null);
@@ -718,50 +723,52 @@ export function AllocationCard({ portfolioId, sectorData, assetTypeData, currenc
             </Tooltip>
           </TooltipProvider>
         )}
-        {!hideViewToggle && <div className="ml-auto flex shrink-0 items-center">
-          <div className="flex h-9 gap-1 rounded-full border border-hairline bg-surface-2 p-1">
-            <button
-              type="button"
-              onClick={() => setView("classic")}
-              aria-label="Allocation by sector and asset type"
-              title="Allocation by sector and asset type"
-              className={`relative grid h-full w-10 place-items-center rounded-full transition-colors ${
-                view === "classic"
-                  ? "text-background"
-                  : "text-foreground-muted hover:text-foreground"
-              } isolate`}
-            >
-              {view === "classic" && (
-                <motion.span
-                  layoutId="allocation-view-pill"
-                  className="pointer-events-none absolute inset-0 z-0 rounded-full bg-foreground"
-                  transition={pillTransition}
-                />
-              )}
-              <PieChart className="relative z-10 h-4 w-4" />
-            </button>
-            <button
-              type="button"
-              onClick={() => setView("geography")}
-              aria-label="Geographical allocation"
-              title="Geographical allocation"
-              className={`relative grid h-full w-10 place-items-center rounded-full transition-colors ${
-                view === "geography"
-                  ? "text-background"
-                  : "text-foreground-muted hover:text-foreground"
-              } isolate`}
-            >
-              {view === "geography" && (
-                <motion.span
-                  layoutId="allocation-view-pill"
-                  className="pointer-events-none absolute inset-0 z-0 rounded-full bg-foreground"
-                  transition={pillTransition}
-                />
-              )}
-              <Globe2 className="relative z-10 h-4 w-4" />
-            </button>
+        {!hideViewToggle && (
+          <div className="ml-auto flex shrink-0 items-center">
+            <div className="flex h-9 gap-1 rounded-full border border-hairline bg-surface-2 p-1">
+              <button
+                type="button"
+                onClick={() => setView("classic")}
+                aria-label="Allocation by sector and asset type"
+                title="Allocation by sector and asset type"
+                className={`relative grid h-full w-10 place-items-center rounded-full transition-colors ${
+                  view === "classic"
+                    ? "text-background"
+                    : "text-foreground-muted hover:text-foreground"
+                } isolate`}
+              >
+                {view === "classic" && (
+                  <motion.span
+                    layoutId="allocation-view-pill"
+                    className="pointer-events-none absolute inset-0 z-0 rounded-full bg-foreground"
+                    transition={pillTransition}
+                  />
+                )}
+                <PieChart className="relative z-10 h-4 w-4" />
+              </button>
+              <button
+                type="button"
+                onClick={() => setView("geography")}
+                aria-label="Geographical allocation"
+                title="Geographical allocation"
+                className={`relative grid h-full w-10 place-items-center rounded-full transition-colors ${
+                  view === "geography"
+                    ? "text-background"
+                    : "text-foreground-muted hover:text-foreground"
+                } isolate`}
+              >
+                {view === "geography" && (
+                  <motion.span
+                    layoutId="allocation-view-pill"
+                    className="pointer-events-none absolute inset-0 z-0 rounded-full bg-foreground"
+                    transition={pillTransition}
+                  />
+                )}
+                <Globe2 className="relative z-10 h-4 w-4" />
+              </button>
+            </div>
           </div>
-        </div>}
+        )}
       </div>
 
       {view === "classic" ? (

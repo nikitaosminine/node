@@ -60,7 +60,9 @@ export function NewsFeed({ portfolioId, limit = 50 }: NewsFeedProps) {
     [portfolioId, limit],
   );
 
-  useEffect(() => { fetchNews(true); }, [fetchNews]);
+  useEffect(() => {
+    fetchNews(true);
+  }, [fetchNews]);
   useEffect(() => {
     const id = setInterval(() => fetchNews(false), POLL_INTERVAL_MS);
     return () => clearInterval(id);
@@ -77,7 +79,9 @@ export function NewsFeed({ portfolioId, limit = 50 }: NewsFeedProps) {
     for (const m of matches) {
       const tickers = m.match_reason.matched_tickers ?? [];
       const names = m.match_reason.matched_company_names ?? [];
-      tickers.forEach((t, i) => { if (names[i]) map.set(t, names[i]); });
+      tickers.forEach((t, i) => {
+        if (names[i]) map.set(t, names[i]);
+      });
     }
     return map;
   }, [matches]);
@@ -126,35 +130,41 @@ export function NewsFeed({ portfolioId, limit = 50 }: NewsFeedProps) {
       : undefined;
 
   // rightSlot: search + sort alongside the refresh button
-  const rightSlot = matches.length > 0 ? (
-    <>
-      <ExpandableSearch value={search} onChange={setSearch} placeholder="Search…" />
-      <button
-        type="button"
-        onClick={() => setDateSort((s) => (s === "newest" ? "oldest" : "newest"))}
-        title={dateSort === "newest" ? "Showing newest first" : "Showing oldest first"}
-        className="grid h-7 w-7 shrink-0 place-items-center rounded-md text-foreground-muted hover:bg-surface-2 hover:text-foreground"
-      >
-        <ArrowUpDown className="h-3.5 w-3.5" />
-      </button>
-    </>
-  ) : undefined;
+  const rightSlot =
+    matches.length > 0 ? (
+      <>
+        <ExpandableSearch value={search} onChange={setSearch} placeholder="Search…" />
+        <button
+          type="button"
+          onClick={() => setDateSort((s) => (s === "newest" ? "oldest" : "newest"))}
+          title={dateSort === "newest" ? "Showing newest first" : "Showing oldest first"}
+          className="grid h-7 w-7 shrink-0 place-items-center rounded-md text-foreground-muted hover:bg-surface-2 hover:text-foreground"
+        >
+          <ArrowUpDown className="h-3.5 w-3.5" />
+        </button>
+      </>
+    ) : undefined;
 
   // headerSlot: company filter pills only
-  const headerSlot = matches.length > 0 ? (
-    <div className="min-w-0 overflow-hidden">
-      <CategoryPills
-        tabs={companyTabs}
-        activeTab={activeFilter}
-        onChange={setActiveFilter}
-        layoutId="news-filter-pill"
-        ariaLabel="Filter by company"
-      />
-    </div>
-  ) : undefined;
+  const headerSlot =
+    matches.length > 0 ? (
+      <div className="min-w-0 overflow-hidden">
+        <CategoryPills
+          tabs={companyTabs}
+          activeTab={activeFilter}
+          onChange={setActiveFilter}
+          layoutId="news-filter-pill"
+          ariaLabel="Filter by company"
+        />
+      </div>
+    ) : undefined;
 
   if (loading) {
-    return <FeedShell title="Headlines" liveColor="red" loading>{null}</FeedShell>;
+    return (
+      <FeedShell title="Headlines" liveColor="red" loading>
+        {null}
+      </FeedShell>
+    );
   }
 
   if (error) {
