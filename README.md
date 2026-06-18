@@ -5,7 +5,7 @@
 <p align="center"><b>An AI-native personal finance app that I'm building solo for now.</b></p>
 
 <p align="center">
-Node starts as a portfolio tracker that explains what's moving your money — and is being built toward a personal finance hub that remembers you. The bet: future users of personal finance tools would expect personalisation in form of persistent memory and voice interactions.
+Node starts as a portfolio tracker that explains what's moving your money — and is being built toward a personal finance hub that remembers you. The bet: future users of personal finance tools would expect personalization in form of persistent memory and voice interactions.
 </p>
 
 ---
@@ -15,15 +15,15 @@ Node starts as a portfolio tracker that explains what's moving your money — an
 Two things are broken about how retail investors manage money today.
 
 - **Incumbents have poor UX.** Bank apps don't treat their interfaces as products. The richer alternatives swing the other way — bloated, doing everything, still missing the simple things an individual investor actually wants. In France especially, there's a gap between a clean experience and genuine utility.
-- **Every tool is fragmented and stateless.** Your portfolio is in one app, your thesis in your head, your goals nowhere. Nothing connects them, and nothing *remembers* you. Each session starts from zero.
+- **Every tool is fragmented and stateless.** Your portfolio is in one app, your thesis in your head, your goals nowhere. Nothing connects them, and nothing *remembers* you.
 
 Node closes both gaps: bridge great UX with AI-driven utility, and build a system that gets smarter the longer you use it.
 
 ## What makes Node different
 
 - **UX and AI utility, together** — neither traded off for the other. That trade-off is the whole reason incumbents fall short.
-- **Numbers are computed, never hallucinated** — every figure, percentage, and chart is calculated in code. The model writes the narrative and reasons about meaning; it never invents the numbers. This is already how recaps work.
-- **Memory as the moat** *(the core architectural bet, in progress)* — Node is being built to accumulate longitudinal, user-specific context, so it surfaces the *delta* ("this changed") instead of repeating what you already know. The slick UI and agents are commodities; the accumulated personal memory is what becomes hard to leave.
+- **Personal context, real-world intelligence** — the AI is grounded in users' data and enhanced with real-world events to provide the most accurate and freshest context.
+- **Persistent memory, the app evolves with you** — Node is being built with ambition to become another room in your home, the more you use it the more you'd want to come back to it.
 
 ## Current features (live)
 
@@ -34,22 +34,19 @@ Node closes both gaps: bridge great UX with AI-driven utility, and build a syste
 - **Allocation breakdown** — sector, asset type, geography
 - **Live prices**
 - **Notes** attached to individual holdings
-- Clean, high-density UI
-- *The Take* — a thesis-tracking agent (early/experimental)
+- *The Take* — a thesis-tracking agent (first draft/experiment)
 
 ## Roadmap
 
 **Next**
-- Persistent memory across the app — the "knows you" layer
-- Natural-language / voice queries — ask Node anything about your money
-- Portfolio notifications and insights (e.g. allocation-drift alerts)
-- Rules & strategies (weight targets, rebalancing)
-- Behavioral guardrails — rewarding discipline, not engagement
+- Expense management, budgets, and goals
+- Insights (actionable steps)
+- Rules & strategies for then investment portfolio (weight targets, rebalancing)
+- Inverted gamification — rewarding discipline, not engagement
 
 **The bigger vision**
-- Expense management, budgets, and goals — beyond the portfolio
-- A voice agent that converses across every domain
-- An orchestration layer coordinating multiple specialised domain agents into a single financial companion
+- Personalization layer and persistent memory across the app
+- A voice agent - Natural-language / voice queries
 
 ## Why now
 
