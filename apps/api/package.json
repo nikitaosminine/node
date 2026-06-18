@@ -6,7 +6,8 @@
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "cf-typegen": "wrangler types",
-    "eval:agent": "node ./scripts/eval-agent-runs.mjs"
+    "eval:agent": "node ./scripts/eval-agent-runs.mjs",
+    "check:fetch-auth": "bash ./scripts/check-fetch-auth.sh"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",

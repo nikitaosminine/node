@@ -1,4 +1,10 @@
-import { createClient } from "@supabase/supabase-js";
+import { type SupabaseClient } from "@supabase/supabase-js";
+import {
+  adminDb,
+  assertPortfolioAccess,
+  requireAuth,
+  requirePortfolioAccess,
+} from "./auth";
 import {
   buildEtfGeographyResearchPrompt,
   assetTypeWithCachedGeography,
@@ -68,10 +74,6 @@ const CORS_HEADERS = {
 
 function json(body: unknown, status = 200): Response {
   return Response.json(body, { status, headers: CORS_HEADERS });
-}
-
-function db(env: Env) {
-  return createClient(env.SUPABASE_URL, env.SUPABASE_SERVICE_KEY);
 }
 
 // Deterministic UUID from a stable input string (SHA-256 → UUID format).
@@ -297,36 +299,6 @@ function normalizeTransactionRows(rows: NormalisedTransactionRow[]): NormalisedT
       commission: row.commission ?? "0",
     };
   });
-}
-
-async function getAuthenticatedUserId(request: Request, env: Env): Promise<string | null> {
-  const auth = request.headers.get("Authorization") ?? "";
-  const token = auth.match(/^Bearer\s+(.+)$/i)?.[1];
-  if (!token || !env.SUPABASE_ANON_KEY) return null;
-
-  const client = createClient(env.SUPABASE_URL, env.SUPABASE_ANON_KEY, {
-    global: { headers: { Authorization: `Bearer ${token}` } },
-  });
-  const { data, error } = await client.auth.getUser();
-  if (error || !data.user) return null;
-  return data.user.id;
-}
-
-async function assertPortfolioAccess(env: Env, portfolioId: string, userId: string): Promise<Response | null> {
-  const { data, error } = await db(env)
-    .from("portfolios")
-    .select("id")
-    .eq("id", portfolioId)
-    .eq("user_id", userId)
-    .single();
-  if (error || !data) return json({ error: "Portfolio not found" }, 404);
-  return null;
-}
-
-async function requirePortfolioAccess(request: Request, env: Env, portfolioId: string): Promise<Response | null> {
-  const userId = await getAuthenticatedUserId(request, env);
-  if (!userId) return json({ error: "Unauthorized" }, 401);
-  return assertPortfolioAccess(env, portfolioId, userId);
 }
 
 // Gate for operator-only routes (debug + scheduled fanout). Requires the caller to
@@ -987,7 +959,7 @@ async function researchEtfGeography(
       webSearchModel,
     });
     if (constituentsData) {
-      void upsertEtfConstituents(db(env), holding.isin, constituentsData).catch((err: unknown) => {
+      void upsertEtfConstituents(adminDb(env), holding.isin, constituentsData).catch((err: unknown) => {
         console.error(`[etf-constituents] side-effect upsert failed for ${holding.isin}:`, err);
       });
     }
@@ -1098,7 +1070,7 @@ function resolveFastHoldingGeography(
 }
 
 async function runGeographyMonthlyRefresh(env: Env): Promise<void> {
-  const { data, error } = await db(env).from("portfolios").select("id");
+  const { data, error } = await adminDb(env).from("portfolios").select("id");
   if (error) throw new Error(`monthly geography refresh portfolio lookup failed: ${error.message}`);
   const portfolioIds = (data ?? []).map((r) => String(r.id));
   await Promise.all(
@@ -1117,7 +1089,7 @@ async function recomputePortfolioGeography(env: Env, portfolioId: string): Promi
   unresolved: number;
   pendingResearch: number;
 }> {
-  const client = db(env);
+  const client = adminDb(env);
   const { data, error } = await client
     .from("holdings")
     .select("id,ticker,name,isin,asset_type,quantity,purchase_price,fees")
@@ -1261,7 +1233,7 @@ async function pendingFundLikeHoldingIds(
   portfolioId: string,
   options: { includeResearched?: boolean } = {},
 ): Promise<string[]> {
-  const client = db(env);
+  const client = adminDb(env);
   const { data, error } = await client
     .from("holdings")
     .select("id,ticker,name,asset_type")
@@ -1303,7 +1275,7 @@ async function enqueuePendingGeographyResearch(
   reason: GeographyQueueMessage["reason"],
   options: { force?: boolean; includeResearched?: boolean } = {},
 ): Promise<{ queued: boolean; pendingResearchCount: number; holdingIds: string[]; sentHoldingIds: string[] }> {
-  const client = db(env);
+  const client = adminDb(env);
   const holdingIds = await pendingFundLikeHoldingIds(env, portfolioId, {
     includeResearched: options.includeResearched,
   });
@@ -1404,7 +1376,7 @@ async function syncAndEnqueueGeography(
 }
 
 async function refreshMissingFundLikeAssetTypes(env: Env, portfolioId: string): Promise<{ updated: number }> {
-  const client = db(env);
+  const client = adminDb(env);
   const { data: holdings, error: holdingsError } = await client
     .from("holdings")
     .select("id,ticker,name,asset_type")
@@ -1485,7 +1457,7 @@ async function repairPortfolioGeography(env: Env, portfolioId: string): Promise<
 }
 
 async function markGeographyJobRunning(
-  client: ReturnType<typeof db>,
+  client: ReturnType<typeof adminDb>,
   input: { portfolioId: string; holdingId: string; reason?: GeographyQueueMessage["reason"] },
 ): Promise<void> {
   const { data: existingJob, error: existingJobError } = await client
@@ -1514,7 +1486,7 @@ async function markGeographyJobRunning(
 }
 
 async function markGeographyJobCompleted(
-  client: ReturnType<typeof db>,
+  client: ReturnType<typeof adminDb>,
   holdingId: string,
   options: { lastError?: string | null } = {},
 ): Promise<void> {
@@ -1540,7 +1512,7 @@ async function markGeographyJobsFailed(
   if (holdingIds.length === 0) return;
   const now = new Date().toISOString();
   const message = error instanceof Error ? error.message : "Geography research failed";
-  const { error: updateError } = await db(env)
+  const { error: updateError } = await adminDb(env)
     .from("geography_research_jobs")
     .update({
       status: "failed",
@@ -1595,7 +1567,7 @@ async function researchPortfolioEtfGeography(
   portfolioId: string,
   options: { holdingIds?: string[]; onlyPending?: boolean; reason?: GeographyQueueMessage["reason"] } = {},
 ): Promise<{ checked: number; resolved: number; unresolved: number }> {
-  const client = db(env);
+  const client = adminDb(env);
   const { data, error } = await client
     .from("holdings")
     .select("id,ticker,name,isin,asset_type,quantity,purchase_price,fees")
@@ -1712,7 +1684,7 @@ async function getPortfolioGeography(
   portfolioId: string,
   options: { useQuotes?: boolean } = {},
 ): Promise<Record<string, unknown>> {
-  const client = db(env);
+  const client = adminDb(env);
   const { data: holdingsData, error: holdingsError } = await client
     .from("holdings")
     .select("id,ticker,name,asset_type,currency,quantity,purchase_price,fees,geography_checked_at")
@@ -2111,7 +2083,7 @@ async function getBenchmarkPrices(
   const from = new Date(`${normalizedFromDate}T00:00:00.000Z`);
   if (Number.isNaN(from.getTime())) throw new Error("from must be a valid date");
 
-  const client = db(env);
+  const client = adminDb(env);
   const today = toDateString(new Date());
   const staleAfter = new Date();
   staleAfter.setUTCDate(staleAfter.getUTCDate() - 1);
@@ -2421,10 +2393,9 @@ async function resolveBenchmarkConcepts(
 }
 
 async function buildBenchmarkSuggestionHoldingsPayload(
-  env: Env,
+  client: SupabaseClient,
   portfolioId: string,
 ): Promise<BenchmarkHoldingPayload[]> {
-  const client = db(env);
   const { data: holdings, error } = await client
     .from("holdings")
     .select("id,ticker,name,isin,asset_type,quantity,purchase_price,country_name")
@@ -2545,7 +2516,7 @@ async function buildBenchmarkPortfolioSummary(
   portfolioId: string,
   holdings: BenchmarkHoldingPayload[],
 ): Promise<{ summaryString: string; holdingsPromptPayload: Array<Record<string, unknown>> }> {
-  const client = db(env);
+  const client = adminDb(env);
   const { data: portfolio, error: portfolioError } = await client
     .from("portfolios")
     .select("cash_value")
@@ -2650,7 +2621,7 @@ async function getPricesByTicker(
   typeByTicker: Map<string, string>;
   currencyByTicker: Map<string, string>;
 }> {
-  const client = db(env);
+  const client = adminDb(env);
   const allPriceRows: Array<{ yahoo_ticker: string; date: string; closing_price: number }> = [];
   const { typeByTicker, currencyByTicker } = await getAssetMetadataFromBatch(tickers).catch((error) => {
     console.error("asset metadata fetch failed", error);
@@ -2727,7 +2698,7 @@ function getCarryForwardPrice(dateMap: Map<string, number> | undefined, dateStr:
 }
 
 async function loadPortfolioTransactions(env: Env, portfolioId: string): Promise<TransactionRow[]> {
-  const { data, error } = await db(env)
+  const { data, error } = await adminDb(env)
     .from("transactions")
     .select("id, portfolio_id, date, symbol, isin, yahoo_ticker, side, quantity, net_amount, commission")
     .eq("portfolio_id", portfolioId)
@@ -2775,7 +2746,7 @@ interface CachedHoldingGeography {
 }
 
 async function snapshotHoldingGeography(
-  client: ReturnType<typeof db>,
+  client: ReturnType<typeof adminDb>,
   portfolioId: string,
 ): Promise<Map<string, CachedHoldingGeography>> {
   const { data: holdings, error: holdingsError } = await client
@@ -2853,7 +2824,7 @@ async function rebuildCurrentHoldings(
   typeByTicker: Map<string, string> = new Map(),
   currencyByTicker: Map<string, string> = new Map(),
 ): Promise<void> {
-  const client = db(env);
+  const client = adminDb(env);
   const txns = await loadPortfolioTransactions(env, portfolioId);
   const cachedGeography = await snapshotHoldingGeography(client, portfolioId);
   const lots = new Map<
@@ -3025,7 +2996,7 @@ function computeSnapshotForDate(
 }
 
 async function recomputeSnapshots(env: Env, portfolioId: string): Promise<void> {
-  const client = db(env);
+  const client = adminDb(env);
   const txns = await loadPortfolioTransactions(env, portfolioId);
   console.log("[recompute] transactions fetched:", txns.length);
 
@@ -3125,13 +3096,13 @@ async function appendTodaySnapshot(env: Env, portfolioId: string): Promise<strin
 
   const date = latestTradingDay;
   const snapshotData = computeSnapshotForDate(txns, pricesByTicker, date);
-  await db(env).from("portfolio_snapshots").upsert(
+  await adminDb(env).from("portfolio_snapshots").upsert(
     { portfolio_id: portfolioId, date, ...snapshotData },
     { onConflict: "portfolio_id,date" },
   );
 
   // Compute TWR incrementally from the previous snapshot
-  const { data: prevSnaps } = await db(env)
+  const { data: prevSnaps } = await adminDb(env)
     .from("portfolio_snapshots")
     .select("date, total_value, twr_pct")
     .eq("portfolio_id", portfolioId)
@@ -3149,7 +3120,7 @@ async function appendTodaySnapshot(env: Env, portfolioId: string): Promise<strin
     const newIndex = Number.isFinite(periodReturn) ? prevIndex * (1 + periodReturn) : prevIndex;
     twr_pct = Math.round((newIndex - 1) * 100 * 100) / 100;
   }
-  await db(env)
+  await adminDb(env)
     .from("portfolio_snapshots")
     .update({ twr_pct })
     .eq("portfolio_id", portfolioId)
@@ -3172,7 +3143,7 @@ async function enqueueDailySnapshotsForClosedMarkets(env: Env, scheduledTime: nu
   const exchanges = exchangesByTime[timeKey] ?? [];
   if (exchanges.length === 0) return;
 
-  const { data, error } = await db(env)
+  const { data, error } = await adminDb(env)
     .from("portfolios")
     .select("id")
     .in("primary_exchange", exchanges);
@@ -3201,7 +3172,7 @@ function buildIdempotencyKey(input: {
 }
 
 async function createRun(
-  env: Env,
+  client: SupabaseClient,
   params: {
     userId: string;
     portfolioId: string;
@@ -3230,7 +3201,6 @@ async function createRun(
     model_sub: "grok-4-1-fast-reasoning",
   };
 
-  const client = db(env);
   const { data: inserted, error: insertError } = await client
     .from("agent_runs")
     .insert(payload)
@@ -3265,11 +3235,8 @@ async function queueRun(env: Env, run: AgentRunRow): Promise<void> {
   });
 }
 
-async function listUserPortfolioIds(env: Env, userId: string): Promise<string[]> {
-  const { data, error } = await db(env)
-    .from("portfolios")
-    .select("id")
-    .eq("user_id", userId);
+async function listUserPortfolioIds(client: SupabaseClient): Promise<string[]> {
+  const { data, error } = await client.from("portfolios").select("id");
   if (error) throw new Error(error.message);
   return (data ?? []).map((row) => row.id as string);
 }
@@ -3326,7 +3293,7 @@ async function createAndQueueRecap(
     periodEnd: string;
   },
 ): Promise<string | null> {
-  const client = db(env);
+  const client = adminDb(env);
   const { data, error } = await client
     .from("recaps")
     .insert({
@@ -3356,7 +3323,7 @@ async function runWeeklyRecapFanout(
   env: Env,
   options: { now: Date; dryRun?: boolean },
 ): Promise<{ dryRun: boolean; checkedPortfolios: number; duePortfolios: number; queued: number; queuedIds: string[] }> {
-  const client = db(env);
+  const client = adminDb(env);
   const [{ data: portfolios, error: pErr }, { data: userSettings, error: sErr }] = await Promise.all([
     client.from("portfolios").select("id,user_id"),
     client.from("agent_user_settings").select("user_id,timezone"),
@@ -3425,7 +3392,7 @@ async function runScheduledFanout(
     throw new Error("Server misconfiguration: AGENT_RUNS_QUEUE binding is missing");
   }
 
-  const client = db(env);
+  const client = adminDb(env);
   const [{ data: portfolios, error: portfoliosError }, { data: userSettings, error: userSettingsError }, { data: portfolioSettings, error: portfolioSettingsError }] =
     await Promise.all([
       client.from("portfolios").select("id,user_id"),
@@ -3494,7 +3461,7 @@ async function runScheduledFanout(
 
   const queuedRunIds: string[] = [];
   for (const target of dueTargets) {
-    const run = await createRun(env, {
+    const run = await createRun(adminDb(env), {
       userId: String(target.user_id),
       portfolioId: String(target.id),
       triggerType: "scheduled",
@@ -3517,7 +3484,7 @@ async function runPortfolioContextTool(
   env: Env,
   input: { userId: string; portfolioId: string },
 ): Promise<PortfolioContextResult> {
-  const client = db(env);
+  const client = adminDb(env);
   const [{ data: holdings, error: holdingsError }, { data: theses, error: thesesError }] =
     await Promise.all([
       client
@@ -4064,10 +4031,11 @@ export default {
       return new Response(null, { status: 204, headers: CORS_HEADERS });
     }
 
-    if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_KEY) {
+    if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_KEY || !env.SUPABASE_ANON_KEY) {
       return json(
         {
-          error: "Server misconfiguration: SUPABASE_URL or SUPABASE_SERVICE_KEY is missing",
+          error:
+            "Server misconfiguration: SUPABASE_URL, SUPABASE_SERVICE_KEY, or SUPABASE_ANON_KEY is missing",
         },
         500,
       );
@@ -4077,7 +4045,7 @@ export default {
     if (method === "GET" && pathname === "/api/health") {
       let supabase = "not_checked";
       try {
-        const { error } = await db(env).from("portfolios").select("id").limit(1);
+        const { error } = await adminDb(env).from("portfolios").select("id").limit(1);
         supabase = error ? "error" : "connected";
       } catch {
         supabase = "error";
@@ -4100,14 +4068,14 @@ export default {
       const body = (await request.json().catch(() => ({}))) as { portfolioId?: string };
       const portfolioId = String(body.portfolioId ?? "").trim();
       if (!portfolioId) return json({ error: "portfolioId is required" }, 400);
-      const accessError = await requirePortfolioAccess(request, env, portfolioId);
-      if (accessError) return accessError;
+      const auth = await requirePortfolioAccess(request, env, portfolioId);
+        if (auth instanceof Response) return auth;
       if (!env.GROK_NORMALIZATION_API_KEY) {
         return json({ error: "Server misconfiguration: GROK_NORMALIZATION_API_KEY is missing" }, 500);
       }
 
       try {
-        const holdingsPayload = await buildBenchmarkSuggestionHoldingsPayload(env, portfolioId);
+        const holdingsPayload = await buildBenchmarkSuggestionHoldingsPayload(auth.db, portfolioId);
         if (holdingsPayload.length === 0) return json([]);
         const { summaryString, holdingsPromptPayload } = await buildBenchmarkPortfolioSummary(
           env,
@@ -4165,22 +4133,19 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
     // Portfolios
     if (pathname === "/api/portfolios") {
       if (method === "GET") {
-        const userId = await getAuthenticatedUserId(request, env);
-        if (!userId) return json({ error: "Unauthorized" }, 401);
-        const { data, error } = await db(env)
-          .from("portfolios")
-          .select("*")
-          .eq("user_id", userId);
+        const auth = await requireAuth(request, env);
+        if (auth instanceof Response) return auth;
+        const { data, error } = await auth.db.from("portfolios").select("*");
         if (error) return json({ error: error.message }, 500);
         return json(data);
       }
       if (method === "POST") {
-        const userId = await getAuthenticatedUserId(request, env);
-        if (!userId) return json({ error: "Unauthorized" }, 401);
+        const auth = await requireAuth(request, env);
+        if (auth instanceof Response) return auth;
         const body = (await request.json()) as Record<string, unknown>;
         // Ownership is forced from the verified token — never from the body.
-        const payload = { ...pickColumns(body, PORTFOLIO_WRITE_COLUMNS), user_id: userId };
-        const { data, error } = await db(env).from("portfolios").insert(payload).select();
+        const payload = { ...pickColumns(body, PORTFOLIO_WRITE_COLUMNS), user_id: auth.userId };
+        const { data, error } = await auth.db.from("portfolios").insert(payload).select();
         if (error) return json({ error: error.message }, 500);
         return json(data, 201);
       }
@@ -4189,17 +4154,17 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
     const portfolioMatch = pathname.match(/^\/api\/portfolios\/([^/]+)$/);
     if (portfolioMatch) {
       const id = portfolioMatch[1];
-      const accessError = await requirePortfolioAccess(request, env, id);
-      if (accessError) return accessError;
+      const auth = await requirePortfolioAccess(request, env, id);
+        if (auth instanceof Response) return auth;
       if (method === "GET") {
-        const { data, error } = await db(env).from("portfolios").select("*").eq("id", id).single();
+        const { data, error } = await auth.db.from("portfolios").select("*").eq("id", id).single();
         if (error) return json({ error: error.message }, 404);
         return json(data);
       }
       if (method === "PUT") {
         const body = (await request.json()) as Record<string, unknown>;
         const payload = pickColumns(body, PORTFOLIO_WRITE_COLUMNS);
-        const { data, error } = await db(env)
+        const { data, error } = await auth.db
           .from("portfolios")
           .update(payload)
           .eq("id", id)
@@ -4208,7 +4173,7 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
         return json(data);
       }
       if (method === "DELETE") {
-        const { error } = await db(env).from("portfolios").delete().eq("id", id);
+        const { error } = await auth.db.from("portfolios").delete().eq("id", id);
         if (error) return json({ error: error.message }, 500);
         return json({ deleted: true });
       }
@@ -4217,11 +4182,11 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
     const savedBenchmarksMatch = pathname.match(/^\/api\/portfolios\/([^/]+)\/benchmarks\/saved$/);
     if (savedBenchmarksMatch) {
       const portfolioId = savedBenchmarksMatch[1];
-      const accessError = await requirePortfolioAccess(request, env, portfolioId);
-      if (accessError) return accessError;
+      const auth = await requirePortfolioAccess(request, env, portfolioId);
+        if (auth instanceof Response) return auth;
 
       if (method === "GET") {
-        const { data, error } = await db(env)
+        const { data, error } = await auth.db
           .from("saved_benchmarks")
           .select("id, portfolio_id, name, ticker, weights, color, created_at")
           .eq("portfolio_id", portfolioId)
@@ -4242,7 +4207,7 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
         if (!name || !ticker) return json({ error: "name and ticker are required" }, 400);
 
         const palette = ["amber", "violet", "rose", "sky"];
-        const { data: existing, error: existingError } = await db(env)
+        const { data: existing, error: existingError } = await auth.db
           .from("saved_benchmarks")
           .select("color")
           .eq("portfolio_id", portfolioId);
@@ -4252,7 +4217,7 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
           String(body.color ?? "").trim() ||
           palette.find((candidate) => !usedColors.has(candidate)) ||
           palette[(existing?.length ?? 0) % palette.length];
-        const { data, error } = await db(env)
+        const { data, error } = await auth.db
           .from("saved_benchmarks")
           .insert({
             portfolio_id: portfolioId,
@@ -4271,11 +4236,11 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
     const savedBenchmarkMatch = pathname.match(/^\/api\/portfolios\/([^/]+)\/benchmarks\/saved\/([^/]+)$/);
     if (savedBenchmarkMatch) {
       const [, portfolioId, benchmarkId] = savedBenchmarkMatch;
-      const accessError = await requirePortfolioAccess(request, env, portfolioId);
-      if (accessError) return accessError;
+      const auth = await requirePortfolioAccess(request, env, portfolioId);
+        if (auth instanceof Response) return auth;
 
       if (method === "DELETE") {
-        const { error } = await db(env)
+        const { error } = await auth.db
           .from("saved_benchmarks")
           .delete()
           .eq("id", benchmarkId)
@@ -4290,7 +4255,7 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
         const palette = new Set(["amber", "violet", "rose", "sky"]);
         if (!palette.has(color)) return json({ error: "Invalid benchmark color" }, 400);
 
-        const { data: target, error: targetError } = await db(env)
+        const { data: target, error: targetError } = await auth.db
           .from("saved_benchmarks")
           .select("id, color")
           .eq("id", benchmarkId)
@@ -4298,7 +4263,7 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
           .single();
         if (targetError || !target) return json({ error: "Saved benchmark not found" }, 404);
 
-        const { data: occupied, error: occupiedError } = await db(env)
+        const { data: occupied, error: occupiedError } = await auth.db
           .from("saved_benchmarks")
           .select("id, color")
           .eq("portfolio_id", portfolioId)
@@ -4306,7 +4271,7 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
           .maybeSingle();
         if (occupiedError) return json({ error: occupiedError.message }, 500);
 
-        const client = db(env);
+        const client = auth.db;
         const updatedIds = [benchmarkId];
         if (occupied && String(occupied.id) !== benchmarkId) {
           updatedIds.push(String(occupied.id));
@@ -4337,8 +4302,8 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
     const recomputeMatch = pathname.match(/^\/api\/portfolios\/([^/]+)\/recompute$/);
     if (recomputeMatch && method === "POST") {
       const portfolioId = recomputeMatch[1];
-      const accessError = await requirePortfolioAccess(request, env, portfolioId);
-      if (accessError) return accessError;
+      const auth = await requirePortfolioAccess(request, env, portfolioId);
+        if (auth instanceof Response) return auth;
       console.log("[recompute] triggered for portfolio", portfolioId);
       await recomputeSnapshots(env, portfolioId);
       console.log("[recompute] done");
@@ -4348,8 +4313,8 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
     const transactionPreviewMatch = pathname.match(/^\/api\/portfolios\/([^/]+)\/transactions\/preview$/);
     if (transactionPreviewMatch && method === "POST") {
       const portfolioId = transactionPreviewMatch[1];
-      const accessError = await requirePortfolioAccess(request, env, portfolioId);
-      if (accessError) return accessError;
+      const auth = await requirePortfolioAccess(request, env, portfolioId);
+        if (auth instanceof Response) return auth;
       if (!env.GROK_NORMALIZATION_API_KEY) {
         return json({ error: "Server misconfiguration: GROK_NORMALIZATION_API_KEY is missing" }, 500);
       }
@@ -4426,11 +4391,11 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
     const transactionsMatch = pathname.match(/^\/api\/portfolios\/([^/]+)\/transactions$/);
     if (transactionsMatch) {
       const portfolioId = transactionsMatch[1];
-      const accessError = await requirePortfolioAccess(request, env, portfolioId);
-      if (accessError) return accessError;
+      const auth = await requirePortfolioAccess(request, env, portfolioId);
+        if (auth instanceof Response) return auth;
 
       if (method === "GET") {
-        const { data, error } = await db(env)
+        const { data, error } = await auth.db
           .from("transactions")
           .select("id, date, symbol, isin, yahoo_ticker, side, quantity, net_amount, commission")
           .eq("portfolio_id", portfolioId)
@@ -4485,12 +4450,12 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
           };
         });
 
-        const { error } = await db(env).from("transactions").insert(dbRows);
+        const { error } = await auth.db.from("transactions").insert(dbRows);
         if (error) return json({ error: error.message }, 500);
 
         const primaryExchange = [...primaryExchangeCounts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0];
         if (primaryExchange) {
-          await db(env).from("portfolios").update({ primary_exchange: primaryExchange }).eq("id", portfolioId);
+          await auth.db.from("portfolios").update({ primary_exchange: primaryExchange }).eq("id", portfolioId);
         }
         await rebuildCurrentHoldings(env, portfolioId);
         await syncAndEnqueueGeography(env, portfolioId, "transaction_import");
@@ -4502,16 +4467,16 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
     const chartMatch = pathname.match(/^\/api\/portfolios\/([^/]+)\/chart$/);
     if (chartMatch && method === "GET") {
       const portfolioId = chartMatch[1];
-      const accessError = await requirePortfolioAccess(request, env, portfolioId);
-      if (accessError) return accessError;
+      const auth = await requirePortfolioAccess(request, env, portfolioId);
+        if (auth instanceof Response) return auth;
 
       const [{ data: snapshots, error: snapshotsError }, { data: txns, error: txnsError }] = await Promise.all([
-        db(env)
+        auth.db
           .from("portfolio_snapshots")
           .select("date, total_value, cash_balance, securities_value")
           .eq("portfolio_id", portfolioId)
           .order("date", { ascending: true }),
-        db(env)
+        auth.db
           .from("transactions")
           .select("date, side, net_amount")
           .eq("portfolio_id", portfolioId)
@@ -4552,10 +4517,10 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
     const lastPricesMatch = pathname.match(/^\/api\/portfolios\/([^/]+)\/last-prices$/);
     if (lastPricesMatch && method === "GET") {
       const portfolioId = lastPricesMatch[1];
-      const accessError = await requirePortfolioAccess(request, env, portfolioId);
-      if (accessError) return accessError;
+      const auth = await requirePortfolioAccess(request, env, portfolioId);
+        if (auth instanceof Response) return auth;
 
-      const { data: holdings, error: holdingsError } = await db(env)
+      const { data: holdings, error: holdingsError } = await auth.db
         .from("holdings")
         .select("ticker")
         .eq("portfolio_id", portfolioId);
@@ -4572,7 +4537,7 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
 
       const results = await Promise.all(
         tickers.map(async (ticker) => {
-          const { data, error } = await db(env)
+          const { data, error } = await auth.db
             .from("price_history")
             .select("date, closing_price")
             .eq("yahoo_ticker", ticker)
@@ -4594,8 +4559,8 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
     const geographyMatch = pathname.match(/^\/api\/portfolios\/([^/]+)\/geography$/);
     if (geographyMatch) {
       const portfolioId = geographyMatch[1];
-      const accessError = await requirePortfolioAccess(request, env, portfolioId);
-      if (accessError) return accessError;
+      const auth = await requirePortfolioAccess(request, env, portfolioId);
+        if (auth instanceof Response) return auth;
 
       try {
         if (method === "GET") return json(await getPortfolioGeography(env, portfolioId));
@@ -4611,8 +4576,8 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
     const geographyEnqueueMatch = pathname.match(/^\/api\/portfolios\/([^/]+)\/geography\/enqueue$/);
     if (geographyEnqueueMatch && method === "POST") {
       const portfolioId = geographyEnqueueMatch[1];
-      const accessError = await requirePortfolioAccess(request, env, portfolioId);
-      if (accessError) return accessError;
+      const auth = await requirePortfolioAccess(request, env, portfolioId);
+        if (auth instanceof Response) return auth;
 
       try {
         const result = await syncAndEnqueueGeography(env, portfolioId, "holding_change");
@@ -4625,8 +4590,8 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
     const geographyRepairMatch = pathname.match(/^\/api\/portfolios\/([^/]+)\/geography\/repair$/);
     if (geographyRepairMatch && method === "POST") {
       const portfolioId = geographyRepairMatch[1];
-      const accessError = await requirePortfolioAccess(request, env, portfolioId);
-      if (accessError) return accessError;
+      const auth = await requirePortfolioAccess(request, env, portfolioId);
+        if (auth instanceof Response) return auth;
 
       try {
         const result = await repairPortfolioGeography(env, portfolioId);
@@ -4639,8 +4604,8 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
     const geographyResearchMatch = pathname.match(/^\/api\/portfolios\/([^/]+)\/geography\/research$/);
     if (geographyResearchMatch && method === "POST") {
       const portfolioId = geographyResearchMatch[1];
-      const accessError = await requirePortfolioAccess(request, env, portfolioId);
-      if (accessError) return accessError;
+      const auth = await requirePortfolioAccess(request, env, portfolioId);
+        if (auth instanceof Response) return auth;
 
       try {
         const result = await researchPortfolioEtfGeography(env, portfolioId, { reason: "manual_retry" });
@@ -4654,8 +4619,8 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
     const transactionDeleteMatch = pathname.match(/^\/api\/portfolios\/([^/]+)\/transactions\/([^/]+)$/);
     if (transactionDeleteMatch && (method === "PATCH" || method === "DELETE")) {
       const [, portfolioId, txnId] = transactionDeleteMatch;
-      const accessError = await requirePortfolioAccess(request, env, portfolioId);
-      if (accessError) return accessError;
+      const auth = await requirePortfolioAccess(request, env, portfolioId);
+        if (auth instanceof Response) return auth;
       if (!env.SNAPSHOT_QUEUE) {
         return json({ error: "Server misconfiguration: SNAPSHOT_QUEUE binding is missing" }, 500);
       }
@@ -4680,7 +4645,7 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
           }
         }
         const primaryExchange = yahooExchangeToPrimary(asset?.exchange, asset?.ticker);
-        const { data, error } = await db(env)
+        const { data, error } = await auth.db
           .from("transactions")
           .update({
             date: parsedRow.date,
@@ -4699,7 +4664,7 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
         if (error) return json({ error: error.message }, 500);
         if (!data) return json({ error: "Transaction not found" }, 404);
         if (primaryExchange) {
-          await db(env).from("portfolios").update({ primary_exchange: primaryExchange }).eq("id", portfolioId);
+          await auth.db.from("portfolios").update({ primary_exchange: primaryExchange }).eq("id", portfolioId);
         }
         await rebuildCurrentHoldings(env, portfolioId);
         await syncAndEnqueueGeography(env, portfolioId, "transaction_import");
@@ -4707,7 +4672,7 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
         return json({ updated: txnId });
       }
 
-      const { error } = await db(env)
+      const { error } = await auth.db
         .from("transactions")
         .delete()
         .eq("id", txnId)
@@ -4724,9 +4689,9 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
       if (method === "GET") {
         const portfolioId = url.searchParams.get("portfolio_id");
         if (!portfolioId) return json({ error: "portfolio_id is required" }, 400);
-        const accessError = await requirePortfolioAccess(request, env, portfolioId);
-        if (accessError) return accessError;
-        const { data, error } = await db(env)
+        const auth = await requirePortfolioAccess(request, env, portfolioId);
+        if (auth instanceof Response) return auth;
+        const { data, error } = await auth.db
           .from("holdings")
           .select("*")
           .eq("portfolio_id", portfolioId);
@@ -4737,10 +4702,10 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
         const body = (await request.json()) as Record<string, unknown>;
         const portfolioId = String(body.portfolio_id ?? "");
         if (!portfolioId) return json({ error: "portfolio_id is required" }, 400);
-        const accessError = await requirePortfolioAccess(request, env, portfolioId);
-        if (accessError) return accessError;
+        const auth = await requirePortfolioAccess(request, env, portfolioId);
+        if (auth instanceof Response) return auth;
         const payload = pickColumns(body, HOLDING_WRITE_COLUMNS);
-        const { data, error } = await db(env).from("holdings").insert(payload).select();
+        const { data, error } = await auth.db.from("holdings").insert(payload).select();
         if (error) return json({ error: error.message }, 500);
         const portfolioIds = Array.from(
           new Set((data ?? []).map((row) => String(row.portfolio_id ?? "")).filter(Boolean)),
@@ -4802,8 +4767,11 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
     const holdingMatch = pathname.match(/^\/api\/holdings\/([^/]+)$/);
     if (holdingMatch) {
       const id = holdingMatch[1];
-      // Resolve the holding's owning portfolio and verify access before any mutation.
-      const { data: existingHolding } = await db(env)
+      const auth = await requireAuth(request, env);
+        if (auth instanceof Response) return auth;
+
+      // RLS ensures only holdings in the caller's portfolios are visible.
+      const { data: existingHolding } = await auth.db
         .from("holdings")
         .select("portfolio_id")
         .eq("id", id)
@@ -4811,15 +4779,13 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
       const owningPortfolioId =
         existingHolding?.portfolio_id == null ? null : String(existingHolding.portfolio_id);
       if (!owningPortfolioId) return json({ error: "Holding not found" }, 404);
-      const accessError = await requirePortfolioAccess(request, env, owningPortfolioId);
-      if (accessError) return accessError;
 
       if (method === "PUT") {
         const body = (await request.json()) as Record<string, unknown>;
         // Exclude portfolio_id so a holding cannot be moved into another portfolio here.
         const payload = pickColumns(body, HOLDING_WRITE_COLUMNS);
         delete payload.portfolio_id;
-        const { data, error } = await db(env).from("holdings").update(payload).eq("id", id).select();
+        const { data, error } = await auth.db.from("holdings").update(payload).eq("id", id).select();
         if (error) return json({ error: error.message }, 500);
         const portfolioIds = Array.from(
           new Set((data ?? []).map((row) => String(row.portfolio_id ?? "")).filter(Boolean)),
@@ -4828,7 +4794,7 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
         return json(data);
       }
       if (method === "DELETE") {
-        const { error } = await db(env).from("holdings").delete().eq("id", id);
+        const { error } = await auth.db.from("holdings").delete().eq("id", id);
         if (error) return json({ error: error.message }, 500);
         await syncAndEnqueueGeography(env, owningPortfolioId, "holding_change");
         return json({ deleted: true });
@@ -4838,14 +4804,14 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
     // Agent runs
     if (pathname === "/api/agent/runs") {
       if (method === "GET") {
-        const userId = await getAuthenticatedUserId(request, env);
-        if (!userId) return json({ error: "Unauthorized" }, 401);
+        const auth = await requireAuth(request, env);
+        if (auth instanceof Response) return auth;
 
         const portfolioId = url.searchParams.get("portfolio_id");
-        let query = db(env)
+        let query = auth.db
           .from("agent_runs")
           .select("*")
-          .eq("user_id", userId)
+          .eq("user_id", auth.userId)
           .order("created_at", { ascending: false })
           .limit(100);
 
@@ -4860,8 +4826,8 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
           return json({ error: "Server misconfiguration: AGENT_RUNS_QUEUE binding is missing" }, 500);
         }
 
-        const userId = await getAuthenticatedUserId(request, env);
-        if (!userId) return json({ error: "Unauthorized" }, 401);
+        const auth = await requireAuth(request, env);
+        if (auth instanceof Response) return auth;
 
         const body = (await request.json()) as {
           portfolioId?: string;
@@ -4879,7 +4845,7 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
         // listUserPortfolioIds is already scoped to the authenticated user; a single
         // target portfolio is verified for ownership before any run is created.
         const portfolioIds = body.allPortfolios
-          ? await listUserPortfolioIds(env, userId)
+          ? await listUserPortfolioIds(auth.db)
           : body.portfolioId
             ? [body.portfolioId]
             : [];
@@ -4890,15 +4856,15 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
 
         if (!body.allPortfolios) {
           for (const portfolioId of portfolioIds) {
-            const accessError = await assertPortfolioAccess(env, portfolioId, userId);
-            if (accessError) return accessError;
+            const accessError = await assertPortfolioAccess(auth.db, portfolioId);
+        if (accessError) return accessError;
           }
         }
 
         const runs: AgentRunRow[] = [];
         for (const portfolioId of portfolioIds) {
-          const run = await createRun(env, {
-            userId,
+          const run = await createRun(auth.db, {
+            userId: auth.userId,
             portfolioId,
             triggerType,
             idempotencyKey: body.forceNew ? crypto.randomUUID() : body.idempotencyKey,
@@ -4925,18 +4891,18 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
 
     if (pathname === "/api/agent/settings") {
       if (method === "GET") {
-        const userId = await getAuthenticatedUserId(request, env);
-        if (!userId) return json({ error: "Unauthorized" }, 401);
+        const auth = await requireAuth(request, env);
+        if (auth instanceof Response) return auth;
 
-        const { data, error } = await db(env)
+        const { data, error } = await auth.db
           .from("agent_user_settings")
           .select("*")
-          .eq("user_id", userId)
+          .eq("user_id", auth.userId)
           .maybeSingle();
         if (error) return json({ error: error.message }, 500);
         return json(
           data ?? {
-            user_id: userId,
+            user_id: auth.userId,
             timezone: "Europe/Paris",
             global_runs_per_day: 2,
             auto_apply_enabled: false,
@@ -4946,8 +4912,8 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
       }
 
       if (method === "PUT") {
-        const userId = await getAuthenticatedUserId(request, env);
-        if (!userId) return json({ error: "Unauthorized" }, 401);
+        const auth = await requireAuth(request, env);
+        if (auth instanceof Response) return auth;
         const body = (await request.json()) as {
           timezone?: string;
           globalRunsPerDay?: number;
@@ -4956,7 +4922,7 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
         };
 
         const payload = {
-          user_id: userId,
+          user_id: auth.userId,
           timezone: body.timezone ?? "Europe/Paris",
           global_runs_per_day: Math.max(1, Math.min(3, Number(body.globalRunsPerDay ?? 2))),
           auto_apply_enabled: Boolean(body.autoApplyEnabled ?? false),
@@ -4966,7 +4932,7 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
           ),
         };
 
-        const { data, error } = await db(env)
+        const { data, error } = await auth.db
           .from("agent_user_settings")
           .upsert(payload, { onConflict: "user_id" })
           .select("*")
@@ -4978,21 +4944,21 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
 
     if (pathname === "/api/agent/portfolio-settings") {
       if (method === "GET") {
-        const userId = await getAuthenticatedUserId(request, env);
-        if (!userId) return json({ error: "Unauthorized" }, 401);
+        const auth = await requireAuth(request, env);
+        if (auth instanceof Response) return auth;
 
-        const { data, error } = await db(env)
+        const { data, error } = await auth.db
           .from("agent_portfolio_settings")
           .select("*")
-          .eq("user_id", userId)
+          .eq("user_id", auth.userId)
           .order("created_at", { ascending: true });
         if (error) return json({ error: error.message }, 500);
         return json(data ?? []);
       }
 
       if (method === "PUT") {
-        const userId = await getAuthenticatedUserId(request, env);
-        if (!userId) return json({ error: "Unauthorized" }, 401);
+        const auth = await requireAuth(request, env);
+        if (auth instanceof Response) return auth;
         const body = (await request.json()) as {
           portfolioId?: string;
           runsPerDayOverride?: number | null;
@@ -5001,11 +4967,11 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
         if (!body.portfolioId) {
           return json({ error: "portfolioId is required" }, 400);
         }
-        const accessError = await assertPortfolioAccess(env, body.portfolioId, userId);
+        const accessError = await assertPortfolioAccess(auth.db, body.portfolioId);
         if (accessError) return accessError;
 
         const payload = {
-          user_id: userId,
+          user_id: auth.userId,
           portfolio_id: body.portfolioId,
           runs_per_day_override:
             body.runsPerDayOverride == null
@@ -5014,7 +4980,7 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
           agent_enabled: body.agentEnabled == null ? true : Boolean(body.agentEnabled),
         };
 
-        const { data, error } = await db(env)
+        const { data, error } = await auth.db
           .from("agent_portfolio_settings")
           .upsert(payload, { onConflict: "portfolio_id" })
           .select("*")
@@ -5026,16 +4992,16 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
 
     if (pathname === "/api/agent/metrics") {
       if (method !== "GET") return json({ error: "Method not allowed" }, 405);
-      const userId = await getAuthenticatedUserId(request, env);
-      if (!userId) return json({ error: "Unauthorized" }, 401);
+      const auth = await requireAuth(request, env);
+        if (auth instanceof Response) return auth;
 
       const hours = Math.max(1, Math.min(168, Number(url.searchParams.get("hours") ?? 24)));
       const fromIso = new Date(Date.now() - hours * 60 * 60 * 1000).toISOString();
 
-      const { data, error } = await db(env)
+      const { data, error } = await auth.db
         .from("agent_runs")
         .select("id,status,trigger_type,created_at,started_at,finished_at,error_code")
-        .eq("user_id", userId)
+        .eq("user_id", auth.userId)
         .gte("created_at", fromIso)
         .order("created_at", { ascending: false })
         .limit(1000);
@@ -5046,14 +5012,14 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
 
     if (pathname === "/api/agent/feed") {
       if (method !== "GET") return json({ error: "Method not allowed" }, 405);
-      const userId = await getAuthenticatedUserId(request, env);
-      if (!userId) return json({ error: "Unauthorized" }, 401);
+      const auth = await requireAuth(request, env);
+        if (auth instanceof Response) return auth;
       const limit = Math.max(1, Math.min(200, Number(url.searchParams.get("limit") ?? 50)));
 
-      const { data, error } = await db(env)
+      const { data, error } = await auth.db
         .from("agent_runs")
         .select("id,portfolio_id,created_at,token_usage,status,trigger_type")
-        .eq("user_id", userId)
+        .eq("user_id", auth.userId)
         .eq("status", "completed")
         .order("created_at", { ascending: false })
         .limit(100);
@@ -5122,8 +5088,8 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
 
     if (pathname === "/api/agent/alerts") {
       if (method !== "GET") return json({ error: "Method not allowed" }, 405);
-      const userId = await getAuthenticatedUserId(request, env);
-      if (!userId) return json({ error: "Unauthorized" }, 401);
+      const auth = await requireAuth(request, env);
+        if (auth instanceof Response) return auth;
 
       const hours = Math.max(1, Math.min(168, Number(url.searchParams.get("hours") ?? 24)));
       const queueDepthThreshold = Math.max(
@@ -5140,10 +5106,10 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
       );
       const fromIso = new Date(Date.now() - hours * 60 * 60 * 1000).toISOString();
 
-      const { data, error } = await db(env)
+      const { data, error } = await auth.db
         .from("agent_runs")
         .select("status,trigger_type,started_at,finished_at,error_code")
-        .eq("user_id", userId)
+        .eq("user_id", auth.userId)
         .gte("created_at", fromIso)
         .order("created_at", { ascending: false })
         .limit(1000);
@@ -5213,16 +5179,16 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
     const cancelRunMatch = pathname.match(/^\/api\/agent\/runs\/([^/]+)\/cancel$/);
     if (cancelRunMatch && method === "POST") {
       const runId = cancelRunMatch[1];
-      const userId = await getAuthenticatedUserId(request, env);
-      if (!userId) return json({ error: "Unauthorized" }, 401);
+      const auth = await requireAuth(request, env);
+        if (auth instanceof Response) return auth;
       // Verify the run belongs to the caller before cancelling.
-      const { data: run } = await db(env)
+      const { data: run } = await auth.db
         .from("agent_runs")
         .select("user_id")
         .eq("id", runId)
         .maybeSingle();
-      if (!run || String(run.user_id) !== userId) return json({ error: "Run not found" }, 404);
-      const { data, error } = await db(env)
+      if (!run || String(run.user_id) !== auth.userId) return json({ error: "Run not found" }, 404);
+      const { data, error } = await auth.db
         .from("agent_runs")
         .update({
           status: "cancelled",
@@ -5248,7 +5214,7 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
         // ?reset=true wipes existing clusters first (cascade clears the bridge) so a
         // test run reflects only the fresh fanout.
         if (url.searchParams.get("reset") === "true") {
-          await db(env).from("news_clusters").delete().not("id", "is", null);
+          await adminDb(env).from("news_clusters").delete().not("id", "is", null);
         }
         const result = await runNewsFanout(env);
         return json(result, 200);
@@ -5295,7 +5261,7 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
         }
 
         // Single-portfolio synchronous generation (force-regenerate for testing).
-        const client = db(env);
+        const client = adminDb(env);
         const { data: pf } = await client
           .from("portfolios")
           .select("user_id")
@@ -5363,12 +5329,12 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
     if (method === "GET" && pathname === "/api/feed/news") {
       const portfolioId = url.searchParams.get("portfolio_id") ?? "";
       if (!portfolioId) return json({ error: "portfolio_id is required" }, 400);
-      const accessError = await requirePortfolioAccess(request, env, portfolioId);
-      if (accessError) return accessError;
+      const auth = await requirePortfolioAccess(request, env, portfolioId);
+        if (auth instanceof Response) return auth;
 
       const limit = Math.min(50, Math.max(1, Number(url.searchParams.get("limit") ?? "20")));
 
-      const { data, error } = await db(env)
+      const { data, error } = await auth.db
         .from("portfolio_news_matches")
         .select(
           `score, match_reason,
@@ -5394,10 +5360,10 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
     if (method === "GET" && pathname === "/api/feed/polymarket") {
       const portfolioId = url.searchParams.get("portfolio_id") ?? "";
       if (!portfolioId) return json({ error: "portfolio_id is required" }, 400);
-      const accessError = await requirePortfolioAccess(request, env, portfolioId);
-      if (accessError) return accessError;
+      const auth = await requirePortfolioAccess(request, env, portfolioId);
+        if (auth instanceof Response) return auth;
 
-      const { data, error } = await db(env)
+      const { data, error } = await auth.db
         .from("portfolio_polymarket_matches")
         .select(
           `is_pinned, score, reason,
@@ -5427,13 +5393,13 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
       if (!portfolioId) return json({ error: "portfolio_id is required" }, 400);
       // Need the userId (not just ownership) to attach the caller's own
       // per-slide feedback, so resolve it explicitly here.
-      const userId = await getAuthenticatedUserId(request, env);
-      if (!userId) return json({ error: "Unauthorized" }, 401);
-      const accessError = await assertPortfolioAccess(env, portfolioId, userId);
-      if (accessError) return accessError;
+      const auth = await requireAuth(request, env);
+        if (auth instanceof Response) return auth;
+      const accessError = await assertPortfolioAccess(auth.db, portfolioId);
+        if (accessError) return accessError;
 
       const type = url.searchParams.get("type");
-      let query = db(env)
+      let query = auth.db
         .from("recaps")
         .select(
           "id, type, period_start, period_end, status, slides, generated_at, seen_at, langsmith_run_id",
@@ -5453,11 +5419,11 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
       // Attach the caller's per-slide feedback for this recap. Supplementary —
       // a query error (e.g. migration not yet applied) degrades to [] rather
       // than failing the whole recap fetch.
-      const { data: slideFeedback, error: fbError } = await db(env)
+      const { data: slideFeedback, error: fbError } = await auth.db
         .from("recap_slide_feedback")
         .select("slide_index, score, comment")
         .eq("recap_id", data.id)
-        .eq("user_id", userId);
+        .eq("user_id", auth.userId);
       if (fbError) {
         console.error("[recaps] slide_feedback fetch failed:", fbError.message);
       }
@@ -5468,11 +5434,11 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
     if (method === "GET" && pathname === "/api/recaps/list") {
       const portfolioId = url.searchParams.get("portfolio_id") ?? "";
       if (!portfolioId) return json({ error: "portfolio_id is required" }, 400);
-      const accessError = await requirePortfolioAccess(request, env, portfolioId);
-      if (accessError) return accessError;
+      const auth = await requirePortfolioAccess(request, env, portfolioId);
+        if (auth instanceof Response) return auth;
 
       const limit = Math.min(50, Math.max(1, Number(url.searchParams.get("limit") ?? "20")));
-      const { data, error } = await db(env)
+      const { data, error } = await auth.db
         .from("recaps")
         .select("id, type, period_start, period_end, status, generated_at, seen_at")
         .eq("portfolio_id", portfolioId)
@@ -5486,17 +5452,17 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
     const recapSeenMatch = pathname.match(/^\/api\/recaps\/([^/]+)\/seen$/);
     if (method === "POST" && recapSeenMatch) {
       const recapId = decodeURIComponent(recapSeenMatch[1]);
-      const client = db(env);
-      const { data: recap } = await client
+      const auth = await requireAuth(request, env);
+        if (auth instanceof Response) return auth;
+
+      const { data: recap } = await auth.db
         .from("recaps")
         .select("portfolio_id")
         .eq("id", recapId)
         .maybeSingle();
       if (!recap) return json({ error: "recap not found" }, 404);
-      const accessError = await requirePortfolioAccess(request, env, String(recap.portfolio_id));
-      if (accessError) return accessError;
 
-      const { error } = await client
+      const { error } = await auth.db
         .from("recaps")
         .update({ seen_at: new Date().toISOString() })
         .eq("id", recapId);
@@ -5512,10 +5478,10 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
     if (method === "POST" && recapFeedbackMatch) {
       const recapId = decodeURIComponent(recapFeedbackMatch[1]);
 
-      const userId = await getAuthenticatedUserId(request, env);
-      if (!userId) return json({ error: "Unauthorized" }, 401);
+      const auth = await requireAuth(request, env);
+        if (auth instanceof Response) return auth;
 
-      const client = db(env);
+      const client = auth.db;
       const { data: recap } = await client
         .from("recaps")
         .select("portfolio_id, slides, langsmith_run_id")
@@ -5523,8 +5489,8 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
         .maybeSingle();
       if (!recap) return json({ error: "recap not found" }, 404);
 
-      const accessError = await assertPortfolioAccess(env, String(recap.portfolio_id), userId);
-      if (accessError) return accessError;
+      const accessError = await assertPortfolioAccess(auth.db, String(recap.portfolio_id));
+        if (accessError) return accessError;
 
       let body: { slide_index?: unknown; score?: unknown; comment?: unknown };
       try {
@@ -5550,7 +5516,7 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
         {
           recap_id: recapId,
           portfolio_id: String(recap.portfolio_id),
-          user_id: userId,
+          user_id: auth.userId,
           slide_index: slideIndex,
           score,
           comment,
@@ -5576,7 +5542,7 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
         if (lsClient) {
           try {
             const feedbackId = await deterministicUuid(
-              `${langsmithRunId}:${userId}:${slideIndex}`,
+              `${langsmithRunId}:${auth.userId}:${slideIndex}`,
             );
             // Key feedback by the slide's KIND (performance/macro/mover/watch),
             // not its 0-based array index — self-documenting in the LangSmith UI
@@ -5614,8 +5580,8 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
     // Returns volume-ranked markets for a given category tag, filtered by
     // NON_FINANCIAL_RE. No portfolio context or LLM call — suitable for browsing.
     if (method === "GET" && pathname === "/api/polymarket/category") {
-      const userId = await getAuthenticatedUserId(request, env);
-      if (!userId) return json({ error: "Unauthorized" }, 401);
+      const auth = await requireAuth(request, env);
+        if (auth instanceof Response) return auth;
 
       const tagName = url.searchParams.get("tag") ?? "";
       const TAG_BY_NAME: Record<string, number> = {
@@ -5635,7 +5601,7 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
 
       const limit = Math.min(Number(url.searchParams.get("limit") ?? "30"), 60);
 
-      const { data, error } = await db(env)
+      const { data, error } = await auth.db
         .from("polymarket_markets")
         .select(
           "condition_id, event_id, event_slug, event_title, market_slug, question, tags, outcomes, outcome_prices, liquidity, volume_24hr, end_date, image, active, fetched_at",
@@ -5724,7 +5690,7 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
             // Friday's row or skips if no trading day was written.
             if (tradingDay) {
               try {
-                const { data: pf } = await db(env)
+                const { data: pf } = await adminDb(env)
                   .from("portfolios")
                   .select("user_id")
                   .eq("id", message.body.portfolio_id)
@@ -5774,12 +5740,12 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
       if (isRecapQueueMessage(message.body)) {
         const recapId = message.body.recapId;
         try {
-          await db(env).from("recaps").update({ status: "running" }).eq("id", recapId).eq("status", "queued");
+          await adminDb(env).from("recaps").update({ status: "running" }).eq("id", recapId).eq("status", "queued");
           await generateRecap(env, recapId);
           message.ack();
         } catch (error) {
           console.error(`recap queue failed for recap ${recapId}`, error);
-          await db(env)
+          await adminDb(env)
             .from("recaps")
             .update({ status: "failed", error: error instanceof Error ? error.message : String(error) })
             .eq("id", recapId);
@@ -5794,7 +5760,7 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
         const guardrails = createGuardrailState();
         const toolCalls: AgentToolCall[] = [];
         const start = new Date().toISOString();
-        await db(env)
+        await adminDb(env)
           .from("agent_runs")
           .update({ status: "running", started_at: start })
           .eq("id", runId)
@@ -6074,7 +6040,7 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
           throw new Error("Model output missing required items: main_agent.signals is empty");
         }
 
-        await db(env)
+        await adminDb(env)
           .from("agent_runs")
           .update({
             status: "completed",
@@ -6125,7 +6091,7 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
         message.ack();
       } catch (error) {
         const classified = classifyQueueProcessingError(error);
-        await db(env)
+        await adminDb(env)
           .from("agent_runs")
           .update({
             status: classified.statusOverride ?? "failed",

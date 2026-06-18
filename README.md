@@ -15,7 +15,7 @@ Node starts as a portfolio tracker that explains what's moving your money — an
 Two things are broken about how retail investors manage money today.
 
 - **Incumbents have poor UX.** Bank apps don't treat their interfaces as products. The richer alternatives swing the other way — bloated, doing everything, still missing the simple things an individual investor actually wants. In France especially, there's a gap between a clean experience and genuine utility.
-- **Every tool is fragmented and stateless.** Your portfolio is in one app, your thesis in your head, your goals nowhere. Nothing connects them, and nothing *remembers* you. Each session starts from zero.
+- **Every tool is fragmented and stateless.** Your portfolio is in one app, your thesis in your head, your goals nowhere. Nothing connects them, and nothing *remembers* you.
 
 Node closes both gaps: bridge great UX with AI-driven utility, and build a system that gets smarter the longer you use it.
 
@@ -23,18 +23,17 @@ Node closes both gaps: bridge great UX with AI-driven utility, and build a syste
 
 - **UX and AI utility, together** — neither traded off for the other. That trade-off is the whole reason incumbents fall short.
 - **Personal context, real world intelligence** — the AI is grounded in users' data and enhanced with real world events to provide the most accurate and freshest context.
-- **Persistent memory, the app evolves with you** — Node is being built with ambition to become another room in your home, the 
+- **Persistent memory, the app evolves with you** — Node is being built with ambition to become another room in your home, the more you use it the more you'd want to come back to it.
 
 ## Current features (live)
 
 - **Daily / weekly recaps** — plain-language explanations of what moved your portfolio and *why*, mapped to the exact holdings you own (agentic loop + deterministic data merge)
 - **Holdings-tailored news feed**
-- **Prediction-market feed** (Polymarket) for live macro context
+- **Prediction-market feed** (Polymarket) for live macro contex
 - **Benchmark overlay** with AI-suggested comparisons
 - **Allocation breakdown** — sector, asset type, geography
 - **Live prices**
 - **Notes** attached to individual holdings
-- Clean, high-density UI
 - *The Take* — a thesis-tracking agent (first draft/experiment)
 
 ## Roadmap
