@@ -539,7 +539,6 @@ function isWithinDateRange(date: string, range: ExportDateRange) {
   return matchesFrom && matchesTo;
 }
 
-
 function activeBenchmarksStorageKey(portfolioId: string) {
   return `${ACTIVE_BENCHMARKS_STORAGE_PREFIX}:${portfolioId}`;
 }
@@ -1585,8 +1584,6 @@ export default function PortfolioDetailPage() {
         </Link>
       </div>
     );
-
-
 
   return (
     <div className="min-h-screen bg-background text-foreground">

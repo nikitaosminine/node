@@ -95,7 +95,8 @@ export function WaitlistHeader() {
               fontSize: scrolled ? "0.75rem" : "0.875rem",
               paddingLeft: scrolled ? "0.625rem" : undefined,
               paddingRight: scrolled ? "0.625rem" : undefined,
-              transition: "font-size 500ms cubic-bezier(0.4,0,0.2,1), padding 500ms cubic-bezier(0.4,0,0.2,1)",
+              transition:
+                "font-size 500ms cubic-bezier(0.4,0,0.2,1), padding 500ms cubic-bezier(0.4,0,0.2,1)",
             }}
           >
             <Link href="/login">Log in</Link>

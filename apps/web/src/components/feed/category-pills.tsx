@@ -5,10 +5,10 @@ import { useReducedMotion } from "framer-motion";
 
 export const POLYMARKET_TABS = [
   { id: "personalized", label: "For you" },
-  { id: "finance",      label: "Finance" },
-  { id: "geopolitics",  label: "Geopolitics" },
-  { id: "tech",         label: "Tech" },
-  { id: "economy",      label: "Economy" },
+  { id: "finance", label: "Finance" },
+  { id: "geopolitics", label: "Geopolitics" },
+  { id: "tech", label: "Tech" },
+  { id: "economy", label: "Economy" },
 ] as const;
 
 export type PolymarketTabId = (typeof POLYMARKET_TABS)[number]["id"];

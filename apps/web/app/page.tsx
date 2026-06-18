@@ -1,5 +1,13 @@
 import type { Metadata } from "next";
-import { BarChart3, Globe, type LucideIcon, Mic, Newspaper, Receipt, ShieldCheck } from "lucide-react";
+import {
+  BarChart3,
+  Globe,
+  type LucideIcon,
+  Mic,
+  Newspaper,
+  Receipt,
+  ShieldCheck,
+} from "lucide-react";
 import { NodeLogo } from "@/components/node-logo";
 import { WaitlistHeader } from "@/components/waitlist/waitlist-header";
 import { WaitlistForm } from "@/components/waitlist/waitlist-form";
@@ -94,10 +102,14 @@ function FeatureCard({
 }
 
 // Inner content wrapper — keeps text/cards within the readable max-width.
-function Container({ children, className = "" }: { children: React.ReactNode; className?: string }) {
-  return (
-    <div className={`mx-auto w-full max-w-5xl px-6 ${className}`}>{children}</div>
-  );
+function Container({
+  children,
+  className = "",
+}: {
+  children: React.ReactNode;
+  className?: string;
+}) {
+  return <div className={`mx-auto w-full max-w-5xl px-6 ${className}`}>{children}</div>;
 }
 
 export default function WaitlistLandingPage() {
@@ -124,14 +136,12 @@ export default function WaitlistLandingPage() {
             At any time.
           </h1>
           <p className="mx-auto mt-6 max-w-2xl text-base text-muted-foreground sm:text-lg">
-            The personal finance hub that knows you — bound to your data and aware of what's happening in the world. 
-            One clear view, and answers the moment you ask.
+            The personal finance hub that knows you — bound to your data and aware of what's
+            happening in the world. One clear view, and answers the moment you ask.
           </p>
           <div className="mx-auto mt-8 max-w-md">
             <WaitlistForm />
-            <p className="mt-3 text-xs text-muted-foreground">
-              Built for retail investors.
-            </p>
+            <p className="mt-3 text-xs text-muted-foreground">Built for retail investors.</p>
           </div>
         </Container>
       </section>
@@ -157,9 +167,9 @@ export default function WaitlistLandingPage() {
             Built for clarity, not commissions.
           </h2>
           <p className="mx-auto mt-6 max-w-2xl text-base leading-relaxed text-muted-foreground">
-          Node never touches your money — no trades, no transactions, nothing to sell you.
-          That independence is the point: with nothing to push, the only thing Node optimizes
-          for is whether you actually understand what's going on.
+            Node never touches your money — no trades, no transactions, nothing to sell you. That
+            independence is the point: with nothing to push, the only thing Node optimizes for is
+            whether you actually understand what's going on.
           </p>
         </Container>
       </section>

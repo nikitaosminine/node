@@ -33,9 +33,7 @@ export function computeRealizedSellPnL(transactions: TransactionApiRow[]): {
   let realizedPnL = 0;
   let realizedCostBasis = 0;
 
-  const chronologicalTransactions = [...transactions].sort((a, b) =>
-    a.date.localeCompare(b.date),
-  );
+  const chronologicalTransactions = [...transactions].sort((a, b) => a.date.localeCompare(b.date));
 
   for (const transaction of chronologicalTransactions) {
     if (!transaction.isin || (transaction.side !== "BUY" && transaction.side !== "SELL")) continue;

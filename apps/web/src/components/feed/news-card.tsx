@@ -110,7 +110,11 @@ function FaviconSquare({ source }: { source: string }) {
 // Detail modal
 // ---------------------------------------------------------------------------
 
-function NewsModal({ article, open, onClose }: {
+function NewsModal({
+  article,
+  open,
+  onClose,
+}: {
   article: PrimaryArticle;
   open: boolean;
   onClose: () => void;
@@ -139,7 +143,9 @@ function NewsModal({ article, open, onClose }: {
               src={getFaviconUrl(article.source, 16)}
               alt=""
               className="h-4 w-4 rounded-sm"
-              onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = "none"; }}
+              onError={(e) => {
+                (e.currentTarget as HTMLImageElement).style.display = "none";
+              }}
             />
             <span className="font-medium">{article.source}</span>
             <span className="text-foreground-muted/40">·</span>
