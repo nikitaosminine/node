@@ -2,12 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import type { Recap } from "./types";
-
-const API_BASE_URL =
-  process.env.NEXT_PUBLIC_API_URL ??
-  (process.env.NODE_ENV === "production"
-    ? "https://binturong-api.nikita-osminine.workers.dev"
-    : "http://localhost:8787");
+import { API_BASE_URL } from "@/lib/api";
 
 async function authHeaders(): Promise<HeadersInit> {
   const { supabase } = await import("@/integrations/supabase/client");

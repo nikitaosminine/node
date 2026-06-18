@@ -12,6 +12,7 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { InfinityLoop } from "@/components/loading-ui/infinity";
 import { formatCurrency, normalizeCurrencyCode } from "@/lib/currency";
+import { API_BASE_URL } from "@/lib/api";
 
 export type AllocationDatum = { name: string; value: number };
 
@@ -50,12 +51,6 @@ type Props = {
 };
 
 type View = "classic" | "geography";
-
-const API_BASE_URL =
-  process.env.NEXT_PUBLIC_API_URL ??
-  (process.env.NODE_ENV === "production"
-    ? "https://binturong-api.nikita-osminine.workers.dev"
-    : "http://localhost:8787");
 
 const PALETTE = [
   "var(--alloc-1)",

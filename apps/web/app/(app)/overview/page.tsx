@@ -24,6 +24,7 @@ import {
   upsertCachedQuotes,
 } from "@/lib/market-cache";
 import { type TransactionApiRow, computeRealizedSellPnL } from "@/lib/portfolio-math";
+import { API_BASE_URL } from "@/lib/api";
 
 // Lazy-load the chart: it pulls in recharts + framer-motion, which we keep out
 // of the initial /overview bundle. The parent card reserves a fixed 480px, so
@@ -79,12 +80,6 @@ interface LiveQuote {
   currentPrice: number | null;
   currency: string | null;
 }
-
-const API_BASE_URL =
-  process.env.NEXT_PUBLIC_API_URL ??
-  (process.env.NODE_ENV === "production"
-    ? "https://binturong-api.nikita-osminine.workers.dev"
-    : "http://localhost:8787");
 
 // ---------------------------------------------------------------------------
 // Helpers

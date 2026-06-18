@@ -16,10 +16,7 @@ import {
 import { toast } from "sonner";
 import { useAuth } from "@/hooks/use-auth";
 import { supabase } from "@/integrations/supabase/client";
-import { authHeaders } from "@/lib/api";
-
-const DEPLOYED_API_BASE_URL = "https://binturong-api.nikita-osminine.workers.dev";
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? DEPLOYED_API_BASE_URL;
+import { API_BASE_URL, DEPLOYED_API_BASE_URL, authHeaders } from "@/lib/api";
 
 async function fetchApiWithFallback(path: string, init?: RequestInit): Promise<Response> {
   const primaryUrl = `${API_BASE_URL}${path}`;
