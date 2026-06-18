@@ -22,14 +22,14 @@ Node closes both gaps: bridge great UX with AI-driven utility, and build a syste
 ## What makes Node different
 
 - **UX and AI utility, together** — neither traded off for the other. That trade-off is the whole reason incumbents fall short.
-- **Personal context, real world intelligence** — the AI is grounded in users' data and enhanced with real world events to provide the most accurate and freshest context.
+- **Personal context, real-world intelligence** — the AI is grounded in users' data and enhanced with real-world events to provide the most accurate and freshest context.
 - **Persistent memory, the app evolves with you** — Node is being built with ambition to become another room in your home, the more you use it the more you'd want to come back to it.
 
 ## Current features (live)
 
 - **Daily / weekly recaps** — plain-language explanations of what moved your portfolio and *why*, mapped to the exact holdings you own (agentic loop + deterministic data merge)
 - **Holdings-tailored news feed**
-- **Prediction-market feed** (Polymarket) for live macro contex
+- **Prediction-market feed** (Polymarket) for live macro context
 - **Benchmark overlay** with AI-suggested comparisons
 - **Allocation breakdown** — sector, asset type, geography
 - **Live prices**

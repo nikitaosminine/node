@@ -4120,6 +4120,8 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
 
     const benchmarkPricesMatch = pathname.match(/^\/api\/benchmarks\/([^/]+)\/prices$/);
     if (benchmarkPricesMatch && method === "GET") {
+      const auth = await requireAuth(request, env);
+      if (auth instanceof Response) return auth;
       const ticker = decodeURIComponent(benchmarkPricesMatch[1]);
       const from = (url.searchParams.get("from") || "").trim();
       if (!from) return json({ error: "from is required" }, 400);

@@ -9,8 +9,6 @@ fetch_start=$(grep -n 'async fetch(request: Request, env: Env)' "$FILE" | head -
 scheduled_start=$(grep -n 'async scheduled(controller: ScheduledController' "$FILE" | head -1 | cut -d: -f1)
 fetch_block=$(sed -n "${fetch_start},$((scheduled_start - 1))p" "$FILE")
 
-violations=$(echo "$fetch_block" | grep -n 'adminDb(env)' | grep -Ev 'health|_debug|GET /api/health' || true)
-
 # Allow adminDb only on the health check and debug sections.
 allowed=$(echo "$fetch_block" | awk '
   /GET \/api\/health/ { allow=1 }
