@@ -946,6 +946,7 @@ export function PortfolioChart({ data, portfolioId, currency = "EUR" }: Portfoli
         try {
           const res = await fetch(
             `${API_BASE_URL}/api/benchmarks/${encodeURIComponent(ticker)}/prices?from=${encodeURIComponent(inceptionDate)}`,
+            { headers: await authHeaders() },
           );
           const body = await res.json();
           if (!res.ok) throw new Error(body.error || "Failed to load benchmark prices");
