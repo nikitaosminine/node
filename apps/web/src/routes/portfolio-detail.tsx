@@ -1254,6 +1254,7 @@ export default function PortfolioDetailPage() {
           const ticker = benchmark.ticker.toUpperCase();
           const benchmarkResponse = await fetch(
             `${API_BASE_URL}/api/benchmarks/${encodeURIComponent(ticker)}/prices?from=${encodeURIComponent(firstDate)}`,
+            { headers: await authHeaders() },
           );
           if (!benchmarkResponse.ok) {
             benchmarkPrices.set(ticker, []);
