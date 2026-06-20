@@ -208,6 +208,13 @@ export function SpendingRhythm({ categoryNames, monthDate, refreshKey = 0 }: Pro
     void load();
   }, [load, refreshKey]);
 
+  // Clear a selected day when the viewed month changes, so the day panel can never show a
+  // day from a prior month. The panel is modal today (blocks month nav while open), so this
+  // is a defensive invariant rather than a reachable bug.
+  useEffect(() => {
+    setSelectedDate(null);
+  }, [monthStart]);
+
   const model = useMemo(
     () => buildMonthHeatmap(txns, year, month0, today),
     [txns, year, month0, today],

@@ -77,6 +77,12 @@ describe("quietestStretch", () => {
     const early = buildMonthHeatmap([], 2026, 5, "2026-06-01");
     expect(quietestStretch(early.cells, 2)).toBeNull();
   });
+
+  it("returns null for a non-positive window instead of dereferencing an empty slice", () => {
+    // Regression (CodeRabbit): windowDays <= 0 produced empty windows → win[0] crash.
+    expect(quietestStretch(model.cells, 0)).toBeNull();
+    expect(quietestStretch(model.cells, -1)).toBeNull();
+  });
 });
 
 describe("projectedTotal", () => {

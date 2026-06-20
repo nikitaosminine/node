@@ -55,6 +55,10 @@ export function ExpenseNodeSection({
         .lte("posted_at", monthEnd),
       supabase.from("expense_income").select("amount").eq("month", monthStart).maybeSingle(),
     ]);
+    // A failed load must not overwrite good data with a false "all clear" insight — bail
+    // without mutating state if either query errored. (Unset income is data:null via
+    // maybeSingle(), not an error, so a user who hasn't set income won't trip this.)
+    if (txnRes.error || incomeRes.error) return;
     setTxns(
       (txnRes.data ?? []).map((r) => ({
         id: r.id,

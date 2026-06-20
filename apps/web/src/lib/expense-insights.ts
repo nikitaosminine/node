@@ -97,6 +97,7 @@ export interface QuietestStretch {
 
 /** The consecutive elapsed-day window of `windowDays` with the least total spend. */
 export function quietestStretch(cells: HeatCell[], windowDays = 2): QuietestStretch | null {
+  if (windowDays <= 0) return null; // a non-positive window has no meaningful stretch
   const days = cells.filter(
     (c): c is HeatCell & { date: string } => !c.isPadding && !c.isFuture && c.date != null,
   );
