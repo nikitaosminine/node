@@ -93,11 +93,15 @@ export function CsvImportExpenses({ open, onOpenChange, userId, onImported }: Pr
 
   useEffect(() => {
     if (!open) return;
+    setCategories([]);
     supabase
       .from("expense_categories")
       .select("id, display_name, pfc_primary")
       .order("display_name", { ascending: true })
-      .then(({ data }) => setCategories((data as CategoryOption[]) ?? []));
+      .then(
+        ({ data, error }) => setCategories(error ? [] : ((data as CategoryOption[]) ?? [])),
+        () => setCategories([]),
+      );
   }, [open]);
 
   const categoryIdByPrimary = categories.reduce<Record<string, string>>((acc, c) => {

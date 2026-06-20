@@ -3,6 +3,7 @@ import {
   parseAmount,
   monthOf,
   externalId,
+  isValidIsoDate,
   coercePreviewRow,
   buildTransactionInserts,
   aggregateIncomeByMonth,
@@ -38,6 +39,16 @@ describe("parseAmount", () => {
     expect(parseAmount("-12,50")).toBe(12.5);
     expect(parseAmount(42)).toBe(42);
     expect(parseAmount("not a number")).toBe(0);
+  });
+});
+
+describe("isValidIsoDate", () => {
+  it("accepts real dates and rejects impossible ones", () => {
+    expect(isValidIsoDate("2026-06-10")).toBe(true);
+    expect(isValidIsoDate("2026-13-40")).toBe(false); // month 13, day 40
+    expect(isValidIsoDate("2026-02-31")).toBe(false); // Feb 31st
+    expect(isValidIsoDate("2026-6-1")).toBe(false); // not zero-padded
+    expect(isValidIsoDate("nope")).toBe(false);
   });
 });
 
@@ -108,6 +119,8 @@ describe("buildTransactionInserts", () => {
       review({ merchant_name: "Salary", kind: "income", category_id: "cat-income", amount: 3000 }),
       review({ merchant_name: "Excluded", include: false }),
       review({ merchant_name: "BadDate", posted_at: "nope" }),
+      review({ merchant_name: "ImpossibleMonth", posted_at: "2026-13-40" }),
+      review({ merchant_name: "Feb31", posted_at: "2026-02-31" }),
       review({ merchant_name: "ZeroAmt", amount: 0 }),
     ];
     const inserts = buildTransactionInserts(rows, "u1", "EUR");
@@ -133,6 +146,7 @@ describe("aggregateIncomeByMonth", () => {
       review({ kind: "income", amount: 200, posted_at: "2026-06-02" }),
       review({ kind: "income", amount: 3000, posted_at: "2026-05-25" }),
       review({ kind: "income", amount: 999, posted_at: "2026-06-25", include: false }),
+      review({ kind: "income", amount: 500, posted_at: "2026-02-31" }), // impossible — excluded
       review({ kind: "spend", amount: 50 }),
     ];
     const income = aggregateIncomeByMonth(rows, "u1", "EUR");

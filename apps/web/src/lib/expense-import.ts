@@ -64,6 +64,17 @@ export interface IncomeUpsert {
 
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
 
+/**
+ * True only for a real calendar date in YYYY-MM-DD form. The regex alone passes impossible
+ * dates (2026-13-40, 2026-02-31) that would fail the Postgres insert and abort the whole
+ * import; the round-trip check rejects them up front.
+ */
+export function isValidIsoDate(value: string): boolean {
+  if (!ISO_DATE.test(value)) return false;
+  const date = new Date(`${value}T00:00:00Z`);
+  return !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === value;
+}
+
 /** Parse a flexible amount string ("€1.234,56", "1,234.56", "-12.50") into a positive number. */
 export function parseAmount(raw: string | number): number {
   if (typeof raw === "number") return Number.isFinite(raw) ? Math.abs(raw) : 0;
@@ -84,7 +95,7 @@ export function parseAmount(raw: string | number): number {
 
 /** First day of the month for an ISO date, as YYYY-MM-01. */
 export function monthOf(isoDate: string): string {
-  return ISO_DATE.test(isoDate) ? `${isoDate.slice(0, 7)}-01` : isoDate;
+  return isValidIsoDate(isoDate) ? `${isoDate.slice(0, 7)}-01` : isoDate;
 }
 
 /** Dedup key: only the bank's own reference dedups; blank/whitespace → null (no dedup). */
@@ -128,7 +139,7 @@ export function buildTransactionInserts(
   baseCurrency: string,
 ): ExpenseTransactionInsert[] {
   return rows
-    .filter((r) => r.include && r.kind === "spend" && r.amount > 0 && ISO_DATE.test(r.posted_at))
+    .filter((r) => r.include && r.kind === "spend" && r.amount > 0 && isValidIsoDate(r.posted_at))
     .map((r) => ({
       user_id: userId,
       posted_at: r.posted_at,
@@ -151,7 +162,8 @@ export function aggregateIncomeByMonth(
 ): IncomeUpsert[] {
   const byMonth = new Map<string, number>();
   for (const r of rows) {
-    if (!r.include || r.kind !== "income" || r.amount <= 0 || !ISO_DATE.test(r.posted_at)) continue;
+    if (!r.include || r.kind !== "income" || r.amount <= 0 || !isValidIsoDate(r.posted_at))
+      continue;
     const month = monthOf(r.posted_at);
     byMonth.set(month, (byMonth.get(month) ?? 0) + r.amount);
   }

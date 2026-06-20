@@ -4087,6 +4087,9 @@ export default {
         csv.slice(0, 100000),
       ].join("\n");
 
+      // Bound the LLM call so a hung Grok request can't hold the Worker open indefinitely.
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 60000);
       try {
         const res = await fetch(`${getGrokBaseUrl(env)}/chat/completions`, {
           method: "POST",
@@ -4100,6 +4103,7 @@ export default {
             response_format: { type: "json_object" },
             max_tokens: 32000,
           }),
+          signal: controller.signal,
         });
         if (!res.ok) {
           const text = await res.text();
@@ -4129,7 +4133,15 @@ export default {
         }
         return json(parsed);
       } catch (error) {
-        return json({ error: error instanceof Error ? error.message : "Preview failed" }, 500);
+        const message =
+          error instanceof Error && error.name === "AbortError"
+            ? "Normalization timed out"
+            : error instanceof Error
+              ? error.message
+              : "Preview failed";
+        return json({ error: message }, 500);
+      } finally {
+        clearTimeout(timeout);
       }
     }
 

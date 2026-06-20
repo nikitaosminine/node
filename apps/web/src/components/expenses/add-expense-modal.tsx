@@ -82,6 +82,7 @@ export function AddExpenseModal({
   useEffect(() => {
     if (!open) return;
     setCategoriesError(false);
+    setCategories([]);
     supabase
       .from("expense_categories")
       .select("id, display_name, pfc_primary, is_fixed_default")
@@ -89,6 +90,7 @@ export function AddExpenseModal({
       .then(({ data, error }) => {
         if (error) {
           setCategoriesError(true);
+          setCategories([]);
           return;
         }
         setCategories((data ?? []).filter((c) => !NON_SPEND_PRIMARIES.has(c.pfc_primary)));
