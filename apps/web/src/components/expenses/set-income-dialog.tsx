@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { format } from "date-fns";
 import { toast } from "sonner";
 import { supabase } from "@/integrations/supabase/client";
@@ -39,6 +39,13 @@ export function SetIncomeDialog({ open, onOpenChange, userId, defaultMonth, onSa
     setAmount("");
     setLoading(false);
   };
+
+  // Re-sync the month field to the caller's month each time the dialog opens. The parent's
+  // viewed month can change (page-wide month nav) while this dialog sits mounted-but-closed,
+  // and useState only seeds `month` once — without this, income would save to a stale month.
+  useEffect(() => {
+    if (open) setMonth(defaultMonth ?? format(new Date(), "yyyy-MM"));
+  }, [open, defaultMonth]);
 
   const handleSubmit = async () => {
     const amountValue = Number(amount);
