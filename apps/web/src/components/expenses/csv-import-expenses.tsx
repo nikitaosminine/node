@@ -164,16 +164,23 @@ export function CsvImportExpenses({ open, onOpenChange, userId, onImported }: Pr
 
       // Dedup against already-imported rows that carry a bank reference (external_id).
       const refs = inserts.map((r) => r.external_id).filter((r): r is string => r != null);
-      let existing = new Set<string>();
+      const seen = new Set<string>();
       if (refs.length > 0) {
         const { data } = await supabase
           .from("expense_transactions")
           .select("external_id")
           .eq("source", "csv")
           .in("external_id", refs);
-        existing = new Set((data ?? []).map((d) => d.external_id as string));
+        for (const d of data ?? []) seen.add(d.external_id as string);
       }
-      const toInsert = inserts.filter((r) => r.external_id == null || !existing.has(r.external_id));
+      // Dedup against the DB AND within this batch: a CSV (or the LLM) can repeat a
+      // reference, and the partial-unique index would otherwise abort the whole insert.
+      const toInsert = inserts.filter((r) => {
+        if (r.external_id == null) return true;
+        if (seen.has(r.external_id)) return false;
+        seen.add(r.external_id);
+        return true;
+      });
       const skipped = inserts.length - toInsert.length;
 
       if (toInsert.length > 0) {
