@@ -105,6 +105,10 @@ no-spend cell, visually distinct from a low-but-nonzero `--heat-1`. Used in
 | `--heat-3`    | `oklch(0.8 0.13 56)`      | `oklch(0.47 0.145 270)`   |
 | `--heat-4`    | `oklch(0.72 0.16 48)`     | `oklch(0.57 0.17 267)`    |
 | `--heat-5`    | `oklch(0.63 0.185 42)`    | `oklch(0.67 0.19 265)`    |
+| `--heat-foreground` | `oklch(1 0 0)`      | `oklch(1 0 0)`            |
+
+Cell text is `--foreground` on `--heat-1..3` and `--heat-foreground` (white, both modes)
+on the saturated `--heat-4/5` steps. Never hardcode `#fff` — use the token.
 
 ### Chart series (`--chart-1..5`)
 

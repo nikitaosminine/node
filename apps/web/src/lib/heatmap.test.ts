@@ -69,6 +69,23 @@ describe("buildMonthHeatmap", () => {
     expect(m.dailyAverage).toBeCloseTo(10, 5); // 190 / 19 elapsed days
   });
 
+  it("excludes future-dated transactions from the so-far stats", () => {
+    const m = buildMonthHeatmap(
+      [
+        txn({ posted_at: "2026-06-10", amount: 50 }),
+        txn({ posted_at: "2026-06-25", amount: 999 }), // future discretionary → ignored
+        txn({ posted_at: "2026-06-28", amount: 800, is_recurring: true }), // future fixed → ignored
+      ],
+      Y,
+      M,
+      "2026-06-19",
+    );
+    expect(m.discretionaryTotal).toBe(50);
+    expect(m.committed).toBe(0);
+    expect(m.hottest).toEqual({ date: "2026-06-10", amount: 50 });
+    expect(m.cells.find((c) => c.date === "2026-06-25")!.amount).toBe(0);
+  });
+
   it("handles an empty month without dividing by zero", () => {
     const m = buildMonthHeatmap([], Y, M, "2026-06-19");
     expect(m.discretionaryTotal).toBe(0);

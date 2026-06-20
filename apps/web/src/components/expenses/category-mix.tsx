@@ -22,14 +22,21 @@ export function CategoryMix({ categoryNames, refreshKey = 0 }: Props) {
   const monthEnd = format(endOfMonth(now), "yyyy-MM-dd");
 
   const [txns, setTxns] = useState<MixTxn[]>([]);
+  const [error, setError] = useState(false);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
 
   const load = useCallback(async () => {
-    const { data } = await supabase
+    const { data, error: queryError } = await supabase
       .from("expense_transactions")
       .select("merchant_name, amount, is_recurring, category_id")
       .gte("posted_at", monthStart)
       .lte("posted_at", monthEnd);
+    // A failed query must not collapse into the success-looking "no spending" empty state.
+    if (queryError) {
+      setError(true);
+      return;
+    }
+    setError(false);
     setTxns(
       (data ?? []).map((r) => ({
         merchant_name: r.merchant_name,
@@ -68,7 +75,11 @@ export function CategoryMix({ categoryNames, refreshKey = 0 }: Props) {
         </span>
       </div>
 
-      {mix.rows.length === 0 ? (
+      {error ? (
+        <p className="py-8 text-center text-sm text-foreground-muted">
+          Couldn&apos;t load your category mix.
+        </p>
+      ) : mix.rows.length === 0 ? (
         <p className="py-8 text-center text-sm text-foreground-muted">
           No discretionary spending logged this month.
         </p>

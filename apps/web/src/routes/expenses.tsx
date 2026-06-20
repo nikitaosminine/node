@@ -64,7 +64,11 @@ export default function Expenses() {
   // (e.g. from a re-created auth context value) must not re-trigger the load.
   const userId = user?.id ?? null;
   useEffect(() => {
-    if (!authLoading && userId) void load();
+    if (authLoading) return;
+    if (userId) void load();
+    // Auth resolved with no user (e.g. signed out): clear the spinner instead of
+    // leaving the page stuck in its initial loading state.
+    else setLoading(false);
   }, [authLoading, userId, load]);
 
   const isEmpty = !loading && !error && rows.length === 0;

@@ -23,7 +23,7 @@ function cellBackground(cell: HeatCell): string {
 function cellColor(cell: HeatCell): string {
   if (cell.isFuture || cell.intensity === 0) return "var(--foreground-muted)";
   // White text on the two most saturated steps keeps AA contrast; dark elsewhere.
-  return cell.intensity >= 4 ? "#fff" : "var(--foreground)";
+  return cell.intensity >= 4 ? "var(--heat-foreground)" : "var(--foreground)";
 }
 
 export function SpendingHeatmap({ categoryNames, refreshKey = 0 }: Props) {
@@ -36,14 +36,21 @@ export function SpendingHeatmap({ categoryNames, refreshKey = 0 }: Props) {
   const monthEnd = format(new Date(year, month0 + 1, 0), "yyyy-MM-dd");
 
   const [txns, setTxns] = useState<HeatmapTxn[]>([]);
+  const [error, setError] = useState(false);
   const [selectedDate, setSelectedDate] = useState<string | null>(null);
 
   const load = useCallback(async () => {
-    const { data } = await supabase
+    const { data, error: queryError } = await supabase
       .from("expense_transactions")
       .select("id, posted_at, merchant_name, amount, is_recurring, category_id")
       .gte("posted_at", monthStart)
       .lte("posted_at", monthEnd);
+    // Don't let a failed query masquerade as an empty (no-spend) month.
+    if (queryError) {
+      setError(true);
+      return;
+    }
+    setError(false);
     setTxns(
       (data ?? []).map((r) => ({
         id: r.id,
@@ -75,6 +82,17 @@ export function SpendingHeatmap({ categoryNames, refreshKey = 0 }: Props) {
   }, [model, currency]);
 
   const dayTxns = selectedDate ? txns.filter((t) => t.posted_at === selectedDate) : [];
+
+  if (error) {
+    return (
+      <div className="rounded-xl border border-hairline bg-surface px-5 py-4">
+        <h2 className="mb-1 text-sm font-semibold">Spending rhythm</h2>
+        <p className="py-8 text-center text-sm text-foreground-muted">
+          Couldn&apos;t load your spending rhythm.
+        </p>
+      </div>
+    );
+  }
 
   return (
     <div className="rounded-xl border border-hairline bg-surface px-5 py-4">

@@ -18,9 +18,10 @@ const NAMES = { food: "Food & drink", transport: "Transport" };
 const NONE = { search: "", range: { from: null, to: null }, categoryNames: NAMES };
 
 describe("presetRange", () => {
-  it("returns an inclusive range ending today", () => {
-    expect(presetRange("30D", "2026-06-20")).toEqual({ from: "2026-05-21", to: "2026-06-20" });
-    expect(presetRange("90D", "2026-06-20")).toEqual({ from: "2026-03-22", to: "2026-06-20" });
+  it("returns an inclusive range ending today (today plus N-1 prior days)", () => {
+    // 30 calendar days inclusive of today → today and the 29 days before it.
+    expect(presetRange("30D", "2026-06-20")).toEqual({ from: "2026-05-22", to: "2026-06-20" });
+    expect(presetRange("90D", "2026-06-20")).toEqual({ from: "2026-03-23", to: "2026-06-20" });
   });
 });
 

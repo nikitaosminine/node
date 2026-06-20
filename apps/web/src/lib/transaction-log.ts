@@ -22,10 +22,11 @@ export interface LogRange {
   to: string | null; // YYYY-MM-DD, inclusive
 }
 
-/** Quick-filter range ending today (inclusive), going back 30 or 90 days. */
+/** Quick-filter range ending today (inclusive), spanning 30 or 90 calendar days. */
 export function presetRange(preset: "30D" | "90D", todayIso: string): LogRange {
   const d = new Date(`${todayIso}T00:00:00Z`);
-  d.setUTCDate(d.getUTCDate() - (preset === "30D" ? 30 : 90));
+  // Inclusive of today: a 30-day window is today plus the 29 prior days.
+  d.setUTCDate(d.getUTCDate() - (preset === "30D" ? 29 : 89));
   return { from: d.toISOString().slice(0, 10), to: todayIso };
 }
 

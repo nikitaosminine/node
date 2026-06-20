@@ -62,6 +62,9 @@ export function buildMonthHeatmap(
   let committed = 0;
   for (const t of txns) {
     if (!ISO_DATE.test(t.posted_at) || t.posted_at.slice(0, 7) !== monthPrefix) continue;
+    // Stats are "so far" — a future-dated row must not inflate the committed figure, the
+    // daily average, the hottest day, or the intensity scale (future cells render empty).
+    if (t.posted_at > today) continue;
     if (t.is_recurring) {
       committed += t.amount;
       continue;
