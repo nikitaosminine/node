@@ -33,7 +33,7 @@ describe("AddExpenseModal", () => {
 
   it("blocks submit and warns when the merchant is empty", async () => {
     renderModal();
-    fireEvent.change(screen.getByLabelText("Amount *"), { target: { value: "10" } });
+    fireEvent.change(screen.getByLabelText("Amount (EUR) *"), { target: { value: "10" } });
     fireEvent.click(screen.getByRole("button", { name: "Add expense" }));
 
     await waitFor(() => expect(toastMock.error).toHaveBeenCalledWith("Merchant is required"));
@@ -43,7 +43,7 @@ describe("AddExpenseModal", () => {
   it("blocks submit when the amount is not a positive number", async () => {
     renderModal();
     fireEvent.change(screen.getByLabelText("Merchant *"), { target: { value: "Tesco" } });
-    fireEvent.change(screen.getByLabelText("Amount *"), { target: { value: "0" } });
+    fireEvent.change(screen.getByLabelText("Amount (EUR) *"), { target: { value: "0" } });
     fireEvent.click(screen.getByRole("button", { name: "Add expense" }));
 
     await waitFor(() => expect(toastMock.error).toHaveBeenCalledWith("Enter a valid amount"));
@@ -54,7 +54,7 @@ describe("AddExpenseModal", () => {
     const onAdded = vi.fn();
     renderModal(onAdded);
     fireEvent.change(screen.getByLabelText("Merchant *"), { target: { value: "Tesco" } });
-    fireEvent.change(screen.getByLabelText("Amount *"), { target: { value: "12.50" } });
+    fireEvent.change(screen.getByLabelText("Amount (EUR) *"), { target: { value: "12.50" } });
     fireEvent.click(screen.getByRole("button", { name: "Add expense" }));
 
     await waitFor(() => expect(insertMock).toHaveBeenCalledTimes(1));

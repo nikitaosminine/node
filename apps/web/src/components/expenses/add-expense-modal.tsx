@@ -23,7 +23,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { TextShimmer } from "@/components/loading-ui/text-shimmer";
-import { CURRENCY_OPTIONS, DEFAULT_PORTFOLIO_CURRENCY } from "@/lib/currency";
+import { DEFAULT_PORTFOLIO_CURRENCY } from "@/lib/currency";
 
 interface Category {
   id: string;
@@ -56,7 +56,6 @@ export function AddExpenseModal({
 }: Props) {
   const [merchant, setMerchant] = useState("");
   const [amount, setAmount] = useState("");
-  const [currency, setCurrency] = useState(defaultCurrency);
   const [date, setDate] = useState(todayIso());
   const [categoryId, setCategoryId] = useState<string>("");
   const [isRecurring, setIsRecurring] = useState(false);
@@ -69,7 +68,6 @@ export function AddExpenseModal({
   const reset = () => {
     setMerchant("");
     setAmount("");
-    setCurrency(defaultCurrency);
     setDate(todayIso());
     setCategoryId("");
     setIsRecurring(false);
@@ -133,7 +131,8 @@ export function AddExpenseModal({
         posted_at: date,
         merchant_name: merchant.trim(),
         amount: amountValue,
-        currency,
+        // Single base currency for v1 (eng-review A2) — no per-expense currency picker.
+        currency: defaultCurrency,
         category_id: categoryId || null,
         is_recurring: isRecurring,
         source: "manual",
@@ -172,39 +171,19 @@ export function AddExpenseModal({
             />
           </div>
 
-          <div className="grid grid-cols-2 gap-3">
-            <div className="space-y-1.5">
-              <Label htmlFor="expense-amount" className="text-xs">
-                Amount *
-              </Label>
-              <Input
-                id="expense-amount"
-                type="number"
-                min="0"
-                step="0.01"
-                value={amount}
-                onChange={(event) => setAmount(event.target.value)}
-                placeholder="0.00"
-              />
-            </div>
-
-            <div className="space-y-1.5">
-              <Label htmlFor="expense-currency" className="text-xs">
-                Currency
-              </Label>
-              <Select value={currency} onValueChange={setCurrency}>
-                <SelectTrigger id="expense-currency">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {CURRENCY_OPTIONS.map((option) => (
-                    <SelectItem key={option.code} value={option.code}>
-                      {option.code}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="expense-amount" className="text-xs">
+              Amount ({defaultCurrency}) *
+            </Label>
+            <Input
+              id="expense-amount"
+              type="number"
+              min="0"
+              step="0.01"
+              value={amount}
+              onChange={(event) => setAmount(event.target.value)}
+              placeholder="0.00"
+            />
           </div>
 
           <div className="grid grid-cols-2 gap-3">
