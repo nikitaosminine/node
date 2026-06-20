@@ -41,6 +41,8 @@ export interface Env {
   GROK_SUB_API_KEY?: string;
   GROK_NORMALIZATION_API_KEY?: string;
   GROK_WEB_SEARCH_MODEL?: string;
+  GROK_NORMALIZATION_MODEL?: string;
+  GROK_NORMALIZATION_EFFORT?: string;
   GROK_API_BASE_URL?: string;
   MAIN_AGENT_SYSTEM_PROMPT?: string;
   SUB_AGENT_SYSTEM_PROMPT?: string;
@@ -4083,6 +4085,21 @@ export default {
         "Rules: do not invent missing data; skip empty/summary/balance rows. Keep amounts positive.",
         'Return only JSON: { "columns_detected": string[], "rows": [ { posted_at, merchant_name, amount, currency, kind, is_recurring, pfc_primary, external_ref, confidence } ], "errors": string[] }',
         "",
+        "Disambiguation rules:",
+        "- Payment processors (SQ *, SQUARE, PAYPAL *, SP *, TST*, IZ *, ZTL*) are NOT the merchant: strip the prefix and categorize by the underlying name that follows.",
+        "- is_recurring=true ONLY for charges that clearly repeat on a schedule: rent, utilities, insurance, loan/mortgage repayments, named subscriptions (Netflix, Spotify, gym, mobile plans), and salary. A one-off purchase at a recurring-looking merchant stays false.",
+        "- Account transfers and credit-card repayments → TRANSFER_OUT (money out) or TRANSFER_IN (money in). Salary and refunds → kind=income.",
+        "- Lower confidence (≤0.4) when the descriptor is cryptic or the category is a genuine guess.",
+        "Examples (raw descriptor → key fields):",
+        '  "TFL TRAVEL CH LONDON GB" → merchant_name="Transport for London", kind="spend", is_recurring=false, pfc_primary="TRANSPORTATION"',
+        '  "UBER *EATS help.uber.com" → merchant_name="Uber Eats", kind="spend", is_recurring=false, pfc_primary="FOOD_AND_DRINK"',
+        '  "SQ *BLUE BOTTLE COFFEE" → merchant_name="Blue Bottle Coffee", kind="spend", is_recurring=false, pfc_primary="FOOD_AND_DRINK"',
+        '  "PAYPAL *STEAMGAMES 4029357" → merchant_name="Steam Games", kind="spend", is_recurring=false, pfc_primary="ENTERTAINMENT"',
+        '  "NETFLIX.COM 8662232" → merchant_name="Netflix", kind="spend", is_recurring=true, pfc_primary="ENTERTAINMENT"',
+        '  "THAMES WATER DD" → merchant_name="Thames Water", kind="spend", is_recurring=true, pfc_primary="RENT_AND_UTILITIES"',
+        '  "ACME LTD SALARY JUN" → merchant_name="Acme Ltd", kind="income", is_recurring=true, pfc_primary="INCOME"',
+        '  "MONTHLY ACCOUNT FEE" → merchant_name="Account fee", kind="spend", is_recurring=true, pfc_primary="BANK_FEES"',
+        "",
         "CSV:",
         csv.slice(0, 100000),
       ].join("\n");
@@ -4098,7 +4115,11 @@ export default {
             "Content-Type": "application/json",
           },
           body: JSON.stringify({
-            model: env.GROK_WEB_SEARCH_MODEL || "grok-4-1-fast-non-reasoning",
+            // Dedicated model for expense normalization (decoupled from GROK_WEB_SEARCH_MODEL).
+            // grok-4.3 reasons over cryptic descriptors for better category/recurring
+            // inference; reasoning_effort "low" keeps the bulk multi-row call fast.
+            model: env.GROK_NORMALIZATION_MODEL || "grok-4.3",
+            reasoning_effort: env.GROK_NORMALIZATION_EFFORT || "low",
             messages: [{ role: "user", content: prompt }],
             response_format: { type: "json_object" },
             max_tokens: 32000,
