@@ -13,6 +13,7 @@ import { AllocationStrip } from "@/components/expenses/allocation-strip";
 import { SpendingHeatmap } from "@/components/expenses/spending-heatmap";
 import { CategoryMix } from "@/components/expenses/category-mix";
 import { TransactionLog } from "@/components/expenses/transaction-log";
+import { ExpenseRecapTeaser } from "@/components/expenses/expense-recap-teaser";
 
 interface ExpenseRow {
   id: string;
@@ -76,7 +77,7 @@ export default function Expenses() {
   const monthLabel = useMemo(() => format(new Date(), "MMMM yyyy"), []);
 
   return (
-    <div className="mx-auto flex w-full max-w-4xl flex-col gap-5 px-6 py-6 pl-14">
+    <div className="mx-auto flex w-full max-w-[1500px] flex-col gap-6 px-6 pb-8 pt-4">
       {/* Topbar */}
       <div className="flex items-center justify-between">
         <div>
@@ -118,20 +119,27 @@ export default function Expenses() {
       ) : (
         user && (
           <>
-            {/* Hero: allocation strip (1A-105) + spending heatmap (1A-103). */}
+            {/* Allocation strip (1A-105) — full-width context band. */}
             <AllocationStrip userId={user.id} refreshKey={dataVersion} />
-            <SpendingHeatmap categoryNames={categoryNames} refreshKey={dataVersion} />
 
-            {/* Bottom row: category mix summary (1A-106, left) + the raw, searchable
-                transaction log (1A-104, right). Reflows to one column below lg. */}
-            <div className="grid items-start gap-5 lg:grid-cols-2">
+            {/* Hero row: spending heatmap (1A-103, 2/3) + category mix (1A-106, 1/3).
+                Reflows to one column below lg. */}
+            <div className="grid items-start gap-6 lg:grid-cols-3">
+              <div className="lg:col-span-2">
+                <SpendingHeatmap categoryNames={categoryNames} refreshKey={dataVersion} />
+              </div>
               <CategoryMix
                 userId={user.id}
                 categoryNames={categoryNames}
                 refreshKey={dataVersion}
               />
-              <TransactionLog rows={rows} categoryNames={categoryNames} />
             </div>
+
+            {/* The raw, searchable transaction log (1A-104) — full width. */}
+            <TransactionLog rows={rows} categoryNames={categoryNames} />
+
+            {/* Recap teaser (1A-110) — plain-mono placeholder, agent not wired. */}
+            <ExpenseRecapTeaser />
           </>
         )
       )}
