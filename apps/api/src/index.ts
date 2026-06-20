@@ -4106,7 +4106,7 @@ export default {
 
       // Bound the LLM call so a hung Grok request can't hold the Worker open indefinitely.
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 60000);
+      const timeout = setTimeout(() => controller.abort(), 90000);
       try {
         const res = await fetch(`${getGrokBaseUrl(env)}/chat/completions`, {
           method: "POST",
@@ -4116,10 +4116,11 @@ export default {
           },
           body: JSON.stringify({
             // Dedicated model for expense normalization (decoupled from GROK_WEB_SEARCH_MODEL).
-            // grok-4.3 reasons over cryptic descriptors for better category/recurring
-            // inference; reasoning_effort "low" keeps the bulk multi-row call fast.
+            // grok-4.3 + the few-shot prompt does the categorization lift; reasoning_effort
+            // defaults to "none" because reasoning over a whole CSV in one call blows the
+            // timeout (see GROK_NORMALIZATION_EFFORT to dial it up if you chunk the input).
             model: env.GROK_NORMALIZATION_MODEL || "grok-4.3",
-            reasoning_effort: env.GROK_NORMALIZATION_EFFORT || "low",
+            reasoning_effort: env.GROK_NORMALIZATION_EFFORT || "none",
             messages: [{ role: "user", content: prompt }],
             response_format: { type: "json_object" },
             max_tokens: 32000,
