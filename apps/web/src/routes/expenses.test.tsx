@@ -29,19 +29,23 @@ type Row = {
   category_id: string | null;
 };
 
+// Chainable query-builder stub: every method returns the same chain, and the chain is
+// awaitable. Tolerates any query shape (.order().limit(), .gte().lte(), .eq().maybeSingle())
+// so the list AND the allocation strip can both read from one mock.
+function chain(result: { data: unknown; error: unknown }) {
+  const c: Record<string, unknown> = {};
+  for (const m of ["select", "order", "limit", "gte", "lte", "eq", "in"]) c[m] = () => c;
+  c.maybeSingle = () => Promise.resolve(result);
+  c.then = (resolve: (v: unknown) => unknown, reject?: (e: unknown) => unknown) =>
+    Promise.resolve(result).then(resolve, reject);
+  return c;
+}
+
 function mockLoad(txns: Row[] | null, txnError: { message: string } | null = null) {
   fromMock.mockImplementation((table: string) => {
-    if (table === "expense_transactions") {
-      return {
-        select: () => ({
-          order: () => ({
-            limit: () => Promise.resolve({ data: txns, error: txnError }),
-          }),
-        }),
-      };
-    }
-    // expense_categories
-    return { select: () => Promise.resolve({ data: [], error: null }) };
+    if (table === "expense_transactions") return chain({ data: txns, error: txnError });
+    if (table === "expense_income") return chain({ data: null, error: null });
+    return chain({ data: [], error: null }); // expense_categories
   });
 }
 

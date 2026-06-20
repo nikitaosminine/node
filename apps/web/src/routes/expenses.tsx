@@ -9,6 +9,7 @@ import { Button } from "@/components/ui/button";
 import { AddExpenseModal } from "@/components/expenses/add-expense-modal";
 import { CsvImportExpenses } from "@/components/expenses/csv-import-expenses";
 import { ExpensesEmptyState } from "@/components/expenses/expenses-empty-state";
+import { AllocationStrip } from "@/components/expenses/allocation-strip";
 import { formatCurrency } from "@/lib/currency";
 
 interface ExpenseRow {
@@ -29,6 +30,7 @@ export default function Expenses() {
   const [error, setError] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
+  const [dataVersion, setDataVersion] = useState(0);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -52,6 +54,8 @@ export default function Expenses() {
       Object.fromEntries((catRes.data ?? []).map((c) => [c.id, c.display_name] as const)),
     );
     setLoading(false);
+    // Signal dependent widgets (allocation strip) to refetch their own month-scoped data.
+    setDataVersion((v) => v + 1);
   }, []);
 
   // Depend on the user id, not the user object — a new object identity each render
@@ -85,10 +89,13 @@ export default function Expenses() {
         </div>
       </div>
 
+      {/* Allocation strip (1A-105) — top-of-screen context band, once there's data. */}
+      {user && rows.length > 0 && <AllocationStrip userId={user.id} refreshKey={dataVersion} />}
+
       {/* Foundation note — only once there's data; the onboarding panel covers the empty case. */}
       {rows.length > 0 && (
         <p className="text-xs text-foreground-muted">
-          The spending heatmap, category mix, and allocation strip build on this data next.
+          The spending heatmap, category mix, and transaction log build on this data next.
         </p>
       )}
 
