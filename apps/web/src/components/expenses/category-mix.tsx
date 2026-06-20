@@ -5,46 +5,60 @@ import { endOfMonth, format, startOfMonth } from "date-fns";
 import { ChevronRight, Sparkles } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
+import { CategoryCapControl } from "@/components/expenses/category-cap-control";
 import { buildCategoryMix, type MixRow, type MixTxn } from "@/lib/category-mix";
+import { budgetProgress } from "@/lib/budgets";
 import { DEFAULT_PORTFOLIO_CURRENCY, formatCurrency } from "@/lib/currency";
 
 interface Props {
+  userId: string;
   categoryNames: Record<string, string>;
   refreshKey?: number;
 }
 
 // Ranked spending composition (Linear 1A-106): discretionary only, no deltas/trend —
-// interpretation is the Node layer's job. Each row drills into its merchants.
-export function CategoryMix({ categoryNames, refreshKey = 0 }: Props) {
+// interpretation is the Node layer's job. Each row drills into its merchants. Per-category
+// budget caps (1A-111) are an opt-in layer — surfaced only on rows where a cap is set.
+export function CategoryMix({ userId, categoryNames, refreshKey = 0 }: Props) {
   const currency = DEFAULT_PORTFOLIO_CURRENCY;
   const now = useMemo(() => new Date(), []);
   const monthStart = format(startOfMonth(now), "yyyy-MM-dd");
   const monthEnd = format(endOfMonth(now), "yyyy-MM-dd");
 
   const [txns, setTxns] = useState<MixTxn[]>([]);
+  const [caps, setCaps] = useState<Record<string, number>>({});
   const [error, setError] = useState(false);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
 
   const load = useCallback(async () => {
-    const { data, error: queryError } = await supabase
-      .from("expense_transactions")
-      .select("merchant_name, amount, is_recurring, category_id")
-      .gte("posted_at", monthStart)
-      .lte("posted_at", monthEnd);
-    // A failed query must not collapse into the success-looking "no spending" empty state.
-    if (queryError) {
+    const [txnRes, budgetRes] = await Promise.all([
+      supabase
+        .from("expense_transactions")
+        .select("merchant_name, amount, is_recurring, category_id")
+        .gte("posted_at", monthStart)
+        .lte("posted_at", monthEnd),
+      supabase.from("expense_budgets").select("category_id, amount").eq("period", "monthly"),
+    ]);
+    // A failed spend query must not collapse into the success-looking "no spending" empty
+    // state. Caps are optional — a budget-fetch failure just leaves the calm, capless default.
+    if (txnRes.error) {
       setError(true);
       return;
     }
     setError(false);
     setTxns(
-      (data ?? []).map((r) => ({
+      (txnRes.data ?? []).map((r) => ({
         merchant_name: r.merchant_name,
         amount: Number(r.amount),
         is_recurring: r.is_recurring,
         category_id: r.category_id,
       })),
     );
+    const capMap: Record<string, number> = {};
+    for (const b of budgetRes.data ?? []) {
+      if (b.category_id) capMap[b.category_id] = Number(b.amount);
+    }
+    setCaps(capMap);
   }, [monthStart, monthEnd]);
 
   useEffect(() => {
@@ -89,38 +103,60 @@ export function CategoryMix({ categoryNames, refreshKey = 0 }: Props) {
             const key = rowKey(row);
             const isOpen = expanded.has(key);
             const canDrill = row.merchants.length > 0;
+            const cap = row.categoryId ? (caps[row.categoryId] ?? null) : null;
+            const prog = cap != null ? budgetProgress(row.amount, cap) : null;
             return (
               <li key={key} className="border-b border-hairline last:border-b-0">
-                <button
-                  type="button"
-                  onClick={() => canDrill && toggle(key)}
-                  aria-expanded={canDrill ? isOpen : undefined}
-                  aria-label={`${row.name}: ${formatCurrency(row.amount, currency)}, ${row.sharePct}% of discretionary spending${canDrill ? `. ${isOpen ? "Hide" : "Show"} merchants.` : ""}`}
-                  className="group flex w-full items-center gap-3 py-2.5 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                >
-                  <ChevronRight
-                    aria-hidden
-                    className={`h-3.5 w-3.5 shrink-0 text-foreground-muted transition-transform ${
-                      isOpen ? "rotate-90" : ""
-                    } ${canDrill ? "" : "opacity-0"}`}
-                  />
-                  <div className="min-w-0 flex-1">
-                    <div className="mb-1.5 flex items-baseline justify-between gap-3">
-                      <span className="truncate text-sm font-medium">{row.name}</span>
-                      <span className="shrink-0 font-mono text-sm tabular-nums">
-                        {formatCurrency(row.amount, currency, { maximumFractionDigits: 0 })}
-                        <span className="ml-2 text-xs text-foreground-muted">{row.sharePct}%</span>
-                      </span>
+                <div className="group/row flex items-center gap-2 py-2.5">
+                  <button
+                    type="button"
+                    onClick={() => canDrill && toggle(key)}
+                    aria-expanded={canDrill ? isOpen : undefined}
+                    aria-label={`${row.name}: ${formatCurrency(row.amount, currency)}, ${row.sharePct}% of discretionary spending${canDrill ? `. ${isOpen ? "Hide" : "Show"} merchants.` : ""}`}
+                    className="flex min-w-0 flex-1 items-center gap-3 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  >
+                    <ChevronRight
+                      aria-hidden
+                      className={`h-3.5 w-3.5 shrink-0 text-foreground-muted transition-transform ${
+                        isOpen ? "rotate-90" : ""
+                      } ${canDrill ? "" : "opacity-0"}`}
+                    />
+                    <div className="min-w-0 flex-1">
+                      <div className="mb-1.5 flex items-baseline justify-between gap-3">
+                        <span className="truncate text-sm font-medium">{row.name}</span>
+                        <span className="shrink-0 font-mono text-sm tabular-nums">
+                          {formatCurrency(row.amount, currency, { maximumFractionDigits: 0 })}
+                          <span className="ml-2 text-xs text-foreground-muted">
+                            {row.sharePct}%
+                          </span>
+                        </span>
+                      </div>
+                      {/* No cap: flat neutral bar, length = share of the largest category.
+                          Capped (opt-in): the bar becomes spend-vs-cap progress, red over. */}
+                      <div className="h-1.5 w-full overflow-hidden rounded-full bg-surface-2">
+                        <div
+                          className={`h-full rounded-full ${prog?.isOver ? "bg-negative" : "bg-foreground-muted"}`}
+                          style={{
+                            width: `${Math.max(prog ? prog.ratio * 100 : row.widthPct, 2)}%`,
+                          }}
+                        />
+                      </div>
                     </div>
-                    {/* Single flat neutral bar — length encodes amount; color carries no meaning. */}
-                    <div className="h-1.5 w-full overflow-hidden rounded-full bg-surface-2">
-                      <div
-                        className="h-full rounded-full bg-foreground-muted"
-                        style={{ width: `${Math.max(row.widthPct, 2)}%` }}
-                      />
-                    </div>
-                  </div>
-                </button>
+                  </button>
+
+                  {/* Opt-in cap control — quiet "Set cap" until a cap exists, then a badge. */}
+                  {row.categoryId && (
+                    <CategoryCapControl
+                      userId={userId}
+                      categoryId={row.categoryId}
+                      categoryName={row.name}
+                      spent={row.amount}
+                      cap={cap}
+                      currency={currency}
+                      onChange={load}
+                    />
+                  )}
+                </div>
 
                 {isOpen && canDrill && (
                   <ul className="mb-2 ml-[1.625rem] flex flex-col gap-1.5 border-l border-hairline pl-3">

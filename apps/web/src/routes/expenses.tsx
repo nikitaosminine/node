@@ -125,7 +125,11 @@ export default function Expenses() {
             {/* Bottom row: category mix summary (1A-106, left) + the raw, searchable
                 transaction log (1A-104, right). Reflows to one column below lg. */}
             <div className="grid items-start gap-5 lg:grid-cols-2">
-              <CategoryMix categoryNames={categoryNames} refreshKey={dataVersion} />
+              <CategoryMix
+                userId={user.id}
+                categoryNames={categoryNames}
+                refreshKey={dataVersion}
+              />
               <TransactionLog rows={rows} categoryNames={categoryNames} />
             </div>
           </>
