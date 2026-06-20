@@ -4070,7 +4070,7 @@ export default {
       const csv = String(body.csv ?? "");
       if (!csv.trim()) return json({ error: "csv is required" }, 400);
 
-      const prompt = [
+      const instructions = [
         "You are a personal-finance data normalizer. Map each bank or card CSV row to this exact schema:",
         "posted_at: ISO date YYYY-MM-DD.",
         "merchant_name: cleaned merchant or payee name (strip card/ref noise).",
@@ -4100,71 +4100,125 @@ export default {
         '  "ACME LTD SALARY JUN" → merchant_name="Acme Ltd", kind="income", is_recurring=true, pfc_primary="INCOME"',
         '  "MONTHLY ACCOUNT FEE" → merchant_name="Account fee", kind="spend", is_recurring=true, pfc_primary="BANK_FEES"',
         "",
-        "CSV:",
-        csv.slice(0, 100000),
-      ].join("\n");
+        "The first CSV line below is the header (column names) — use it to read the columns but do NOT emit a row for it.",
+      ];
 
-      // Bound the LLM call so a hung Grok request can't hold the Worker open indefinitely.
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 90000);
-      try {
-        const res = await fetch(`${getGrokBaseUrl(env)}/chat/completions`, {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${env.GROK_NORMALIZATION_API_KEY}`,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            // Dedicated model for expense normalization (decoupled from GROK_WEB_SEARCH_MODEL).
-            // grok-4.3 + the few-shot prompt does the categorization lift; reasoning_effort
-            // defaults to "none" because reasoning over a whole CSV in one call blows the
-            // timeout (see GROK_NORMALIZATION_EFFORT to dial it up if you chunk the input).
-            model: env.GROK_NORMALIZATION_MODEL || "grok-4.3",
-            reasoning_effort: env.GROK_NORMALIZATION_EFFORT || "none",
-            messages: [{ role: "user", content: prompt }],
-            response_format: { type: "json_object" },
-            max_tokens: 32000,
-          }),
-          signal: controller.signal,
-        });
-        if (!res.ok) {
-          const text = await res.text();
-          return json({ error: `Normalization failed (${res.status}): ${text.slice(0, 300)}` }, 502);
-        }
-        const llmData = (await res.json()) as GrokChatResponse;
-        const content: string = llmData.choices?.[0]?.message?.content ?? "";
+      // A single LLM call over a large CSV is dominated by OUTPUT-token generation: hundreds
+      // of rows × ~9 fields is tens of thousands of tokens emitted sequentially, which blows
+      // any reasonable timeout no matter how trivial each row is. So split the rows into small
+      // batches and normalize them concurrently — wall-clock collapses to roughly one batch,
+      // and a slow/failed batch degrades to a skip-with-error instead of failing the import.
+      const allLines = csv.split(/\r?\n/).filter((line) => line.trim().length > 0);
+      const header = allLines[0] ?? "";
+      let dataLines = allLines.slice(1);
 
-        const stripped = content
-          .trim()
-          .replace(/^```json\s*/i, "")
-          .replace(/^```\s*/i, "")
-          .replace(/```\s*$/i, "")
-          .trim();
-
-        let parsed: Record<string, unknown>;
-        try {
-          parsed = JSON.parse(stripped) as Record<string, unknown>;
-        } catch {
-          const start = stripped.indexOf("{");
-          const end = stripped.lastIndexOf("}");
-          if (start >= 0 && end > start) {
-            parsed = JSON.parse(stripped.slice(start, end + 1)) as Record<string, unknown>;
-          } else {
-            throw new Error(`LLM returned unparseable content: ${stripped.slice(0, 300)}`);
-          }
-        }
-        return json(parsed);
-      } catch (error) {
-        const message =
-          error instanceof Error && error.name === "AbortError"
-            ? "Normalization timed out"
-            : error instanceof Error
-              ? error.message
-              : "Preview failed";
-        return json({ error: message }, 500);
-      } finally {
-        clearTimeout(timeout);
+      const MAX_ROWS = 1000;
+      const preErrors: string[] = [];
+      if (dataLines.length > MAX_ROWS) {
+        preErrors.push(
+          `Only the first ${MAX_ROWS} of ${dataLines.length} rows were processed — re-upload the rest separately.`,
+        );
+        dataLines = dataLines.slice(0, MAX_ROWS);
       }
+      if (dataLines.length === 0) {
+        return json({ columns_detected: [], rows: [], errors: ["No data rows found in the CSV."] });
+      }
+
+      const CHUNK_SIZE = 50;
+      const chunks: string[] = [];
+      for (let i = 0; i < dataLines.length; i += CHUNK_SIZE) {
+        chunks.push([header, ...dataLines.slice(i, i + CHUNK_SIZE)].join("\n"));
+      }
+
+      type ChunkResult = { columns: string[]; rows: unknown[]; errors: string[] };
+      const normalizeChunk = async (chunkCsv: string): Promise<ChunkResult> => {
+        const prompt = [...instructions, "", "CSV:", chunkCsv].join("\n");
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 60000);
+        try {
+          const res = await fetch(`${getGrokBaseUrl(env)}/chat/completions`, {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${env.GROK_NORMALIZATION_API_KEY}`,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              // Dedicated model for expense normalization (decoupled from GROK_WEB_SEARCH_MODEL).
+              // Small batches make reasoning affordable again: grok-4.3 at reasoning_effort
+              // "low" sharpens category/recurring inference without blowing the per-batch bound.
+              model: env.GROK_NORMALIZATION_MODEL || "grok-4.3",
+              reasoning_effort: env.GROK_NORMALIZATION_EFFORT || "low",
+              messages: [{ role: "user", content: prompt }],
+              response_format: { type: "json_object" },
+              max_tokens: 16000,
+            }),
+            signal: controller.signal,
+          });
+          if (!res.ok) {
+            const text = await res.text();
+            return { columns: [], rows: [], errors: [`A batch failed (${res.status}): ${text.slice(0, 150)}`] };
+          }
+          const llmData = (await res.json()) as GrokChatResponse;
+          const content: string = llmData.choices?.[0]?.message?.content ?? "";
+          const stripped = content
+            .trim()
+            .replace(/^```json\s*/i, "")
+            .replace(/^```\s*/i, "")
+            .replace(/```\s*$/i, "")
+            .trim();
+          let parsed: Record<string, unknown>;
+          try {
+            parsed = JSON.parse(stripped) as Record<string, unknown>;
+          } catch {
+            const start = stripped.indexOf("{");
+            const end = stripped.lastIndexOf("}");
+            if (start >= 0 && end > start) {
+              parsed = JSON.parse(stripped.slice(start, end + 1)) as Record<string, unknown>;
+            } else {
+              return { columns: [], rows: [], errors: ["A batch returned unparseable content and was skipped."] };
+            }
+          }
+          return {
+            columns: Array.isArray(parsed.columns_detected) ? (parsed.columns_detected as string[]) : [],
+            rows: Array.isArray(parsed.rows) ? (parsed.rows as unknown[]) : [],
+            errors: Array.isArray(parsed.errors) ? (parsed.errors as string[]) : [],
+          };
+        } catch (error) {
+          const message =
+            error instanceof Error && error.name === "AbortError"
+              ? "A batch timed out and was skipped."
+              : error instanceof Error
+                ? error.message
+                : "A batch failed.";
+          return { columns: [], rows: [], errors: [message] };
+        } finally {
+          clearTimeout(timeout);
+        }
+      };
+
+      // Bounded concurrency: several batches at once, but not all of them if the CSV is large
+      // (stays under subrequest/rate limits). A shared cursor hands each worker the next chunk.
+      const CONCURRENCY = 8;
+      const results: ChunkResult[] = new Array(chunks.length);
+      let cursor = 0;
+      await Promise.all(
+        Array.from({ length: Math.min(CONCURRENCY, chunks.length) }, async () => {
+          for (let index = cursor++; index < chunks.length; index = cursor++) {
+            results[index] = await normalizeChunk(chunks[index]);
+          }
+        }),
+      );
+
+      const rows = results.flatMap((r) => r.rows);
+      const columns_detected = Array.from(new Set(results.flatMap((r) => r.columns)));
+      const errors = [...preErrors, ...results.flatMap((r) => r.errors)];
+
+      // Total failure only when every batch produced nothing; otherwise return the partial
+      // rows plus the per-batch errors (the review UI surfaces them).
+      if (rows.length === 0) {
+        return json({ error: errors[0] ?? "Normalization produced no rows" }, 502);
+      }
+      return json({ columns_detected, rows, errors });
     }
 
     if (method === "GET" && pathname === "/api/benchmarks/search") {
