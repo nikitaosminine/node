@@ -1,8 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { Plus, RotateCw, Upload } from "lucide-react";
-import { format } from "date-fns";
+import { useCallback, useEffect, useState } from "react";
+import { ChevronLeft, ChevronRight, Plus, RotateCw, Upload } from "lucide-react";
+import { addMonths, format, isSameMonth, startOfMonth } from "date-fns";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/hooks/use-auth";
 import { Button } from "@/components/ui/button";
@@ -41,7 +41,7 @@ export default function Expenses() {
         .from("expense_transactions")
         .select("id, posted_at, merchant_name, amount, currency, is_recurring, category_id")
         .order("posted_at", { ascending: false })
-        .limit(100),
+        .limit(500),
       supabase.from("expense_categories").select("id, display_name"),
     ]);
     // Surface failures explicitly — a failed load must not look like an empty account.
@@ -55,7 +55,7 @@ export default function Expenses() {
       Object.fromEntries((catRes.data ?? []).map((c) => [c.id, c.display_name] as const)),
     );
     setLoading(false);
-    // Signal dependent widgets (allocation strip) to refetch their own month-scoped data.
+    // Signal the month-scoped widgets (node section, rhythm, category mix) to refetch.
     setDataVersion((v) => v + 1);
   }, []);
 
@@ -72,7 +72,11 @@ export default function Expenses() {
 
   const isEmpty = !loading && !error && rows.length === 0;
 
-  const monthLabel = useMemo(() => format(new Date(), "MMMM yyyy"), []);
+  // Page-wide month context: the node section, spending rhythm, and category mix all read
+  // this month. The transaction log is deliberately exempt — it's the cross-month searchable
+  // record with its own date filter.
+  const [viewDate, setViewDate] = useState(() => startOfMonth(new Date()));
+  const isCurrentMonth = isSameMonth(viewDate, new Date());
 
   return (
     <div className="mx-auto flex w-full max-w-[1500px] flex-col gap-6 px-6 pb-8 pt-4">
@@ -80,7 +84,28 @@ export default function Expenses() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Expenses</h1>
-          <p className="mt-0.5 text-sm text-foreground-muted">{monthLabel}</p>
+          <div className="mt-1 flex items-center gap-1">
+            <button
+              type="button"
+              onClick={() => setViewDate((d) => startOfMonth(addMonths(d, -1)))}
+              aria-label="Previous month"
+              className="grid h-6 w-6 place-items-center rounded-md text-foreground-muted transition-colors hover:bg-surface-2 hover:text-foreground"
+            >
+              <ChevronLeft className="h-4 w-4" />
+            </button>
+            <span className="min-w-[7.5rem] text-center text-sm text-foreground-muted">
+              {format(viewDate, "MMMM yyyy")}
+            </span>
+            <button
+              type="button"
+              onClick={() => setViewDate((d) => startOfMonth(addMonths(d, 1)))}
+              disabled={isCurrentMonth}
+              aria-label="Next month"
+              className="grid h-6 w-6 place-items-center rounded-md text-foreground-muted transition-colors hover:bg-surface-2 hover:text-foreground disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-foreground-muted"
+            >
+              <ChevronRight className="h-4 w-4" />
+            </button>
+          </div>
         </div>
         <div className="flex items-center gap-2">
           <Button variant="outline" onClick={() => setImportOpen(true)} disabled={!user}>
@@ -121,18 +146,24 @@ export default function Expenses() {
             <ExpenseNodeSection
               userId={user.id}
               categoryNames={categoryNames}
+              monthDate={viewDate}
               refreshKey={dataVersion}
               onChanged={load}
             />
 
             {/* Spending rhythm — heatmap/bars + daily/weekly toggles + stat rail. */}
-            <SpendingRhythm categoryNames={categoryNames} refreshKey={dataVersion} />
+            <SpendingRhythm
+              categoryNames={categoryNames}
+              monthDate={viewDate}
+              refreshKey={dataVersion}
+            />
 
             {/* Where it goes / Transactions — category mix + log split by tabs. */}
             <ExpensesBreakdown
               userId={user.id}
               categoryNames={categoryNames}
               rows={rows}
+              monthDate={viewDate}
               refreshKey={dataVersion}
             />
           </>

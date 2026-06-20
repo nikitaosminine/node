@@ -13,6 +13,8 @@ import { DEFAULT_PORTFOLIO_CURRENCY, formatCurrency } from "@/lib/currency";
 interface Props {
   userId: string;
   categoryNames: Record<string, string>;
+  /** Month to read (first of month). Defaults to the current month. */
+  monthDate?: Date;
   refreshKey?: number;
   /** Drop the card chrome + title + Node footer when rendered inside the breakdown tabs. */
   embedded?: boolean;
@@ -26,14 +28,14 @@ interface Props {
 export function CategoryMix({
   userId,
   categoryNames,
+  monthDate,
   refreshKey = 0,
   embedded = false,
   onTotal,
 }: Props) {
   const currency = DEFAULT_PORTFOLIO_CURRENCY;
-  const now = useMemo(() => new Date(), []);
-  const monthStart = format(startOfMonth(now), "yyyy-MM-dd");
-  const monthEnd = format(endOfMonth(now), "yyyy-MM-dd");
+  const monthStart = format(startOfMonth(monthDate ?? new Date()), "yyyy-MM-dd");
+  const monthEnd = format(endOfMonth(monthDate ?? new Date()), "yyyy-MM-dd");
 
   const [txns, setTxns] = useState<MixTxn[]>([]);
   const [caps, setCaps] = useState<Record<string, number>>({});

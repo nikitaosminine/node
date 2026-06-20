@@ -12,6 +12,8 @@ import { DEFAULT_PORTFOLIO_CURRENCY, formatCurrency } from "@/lib/currency";
 
 interface Props {
   categoryNames: Record<string, string>;
+  /** Month to display (first of month). Defaults to the current month. */
+  monthDate?: Date;
   refreshKey?: number;
 }
 
@@ -151,12 +153,13 @@ function SpendingBars({ data }: { data: BarDatum[] }) {
 // Spending rhythm (mockup realign): discretionary spend over time, with Daily/Weekly and
 // Heatmap/Bars toggles and a right rail of derived stats. Reuses the pure heatmap model +
 // insight helpers; clicking a day (daily heatmap) opens its transactions.
-export function SpendingRhythm({ categoryNames, refreshKey = 0 }: Props) {
+export function SpendingRhythm({ categoryNames, monthDate, refreshKey = 0 }: Props) {
   const currency = DEFAULT_PORTFOLIO_CURRENCY;
-  const now = useMemo(() => new Date(), []);
-  const year = now.getFullYear();
-  const month0 = now.getMonth();
-  const today = format(now, "yyyy-MM-dd");
+  const base = monthDate ?? new Date();
+  const year = base.getFullYear();
+  const month0 = base.getMonth();
+  // Real today still bounds future-day marking — for a past month every day is elapsed.
+  const today = format(new Date(), "yyyy-MM-dd");
   const monthStart = format(new Date(year, month0, 1), "yyyy-MM-dd");
   const monthEnd = format(new Date(year, month0 + 1, 0), "yyyy-MM-dd");
   const prevStart = format(new Date(year, month0 - 1, 1), "yyyy-MM-dd");

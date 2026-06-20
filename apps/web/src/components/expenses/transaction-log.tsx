@@ -1,13 +1,29 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { format, parseISO } from "date-fns";
 import type { DateRange } from "react-day-picker";
-import { ArrowDown, ArrowUp, CalendarDays, ChevronsUpDown, Search, X } from "lucide-react";
+import {
+  ArrowDown,
+  ArrowUp,
+  CalendarDays,
+  ChevronLeft,
+  ChevronRight,
+  ChevronsUpDown,
+  Search,
+  X,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Calendar } from "@/components/ui/calendar";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import {
   Table,
   TableBody,
@@ -40,6 +56,8 @@ const COLUMNS: Array<{ key: LogSortKey; label: string; align?: "right" }> = [
   { key: "amount", label: "Amount", align: "right" },
 ];
 
+const PAGE_SIZE_OPTIONS = [25, 50, 100] as const;
+
 function toIso(date: Date): string {
   return format(date, "yyyy-MM-dd");
 }
@@ -58,10 +76,24 @@ export function TransactionLog({ rows, categoryNames, embedded = false }: Props)
 
   const hasDateFilter = range.from != null || range.to != null;
 
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState<(typeof PAGE_SIZE_OPTIONS)[number]>(25);
+
   const visible = useMemo(
     () => filterAndSortLog(rows, { search, range, categoryNames, sortKey, sortDir }),
     [rows, search, range, categoryNames, sortKey, sortDir],
   );
+
+  // Snap back to the first page whenever the filtered/sorted set changes.
+  useEffect(() => {
+    setPage(1);
+  }, [search, range, sortKey, sortDir, pageSize]);
+
+  const totalPages = Math.max(1, Math.ceil(visible.length / pageSize));
+  const safePage = Math.min(page, totalPages);
+  const pageStart = visible.length === 0 ? 0 : (safePage - 1) * pageSize + 1;
+  const pageEnd = Math.min(safePage * pageSize, visible.length);
+  const paged = visible.slice((safePage - 1) * pageSize, safePage * pageSize);
 
   const handleSort = (key: LogSortKey) => {
     if (sortKey === key) setSortDir((d) => (d === "asc" ? "desc" : "asc"));
@@ -177,8 +209,8 @@ export function TransactionLog({ rows, categoryNames, embedded = false }: Props)
         </div>
       </div>
 
-      {/* Scrollable, fixed-height body so the log never unbalances the row. */}
-      <div className="max-h-[420px] overflow-auto">
+      {/* Paginated rows — the page scrolls, not the table (matches the portfolio log). */}
+      <div className="overflow-x-auto">
         <Table>
           <TableHeader className="sticky top-0 z-10 bg-surface">
             <TableRow>
@@ -207,7 +239,7 @@ export function TransactionLog({ rows, categoryNames, embedded = false }: Props)
             </TableRow>
           </TableHeader>
           <TableBody>
-            {visible.length === 0 ? (
+            {paged.length === 0 ? (
               <TableRow>
                 <TableCell
                   colSpan={COLUMNS.length}
@@ -217,7 +249,7 @@ export function TransactionLog({ rows, categoryNames, embedded = false }: Props)
                 </TableCell>
               </TableRow>
             ) : (
-              visible.map((t) => (
+              paged.map((t) => (
                 <TableRow key={t.id}>
                   <TableCell className="whitespace-nowrap font-mono text-xs text-foreground-muted">
                     {format(parseISO(t.posted_at), "d MMM yyyy")}
@@ -246,6 +278,58 @@ export function TransactionLog({ rows, categoryNames, embedded = false }: Props)
             )}
           </TableBody>
         </Table>
+      </div>
+
+      {/* Pagination — page-size selector + carousel, mirroring the portfolio log. */}
+      <div className="flex flex-wrap items-center justify-between gap-3 pt-3">
+        <div className="flex items-center gap-2 text-xs text-foreground-muted">
+          <span>Rows</span>
+          <Select
+            value={String(pageSize)}
+            onValueChange={(value) =>
+              setPageSize(Number(value) as (typeof PAGE_SIZE_OPTIONS)[number])
+            }
+          >
+            <SelectTrigger className="h-8 w-20 rounded-full bg-surface px-3 text-xs">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {PAGE_SIZE_OPTIONS.map((option) => (
+                <SelectItem key={option} value={String(option)}>
+                  {option}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+
+        <div className="flex items-center gap-2 text-xs text-foreground-muted">
+          <Button
+            type="button"
+            variant="outline"
+            size="icon"
+            className="h-8 w-8 rounded-full"
+            disabled={safePage <= 1}
+            onClick={() => setPage((p) => Math.max(1, p - 1))}
+            aria-label="Previous page"
+          >
+            <ChevronLeft className="h-4 w-4" />
+          </Button>
+          <span className="min-w-28 text-center tabular-nums">
+            {pageStart}-{pageEnd} of {visible.length}
+          </span>
+          <Button
+            type="button"
+            variant="outline"
+            size="icon"
+            className="h-8 w-8 rounded-full"
+            disabled={safePage >= totalPages}
+            onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+            aria-label="Next page"
+          >
+            <ChevronRight className="h-4 w-4" />
+          </Button>
+        </div>
       </div>
     </div>
   );

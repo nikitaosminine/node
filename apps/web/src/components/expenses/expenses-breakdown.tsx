@@ -11,6 +11,8 @@ interface Props {
   userId: string;
   categoryNames: Record<string, string>;
   rows: LogTxn[];
+  /** Month for the category mix (the log is cross-month). Defaults to current. */
+  monthDate?: Date;
   refreshKey?: number;
 }
 
@@ -53,7 +55,13 @@ function TabPill({
 
 // Where it goes / Transactions (mockup realign): the category-mix summary and the raw
 // transaction log share one card, split by tabs. "Where it goes" is the default.
-export function ExpensesBreakdown({ userId, categoryNames, rows, refreshKey = 0 }: Props) {
+export function ExpensesBreakdown({
+  userId,
+  categoryNames,
+  rows,
+  monthDate,
+  refreshKey = 0,
+}: Props) {
   const [tab, setTab] = useState<Tab>("categories");
   const [discretionary, setDiscretionary] = useState(0);
 
@@ -86,6 +94,7 @@ export function ExpensesBreakdown({ userId, categoryNames, rows, refreshKey = 0 
         <CategoryMix
           userId={userId}
           categoryNames={categoryNames}
+          monthDate={monthDate}
           refreshKey={refreshKey}
           embedded
           onTotal={setDiscretionary}

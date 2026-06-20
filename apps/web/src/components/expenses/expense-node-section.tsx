@@ -15,6 +15,8 @@ import { DEFAULT_PORTFOLIO_CURRENCY, formatCurrency } from "@/lib/currency";
 interface Props {
   userId: string;
   categoryNames: Record<string, string>;
+  /** Month to read (first of month). Defaults to the current month. */
+  monthDate?: Date;
   refreshKey?: number;
   onChanged: () => void;
 }
@@ -25,11 +27,17 @@ const eur = (n: number) =>
 // Node AI section (mockup realign): the plain recap card + the ambient Node insight line +
 // two derived chips + an Ask-Node stub. The insight is computed from the user's real data
 // (over/left, top category, weekend ratio, month projection); the agent itself isn't wired.
-export function ExpenseNodeSection({ userId, categoryNames, refreshKey = 0, onChanged }: Props) {
-  const now = useMemo(() => new Date(), []);
-  const year = now.getFullYear();
-  const month0 = now.getMonth();
-  const today = format(now, "yyyy-MM-dd");
+export function ExpenseNodeSection({
+  userId,
+  categoryNames,
+  monthDate,
+  refreshKey = 0,
+  onChanged,
+}: Props) {
+  const base = monthDate ?? new Date();
+  const year = base.getFullYear();
+  const month0 = base.getMonth();
+  const today = format(new Date(), "yyyy-MM-dd"); // real today bounds the so-far figures
   const monthStart = format(new Date(year, month0, 1), "yyyy-MM-dd");
   const monthEnd = format(new Date(year, month0 + 1, 0), "yyyy-MM-dd");
   const daysInMonth = new Date(year, month0 + 1, 0).getDate();
@@ -212,7 +220,7 @@ export function ExpenseNodeSection({ userId, categoryNames, refreshKey = 0, onCh
         open={incomeOpen}
         onOpenChange={setIncomeOpen}
         userId={userId}
-        defaultMonth={format(now, "yyyy-MM")}
+        defaultMonth={format(base, "yyyy-MM")}
         onSaved={() => {
           void load();
           onChanged();
