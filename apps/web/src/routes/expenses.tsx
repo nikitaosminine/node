@@ -11,6 +11,7 @@ import { CsvImportExpenses } from "@/components/expenses/csv-import-expenses";
 import { ExpensesEmptyState } from "@/components/expenses/expenses-empty-state";
 import { AllocationStrip } from "@/components/expenses/allocation-strip";
 import { SpendingHeatmap } from "@/components/expenses/spending-heatmap";
+import { CategoryMix } from "@/components/expenses/category-mix";
 import { formatCurrency } from "@/lib/currency";
 
 interface ExpenseRow {
@@ -90,18 +91,21 @@ export default function Expenses() {
         </div>
       </div>
 
-      {/* Allocation strip (1A-105) + spending heatmap (1A-103) — once there's data. */}
+      {/* Allocation strip (1A-105) + spending heatmap (1A-103) + category mix (1A-106) —
+          once there's data. The category mix shares the bottom row with the full
+          transaction log (1A-104) once that lands. */}
       {user && rows.length > 0 && (
         <>
           <AllocationStrip userId={user.id} refreshKey={dataVersion} />
           <SpendingHeatmap categoryNames={categoryNames} refreshKey={dataVersion} />
+          <CategoryMix categoryNames={categoryNames} refreshKey={dataVersion} />
         </>
       )}
 
       {/* Foundation note — only once there's data; the onboarding panel covers the empty case. */}
       {rows.length > 0 && (
         <p className="text-xs text-foreground-muted">
-          The category mix and full transaction log build on this data next.
+          The full transaction log builds on this data next.
         </p>
       )}
 
