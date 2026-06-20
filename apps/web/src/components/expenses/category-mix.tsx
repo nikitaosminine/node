@@ -14,12 +14,22 @@ interface Props {
   userId: string;
   categoryNames: Record<string, string>;
   refreshKey?: number;
+  /** Drop the card chrome + title + Node footer when rendered inside the breakdown tabs. */
+  embedded?: boolean;
+  /** Reports the discretionary total so an embedding header can show it. */
+  onTotal?: (total: number) => void;
 }
 
 // Ranked spending composition (Linear 1A-106): discretionary only, no deltas/trend —
 // interpretation is the Node layer's job. Each row drills into its merchants. Per-category
 // budget caps (1A-111) are an opt-in layer — surfaced only on rows where a cap is set.
-export function CategoryMix({ userId, categoryNames, refreshKey = 0 }: Props) {
+export function CategoryMix({
+  userId,
+  categoryNames,
+  refreshKey = 0,
+  embedded = false,
+  onTotal,
+}: Props) {
   const currency = DEFAULT_PORTFOLIO_CURRENCY;
   const now = useMemo(() => new Date(), []);
   const monthStart = format(startOfMonth(now), "yyyy-MM-dd");
@@ -67,6 +77,10 @@ export function CategoryMix({ userId, categoryNames, refreshKey = 0 }: Props) {
 
   const mix = useMemo(() => buildCategoryMix(txns, categoryNames), [txns, categoryNames]);
 
+  useEffect(() => {
+    onTotal?.(mix.total);
+  }, [mix.total, onTotal]);
+
   const toggle = (key: string) =>
     setExpanded((prev) => {
       const next = new Set(prev);
@@ -78,16 +92,24 @@ export function CategoryMix({ userId, categoryNames, refreshKey = 0 }: Props) {
   const rowKey = (row: MixRow) => row.categoryId ?? "__uncat__";
 
   return (
-    <div className="flex flex-col rounded-xl border border-hairline bg-surface px-5 py-4">
-      <div className="mb-3 flex items-baseline justify-between gap-3">
-        <h2 className="text-sm font-semibold">Category mix</h2>
-        <span className="text-xs text-foreground-muted">
-          <span className="font-mono tabular-nums text-foreground">
-            {formatCurrency(mix.total, currency, { maximumFractionDigits: 0 })}
-          </span>{" "}
-          discretionary · fixed costs excluded
-        </span>
-      </div>
+    <div
+      className={
+        embedded
+          ? "flex flex-col"
+          : "flex flex-col rounded-xl border border-hairline bg-surface px-5 py-4"
+      }
+    >
+      {!embedded && (
+        <div className="mb-3 flex items-baseline justify-between gap-3">
+          <h2 className="text-sm font-semibold">Category mix</h2>
+          <span className="text-xs text-foreground-muted">
+            <span className="font-mono tabular-nums text-foreground">
+              {formatCurrency(mix.total, currency, { maximumFractionDigits: 0 })}
+            </span>{" "}
+            discretionary · fixed costs excluded
+          </span>
+        </div>
+      )}
 
       {error ? (
         <p className="py-8 text-center text-sm text-foreground-muted">
@@ -184,17 +206,19 @@ export function CategoryMix({ userId, categoryNames, refreshKey = 0 }: Props) {
         </ul>
       )}
 
-      {/* Ambient Node caption + Ask Node hook — load-bearing here (no deltas by design).
-          Agent not wired yet (1A-106), present so the affordance ships. */}
-      <div className="mt-3 flex items-center justify-between gap-3 border-t border-hairline pt-3">
-        <p className="min-w-0 flex-1 text-[11px] text-foreground-muted">
-          Node reads your mix and flags what&apos;s shifting — coming soon.
-        </p>
-        <Button variant="outline" size="sm" disabled title="Coming soon">
-          <Sparkles className="h-4 w-4" />
-          Ask Node
-        </Button>
-      </div>
+      {/* Ambient Node caption + Ask Node hook — only when standalone; inside the breakdown
+          tabs the Node section at the top of the page owns this affordance. */}
+      {!embedded && (
+        <div className="mt-3 flex items-center justify-between gap-3 border-t border-hairline pt-3">
+          <p className="min-w-0 flex-1 text-[11px] text-foreground-muted">
+            Node reads your mix and flags what&apos;s shifting — coming soon.
+          </p>
+          <Button variant="outline" size="sm" disabled title="Coming soon">
+            <Sparkles className="h-4 w-4" />
+            Ask Node
+          </Button>
+        </div>
+      )}
     </div>
   );
 }

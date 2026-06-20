@@ -54,7 +54,7 @@ describe("Expenses route", () => {
     fromMock.mockReset();
   });
 
-  it("renders the user's expenses", async () => {
+  it("renders the dashboard once there are expenses", async () => {
     mockLoad([
       {
         id: "t1",
@@ -67,7 +67,10 @@ describe("Expenses route", () => {
       },
     ]);
     render(<Expenses />);
-    expect(await screen.findByText("Tesco")).toBeInTheDocument();
+    // The populated dashboard renders the rhythm section and the breakdown tabs.
+    expect(await screen.findByText("Spending rhythm")).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: /where it goes/i })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: /transactions/i })).toBeInTheDocument();
   });
 
   it("shows the import-led onboarding when there are no expenses", async () => {

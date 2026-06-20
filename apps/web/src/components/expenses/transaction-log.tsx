@@ -29,6 +29,8 @@ import { DEFAULT_PORTFOLIO_CURRENCY, formatCurrency } from "@/lib/currency";
 interface Props {
   rows: LogTxn[];
   categoryNames: Record<string, string>;
+  /** Drop the card chrome + title when rendered inside the breakdown tabs. */
+  embedded?: boolean;
 }
 
 const COLUMNS: Array<{ key: LogSortKey; label: string; align?: "right" }> = [
@@ -45,7 +47,7 @@ function toIso(date: Date): string {
 // The raw record (Linear 1A-104): denser and more utilitarian than the category-mix summary.
 // Searchable, sortable by column, date-filterable; scrolls within a fixed height so it stays
 // contained in the bottom-right of the two-column row.
-export function TransactionLog({ rows, categoryNames }: Props) {
+export function TransactionLog({ rows, categoryNames, embedded = false }: Props) {
   const currency = DEFAULT_PORTFOLIO_CURRENCY;
   const [search, setSearch] = useState("");
   const [sortKey, setSortKey] = useState<LogSortKey>("date");
@@ -91,15 +93,27 @@ export function TransactionLog({ rows, categoryNames }: Props) {
   };
 
   return (
-    <div className="flex flex-col rounded-xl border border-hairline bg-surface">
+    <div
+      className={
+        embedded ? "flex flex-col" : "flex flex-col rounded-xl border border-hairline bg-surface"
+      }
+    >
       {/* Header + toolbar */}
-      <div className="flex flex-col gap-3 border-b border-hairline px-4 py-3">
-        <div className="flex items-baseline justify-between gap-3">
-          <h2 className="text-sm font-semibold">Transactions</h2>
-          <span className="text-xs text-foreground-muted tabular-nums">
-            {visible.length} of {rows.length}
-          </span>
-        </div>
+      <div
+        className={
+          embedded
+            ? "flex flex-col gap-3 pb-3"
+            : "flex flex-col gap-3 border-b border-hairline px-4 py-3"
+        }
+      >
+        {!embedded && (
+          <div className="flex items-baseline justify-between gap-3">
+            <h2 className="text-sm font-semibold">Transactions</h2>
+            <span className="text-xs text-foreground-muted tabular-nums">
+              {visible.length} of {rows.length}
+            </span>
+          </div>
+        )}
         <div className="flex items-center gap-2">
           <div className="relative flex-1">
             <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-foreground-muted" />

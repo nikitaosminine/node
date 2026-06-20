@@ -9,11 +9,9 @@ import { Button } from "@/components/ui/button";
 import { AddExpenseModal } from "@/components/expenses/add-expense-modal";
 import { CsvImportExpenses } from "@/components/expenses/csv-import-expenses";
 import { ExpensesEmptyState } from "@/components/expenses/expenses-empty-state";
-import { AllocationStrip } from "@/components/expenses/allocation-strip";
-import { SpendingHeatmap } from "@/components/expenses/spending-heatmap";
-import { CategoryMix } from "@/components/expenses/category-mix";
-import { TransactionLog } from "@/components/expenses/transaction-log";
-import { ExpenseRecapTeaser } from "@/components/expenses/expense-recap-teaser";
+import { ExpenseNodeSection } from "@/components/expenses/expense-node-section";
+import { SpendingRhythm } from "@/components/expenses/spending-rhythm";
+import { ExpensesBreakdown } from "@/components/expenses/expenses-breakdown";
 
 interface ExpenseRow {
   id: string;
@@ -119,27 +117,24 @@ export default function Expenses() {
       ) : (
         user && (
           <>
-            {/* Allocation strip (1A-105) — full-width context band. */}
-            <AllocationStrip userId={user.id} refreshKey={dataVersion} />
+            {/* Node AI section — recap card + ambient insight + chips + Ask-Node stub. */}
+            <ExpenseNodeSection
+              userId={user.id}
+              categoryNames={categoryNames}
+              refreshKey={dataVersion}
+              onChanged={load}
+            />
 
-            {/* Hero row: spending heatmap (1A-103, 2/3) + category mix (1A-106, 1/3).
-                Reflows to one column below lg. */}
-            <div className="grid items-start gap-6 lg:grid-cols-3">
-              <div className="lg:col-span-2">
-                <SpendingHeatmap categoryNames={categoryNames} refreshKey={dataVersion} />
-              </div>
-              <CategoryMix
-                userId={user.id}
-                categoryNames={categoryNames}
-                refreshKey={dataVersion}
-              />
-            </div>
+            {/* Spending rhythm — heatmap/bars + daily/weekly toggles + stat rail. */}
+            <SpendingRhythm categoryNames={categoryNames} refreshKey={dataVersion} />
 
-            {/* The raw, searchable transaction log (1A-104) — full width. */}
-            <TransactionLog rows={rows} categoryNames={categoryNames} />
-
-            {/* Recap teaser (1A-110) — plain-mono placeholder, agent not wired. */}
-            <ExpenseRecapTeaser />
+            {/* Where it goes / Transactions — category mix + log split by tabs. */}
+            <ExpensesBreakdown
+              userId={user.id}
+              categoryNames={categoryNames}
+              rows={rows}
+              refreshKey={dataVersion}
+            />
           </>
         )
       )}
