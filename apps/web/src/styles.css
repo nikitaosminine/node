@@ -94,6 +94,16 @@
   --positive: oklch(0.58 0.14 155);
   --negative: oklch(0.58 0.2 25);
 
+  /* Spending heatmap ramp (expenses) — the one chromatic exception besides the
+     allocation strip. Light mode = warm orange; see .dark for the indigo dark ramp.
+     --heat-empty is a no-spend cell (distinct from a low-but-nonzero --heat-1). */
+  --heat-empty: oklch(0.965 0.004 70);
+  --heat-1: oklch(0.93 0.05 72);
+  --heat-2: oklch(0.87 0.09 64);
+  --heat-3: oklch(0.8 0.13 56);
+  --heat-4: oklch(0.72 0.16 48);
+  --heat-5: oklch(0.63 0.185 42);
+
   --chart-accent: #0a0a0a;
 
   /* Allocation palette (used by treemaps + chips) */
@@ -167,6 +177,14 @@
   --accent-teal-soft: oklch(0.78 0.14 180 / 18%);
   --positive: oklch(0.78 0.15 155);
   --negative: oklch(0.7 0.2 25);
+
+  /* Spending heatmap ramp — indigo blue in dark mode (orange in light, see :root). */
+  --heat-empty: oklch(0.17 0.012 275);
+  --heat-1: oklch(0.3 0.07 278);
+  --heat-2: oklch(0.38 0.11 274);
+  --heat-3: oklch(0.47 0.145 270);
+  --heat-4: oklch(0.57 0.17 267);
+  --heat-5: oklch(0.67 0.19 265);
 
   --chart-accent: #ffffff;
 
