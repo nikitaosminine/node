@@ -1,12 +1,13 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Plus, RotateCw } from "lucide-react";
+import { Plus, RotateCw, Upload } from "lucide-react";
 import { format, parseISO } from "date-fns";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/hooks/use-auth";
 import { Button } from "@/components/ui/button";
 import { AddExpenseModal } from "@/components/expenses/add-expense-modal";
+import { CsvImportExpenses } from "@/components/expenses/csv-import-expenses";
 import { formatCurrency } from "@/lib/currency";
 
 interface ExpenseRow {
@@ -26,6 +27,7 @@ export default function Expenses() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -67,10 +69,16 @@ export default function Expenses() {
           <h1 className="text-2xl font-semibold tracking-tight">Expenses</h1>
           <p className="mt-0.5 text-sm text-foreground-muted">{monthLabel}</p>
         </div>
-        <Button onClick={() => setAddOpen(true)} disabled={!user}>
-          <Plus className="h-4 w-4" />
-          Add expense
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button variant="outline" onClick={() => setImportOpen(true)} disabled={!user}>
+            <Upload className="h-4 w-4" />
+            Import
+          </Button>
+          <Button onClick={() => setAddOpen(true)} disabled={!user}>
+            <Plus className="h-4 w-4" />
+            Add expense
+          </Button>
+        </div>
       </div>
 
       {/* Foundation note — the rich views (heatmap, category mix, allocation strip) land next. */}
@@ -123,7 +131,20 @@ export default function Expenses() {
       </div>
 
       {user && (
-        <AddExpenseModal open={addOpen} onOpenChange={setAddOpen} userId={user.id} onAdded={load} />
+        <>
+          <AddExpenseModal
+            open={addOpen}
+            onOpenChange={setAddOpen}
+            userId={user.id}
+            onAdded={load}
+          />
+          <CsvImportExpenses
+            open={importOpen}
+            onOpenChange={setImportOpen}
+            userId={user.id}
+            onImported={load}
+          />
+        </>
       )}
     </div>
   );

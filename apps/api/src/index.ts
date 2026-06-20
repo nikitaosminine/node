@@ -4053,6 +4053,86 @@ export default {
       return json({ status: "ok", supabase, timestamp: new Date().toISOString() });
     }
 
+    // POST /api/expenses/import/preview — normalize a bank/card CSV into expense rows
+    // via the LLM (Grok). User-scoped (expenses are owner-owned, not portfolio-scoped).
+    // Writes nothing: the web client confirms + inserts via RLS (per the direct-client
+    // write decision). Mirrors /api/portfolios/:id/transactions/preview.
+    if (method === "POST" && pathname === "/api/expenses/import/preview") {
+      const auth = await requireAuth(request, env);
+      if (auth instanceof Response) return auth;
+      if (!env.GROK_NORMALIZATION_API_KEY) {
+        return json({ error: "Server misconfiguration: GROK_NORMALIZATION_API_KEY is missing" }, 500);
+      }
+
+      const body = (await request.json().catch(() => ({}))) as { csv?: string };
+      const csv = String(body.csv ?? "");
+      if (!csv.trim()) return json({ error: "csv is required" }, 400);
+
+      const prompt = [
+        "You are a personal-finance data normalizer. Map each bank or card CSV row to this exact schema:",
+        "posted_at: ISO date YYYY-MM-DD.",
+        "merchant_name: cleaned merchant or payee name (strip card/ref noise).",
+        "amount: positive number string of the absolute value (no sign, keep decimals).",
+        "currency: 3-letter ISO code; default EUR if absent.",
+        'kind: "spend" for money out, "income" for money in (salary, refunds treated as income).',
+        "is_recurring: true for rent, utilities, subscriptions, insurance, loan repayments, and salary; false for one-off purchases.",
+        "pfc_primary: ONE of exactly these Plaid PFCv2 primary categories:",
+        "INCOME, TRANSFER_IN, TRANSFER_OUT, LOAN_PAYMENTS, BANK_FEES, ENTERTAINMENT, FOOD_AND_DRINK, GENERAL_MERCHANDISE, HOME_IMPROVEMENT, MEDICAL, PERSONAL_CARE, GENERAL_SERVICES, GOVERNMENT_AND_NON_PROFIT, TRANSPORTATION, TRAVEL, RENT_AND_UTILITIES.",
+        "external_ref: the bank's own transaction id/reference if such a column exists, else null.",
+        "confidence: number 0 to 1 for how sure you are of pfc_primary and kind.",
+        "Rules: do not invent missing data; skip empty/summary/balance rows. Keep amounts positive.",
+        'Return only JSON: { "columns_detected": string[], "rows": [ { posted_at, merchant_name, amount, currency, kind, is_recurring, pfc_primary, external_ref, confidence } ], "errors": string[] }',
+        "",
+        "CSV:",
+        csv.slice(0, 100000),
+      ].join("\n");
+
+      try {
+        const res = await fetch(`${getGrokBaseUrl(env)}/chat/completions`, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${env.GROK_NORMALIZATION_API_KEY}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            model: env.GROK_WEB_SEARCH_MODEL || "grok-4-1-fast-non-reasoning",
+            messages: [{ role: "user", content: prompt }],
+            response_format: { type: "json_object" },
+            max_tokens: 32000,
+          }),
+        });
+        if (!res.ok) {
+          const text = await res.text();
+          return json({ error: `Normalization failed (${res.status}): ${text.slice(0, 300)}` }, 502);
+        }
+        const llmData = (await res.json()) as GrokChatResponse;
+        const content: string = llmData.choices?.[0]?.message?.content ?? "";
+
+        const stripped = content
+          .trim()
+          .replace(/^```json\s*/i, "")
+          .replace(/^```\s*/i, "")
+          .replace(/```\s*$/i, "")
+          .trim();
+
+        let parsed: Record<string, unknown>;
+        try {
+          parsed = JSON.parse(stripped) as Record<string, unknown>;
+        } catch {
+          const start = stripped.indexOf("{");
+          const end = stripped.lastIndexOf("}");
+          if (start >= 0 && end > start) {
+            parsed = JSON.parse(stripped.slice(start, end + 1)) as Record<string, unknown>;
+          } else {
+            throw new Error(`LLM returned unparseable content: ${stripped.slice(0, 300)}`);
+          }
+        }
+        return json(parsed);
+      } catch (error) {
+        return json({ error: error instanceof Error ? error.message : "Preview failed" }, 500);
+      }
+    }
+
     if (method === "GET" && pathname === "/api/benchmarks/search") {
       const q = (url.searchParams.get("q") || "").trim();
       if (!q) return json([]);
