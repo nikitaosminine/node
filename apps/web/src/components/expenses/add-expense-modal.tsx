@@ -64,6 +64,7 @@ export function AddExpenseModal({
   const [note, setNote] = useState("");
   const [loading, setLoading] = useState(false);
   const [categories, setCategories] = useState<Category[]>([]);
+  const [categoriesError, setCategoriesError] = useState(false);
 
   const reset = () => {
     setMerchant("");
@@ -80,14 +81,17 @@ export function AddExpenseModal({
   // Load categories (system seed + user's own) once when the modal opens.
   useEffect(() => {
     if (!open) return;
+    setCategoriesError(false);
     supabase
       .from("expense_categories")
       .select("id, display_name, pfc_primary, is_fixed_default")
       .order("display_name", { ascending: true })
-      .then(({ data }) => {
-        if (data) {
-          setCategories(data.filter((c) => !NON_SPEND_PRIMARIES.has(c.pfc_primary)));
+      .then(({ data, error }) => {
+        if (error) {
+          setCategoriesError(true);
+          return;
         }
+        setCategories((data ?? []).filter((c) => !NON_SPEND_PRIMARIES.has(c.pfc_primary)));
       });
   }, [open]);
 
@@ -231,6 +235,11 @@ export function AddExpenseModal({
                   ))}
                 </SelectContent>
               </Select>
+              {categoriesError && (
+                <p className="text-xs text-negative">
+                  Couldn&apos;t load categories. You can still save as uncategorized.
+                </p>
+              )}
             </div>
           </div>
 

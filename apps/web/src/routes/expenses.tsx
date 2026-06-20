@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Plus } from "lucide-react";
+import { Plus, RotateCw } from "lucide-react";
 import { format, parseISO } from "date-fns";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/hooks/use-auth";
@@ -24,11 +24,13 @@ export default function Expenses() {
   const [rows, setRows] = useState<ExpenseRow[]>([]);
   const [categoryNames, setCategoryNames] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
-    const [{ data: txns }, { data: cats }] = await Promise.all([
+    setError(false);
+    const [txnRes, catRes] = await Promise.all([
       supabase
         .from("expense_transactions")
         .select("id, posted_at, merchant_name, amount, currency, is_recurring, category_id")
@@ -36,8 +38,16 @@ export default function Expenses() {
         .limit(100),
       supabase.from("expense_categories").select("id, display_name"),
     ]);
-    setRows((txns as ExpenseRow[]) ?? []);
-    setCategoryNames(Object.fromEntries((cats ?? []).map((c) => [c.id, c.display_name] as const)));
+    // Surface failures explicitly — a failed load must not look like an empty account.
+    if (txnRes.error || catRes.error) {
+      setError(true);
+      setLoading(false);
+      return;
+    }
+    setRows((txnRes.data as ExpenseRow[]) ?? []);
+    setCategoryNames(
+      Object.fromEntries((catRes.data ?? []).map((c) => [c.id, c.display_name] as const)),
+    );
     setLoading(false);
   }, []);
 
@@ -45,7 +55,7 @@ export default function Expenses() {
     if (!authLoading && user) void load();
   }, [authLoading, user, load]);
 
-  const isEmpty = !loading && rows.length === 0;
+  const isEmpty = !loading && !error && rows.length === 0;
 
   const monthLabel = useMemo(() => format(new Date(), "MMMM yyyy"), []);
 
@@ -73,6 +83,14 @@ export default function Expenses() {
       <div className="overflow-hidden rounded-xl border border-hairline bg-surface">
         {loading ? (
           <div className="px-4 py-10 text-center text-sm text-foreground-muted">Loading…</div>
+        ) : error ? (
+          <div className="flex flex-col items-center gap-3 px-4 py-12 text-center">
+            <p className="text-sm text-foreground-muted">Couldn&apos;t load your expenses.</p>
+            <Button variant="outline" size="sm" onClick={() => void load()}>
+              <RotateCw className="h-4 w-4" />
+              Retry
+            </Button>
+          </div>
         ) : isEmpty ? (
           <div className="flex flex-col items-center gap-3 px-4 py-12 text-center">
             <p className="text-sm text-foreground-muted">No expenses yet.</p>
