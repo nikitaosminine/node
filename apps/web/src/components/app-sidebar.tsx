@@ -192,9 +192,8 @@ function SidebarInner({ collapsed }: { collapsed: boolean }) {
         })}
       </ul>
 
-      {/* ── Spacer + Expenses + Settings ─────────────────────────────────── */}
-      <div className="mt-auto px-2">
-        <div className="my-2 border-t border-hairline" />
+      {/* ── Expenses (own top-level section) ─────────────────────────────── */}
+      <div className="mt-3 px-2">
         <Link
           href="/expenses"
           title={collapsed ? "Expenses" : undefined}
@@ -207,6 +206,11 @@ function SidebarInner({ collapsed }: { collapsed: boolean }) {
           <Wallet className="h-4 w-4 shrink-0" />
           {!collapsed && <span className="truncate">Expenses</span>}
         </Link>
+      </div>
+
+      {/* ── Settings (pinned to bottom) ──────────────────────────────────── */}
+      <div className="mt-auto px-2">
+        <div className="my-2 border-t border-hairline" />
         <Link
           href="/settings"
           title={collapsed ? "Settings" : undefined}

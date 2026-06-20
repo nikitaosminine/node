@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { motion, useReducedMotion } from "framer-motion";
 import { CategoryMix } from "@/components/expenses/category-mix";
 import { TransactionLog } from "@/components/expenses/transaction-log";
 import { DEFAULT_PORTFOLIO_CURRENCY, formatCurrency } from "@/lib/currency";
@@ -15,7 +16,9 @@ interface Props {
 
 type Tab = "categories" | "transactions";
 
-function TabButton({
+const PILL_TRANSITION = { type: "spring" as const, stiffness: 420, damping: 34, mass: 0.7 };
+
+function TabPill({
   active,
   onClick,
   children,
@@ -24,19 +27,26 @@ function TabButton({
   onClick: () => void;
   children: React.ReactNode;
 }) {
+  const reduce = useReducedMotion();
+  const transition = reduce ? { duration: 0 } : PILL_TRANSITION;
   return (
     <button
       type="button"
       onClick={onClick}
       aria-selected={active}
       role="tab"
-      className={`-mb-px border-b-2 pb-2.5 pt-1 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
-        active
-          ? "border-foreground text-foreground"
-          : "border-transparent text-foreground-muted hover:text-foreground"
+      className={`relative h-8 rounded-full px-4 text-[11px] font-medium uppercase tracking-[0.1em] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
+        active ? "text-background" : "text-foreground-muted hover:text-foreground"
       }`}
     >
-      {children}
+      {active && (
+        <motion.span
+          layoutId="expenses-breakdown-pill"
+          className="pointer-events-none absolute inset-0 z-0 rounded-full bg-foreground"
+          transition={transition}
+        />
+      )}
+      <span className="relative z-10">{children}</span>
     </button>
   );
 }
@@ -49,17 +59,20 @@ export function ExpensesBreakdown({ userId, categoryNames, rows, refreshKey = 0 
 
   return (
     <div className="rounded-xl border border-hairline bg-surface px-5 py-4">
-      <div className="mb-4 flex flex-wrap items-center justify-between gap-x-6 gap-y-2 border-b border-hairline">
-        <div className="flex items-center gap-5" role="tablist" aria-label="Spending breakdown">
-          <TabButton active={tab === "categories"} onClick={() => setTab("categories")}>
+      <div className="mb-4 flex flex-wrap items-center justify-between gap-x-6 gap-y-2">
+        <div
+          className="inline-flex h-9 items-center rounded-full border border-hairline bg-surface-2 p-0.5"
+          role="tablist"
+          aria-label="Spending breakdown"
+        >
+          <TabPill active={tab === "categories"} onClick={() => setTab("categories")}>
             Where it goes
-          </TabButton>
-          <TabButton active={tab === "transactions"} onClick={() => setTab("transactions")}>
-            Transactions{" "}
-            <span className="ml-1 text-foreground-muted tabular-nums">{rows.length}</span>
-          </TabButton>
+          </TabPill>
+          <TabPill active={tab === "transactions"} onClick={() => setTab("transactions")}>
+            Transactions <span className="ml-1 tabular-nums opacity-70">{rows.length}</span>
+          </TabPill>
         </div>
-        <span className="pb-2 text-xs text-foreground-muted">
+        <span className="text-xs text-foreground-muted">
           <span className="font-mono tabular-nums text-foreground">
             {formatCurrency(discretionary, DEFAULT_PORTFOLIO_CURRENCY, {
               maximumFractionDigits: 0,

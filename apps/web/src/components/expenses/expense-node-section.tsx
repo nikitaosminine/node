@@ -2,8 +2,9 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { format } from "date-fns";
-import { Hexagon, Mic } from "lucide-react";
+import { Mic } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
+import { NodeIcon } from "@/components/node-logo";
 import { SetIncomeDialog } from "@/components/expenses/set-income-dialog";
 import { computeAllocation } from "@/lib/allocation";
 import { buildCategoryMix } from "@/lib/category-mix";
@@ -148,8 +149,8 @@ export function ExpenseNodeSection({ userId, categoryNames, refreshKey = 0, onCh
         {/* Node insight + chips + Ask Node */}
         <div className="flex min-w-0 flex-1 flex-col gap-3">
           <div className="flex items-start gap-2.5">
-            <span className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-foreground text-background">
-              <Hexagon className="h-3.5 w-3.5" />
+            <span className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-foreground">
+              <NodeIcon inverse className="h-3.5 w-3.5" />
             </span>
             <div className="min-w-0">
               <div className="text-[11px] font-medium uppercase tracking-[0.16em] text-foreground-muted">
@@ -180,7 +181,7 @@ export function ExpenseNodeSection({ userId, categoryNames, refreshKey = 0, onCh
 
           <div className="flex items-center gap-2">
             <div className="flex flex-1 items-center gap-2 rounded-lg border border-hairline bg-surface px-3 py-2 opacity-70">
-              <Hexagon className="h-3.5 w-3.5 shrink-0 text-foreground-muted" />
+              <NodeIcon className="h-3.5 w-3.5" />
               <span className="truncate text-sm text-foreground-muted">
                 Ask Node — &ldquo;Where can I cut €300?&rdquo;
               </span>

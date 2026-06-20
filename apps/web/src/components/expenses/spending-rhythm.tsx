@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { format, parseISO } from "date-fns";
 import { Bar, BarChart, Cell, ResponsiveContainer, Tooltip, XAxis } from "recharts";
+import { motion, useReducedMotion } from "framer-motion";
 import { supabase } from "@/integrations/supabase/client";
 import { HeatmapCellPanel } from "@/components/expenses/heatmap-cell-panel";
 import { buildMonthHeatmap, type HeatCell, type HeatmapTxn } from "@/lib/heatmap";
@@ -18,6 +19,7 @@ type Period = "daily" | "weekly";
 type Viz = "heatmap" | "bars";
 
 const WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+const PILL_TRANSITION = { type: "spring" as const, stiffness: 420, damping: 34, mass: 0.7 };
 const eur = (n: number) =>
   formatCurrency(n, DEFAULT_PORTFOLIO_CURRENCY, { maximumFractionDigits: 0 });
 
@@ -35,33 +37,45 @@ function Segmented<T extends string>({
   onChange,
   options,
   label,
+  idKey,
 }: {
   value: T;
   onChange: (v: T) => void;
   options: { value: T; label: string }[];
   label: string;
+  idKey: string;
 }) {
+  const reduce = useReducedMotion();
+  const transition = reduce ? { duration: 0 } : PILL_TRANSITION;
   return (
     <div
       role="group"
       aria-label={label}
-      className="inline-flex items-center rounded-lg bg-surface-2 p-0.5"
+      className="inline-flex h-8 items-center rounded-full border border-hairline bg-surface-2 p-0.5"
     >
-      {options.map((o) => (
-        <button
-          key={o.value}
-          type="button"
-          aria-pressed={value === o.value}
-          onClick={() => onChange(o.value)}
-          className={`rounded-md px-3 py-1 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
-            value === o.value
-              ? "bg-background text-foreground shadow-sm"
-              : "text-foreground-muted hover:text-foreground"
-          }`}
-        >
-          {o.label}
-        </button>
-      ))}
+      {options.map((o) => {
+        const active = value === o.value;
+        return (
+          <button
+            key={o.value}
+            type="button"
+            aria-pressed={active}
+            onClick={() => onChange(o.value)}
+            className={`relative h-7 rounded-full px-3 text-[11px] font-medium uppercase tracking-[0.1em] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
+              active ? "text-background" : "text-foreground-muted hover:text-foreground"
+            }`}
+          >
+            {active && (
+              <motion.span
+                layoutId={`seg-${idKey}`}
+                className="pointer-events-none absolute inset-0 z-0 rounded-full bg-foreground"
+                transition={transition}
+              />
+            )}
+            <span className="relative z-10">{o.label}</span>
+          </button>
+        );
+      })}
     </div>
   );
 }
@@ -263,6 +277,7 @@ export function SpendingRhythm({ categoryNames, refreshKey = 0 }: Props) {
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <Segmented
+            idKey="period"
             label="Time period"
             value={period}
             onChange={setPeriod}
@@ -272,6 +287,7 @@ export function SpendingRhythm({ categoryNames, refreshKey = 0 }: Props) {
             ]}
           />
           <Segmented
+            idKey="viz"
             label="Chart type"
             value={viz}
             onChange={setViz}
