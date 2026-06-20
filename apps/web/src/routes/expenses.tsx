@@ -8,6 +8,7 @@ import { useAuth } from "@/hooks/use-auth";
 import { Button } from "@/components/ui/button";
 import { AddExpenseModal } from "@/components/expenses/add-expense-modal";
 import { CsvImportExpenses } from "@/components/expenses/csv-import-expenses";
+import { ExpensesEmptyState } from "@/components/expenses/expenses-empty-state";
 import { formatCurrency } from "@/lib/currency";
 
 interface ExpenseRow {
@@ -53,9 +54,12 @@ export default function Expenses() {
     setLoading(false);
   }, []);
 
+  // Depend on the user id, not the user object — a new object identity each render
+  // (e.g. from a re-created auth context value) must not re-trigger the load.
+  const userId = user?.id ?? null;
   useEffect(() => {
-    if (!authLoading && user) void load();
-  }, [authLoading, user, load]);
+    if (!authLoading && userId) void load();
+  }, [authLoading, userId, load]);
 
   const isEmpty = !loading && !error && rows.length === 0;
 
@@ -81,54 +85,56 @@ export default function Expenses() {
         </div>
       </div>
 
-      {/* Foundation note — the rich views (heatmap, category mix, allocation strip) land next. */}
-      <p className="text-xs text-foreground-muted">
-        Foundation slice: add expenses manually. The spending heatmap, category mix, and allocation
-        strip build on this data next.
-      </p>
+      {/* Foundation note — only once there's data; the onboarding panel covers the empty case. */}
+      {rows.length > 0 && (
+        <p className="text-xs text-foreground-muted">
+          The spending heatmap, category mix, and allocation strip build on this data next.
+        </p>
+      )}
 
-      {/* Transaction list (minimal — the full searchable log is a later issue) */}
-      <div className="overflow-hidden rounded-xl border border-hairline bg-surface">
-        {loading ? (
-          <div className="px-4 py-10 text-center text-sm text-foreground-muted">Loading…</div>
-        ) : error ? (
-          <div className="flex flex-col items-center gap-3 px-4 py-12 text-center">
-            <p className="text-sm text-foreground-muted">Couldn&apos;t load your expenses.</p>
-            <Button variant="outline" size="sm" onClick={() => void load()}>
-              <RotateCw className="h-4 w-4" />
-              Retry
-            </Button>
-          </div>
-        ) : isEmpty ? (
-          <div className="flex flex-col items-center gap-3 px-4 py-12 text-center">
-            <p className="text-sm text-foreground-muted">No expenses yet.</p>
-            <Button variant="outline" size="sm" onClick={() => setAddOpen(true)} disabled={!user}>
-              <Plus className="h-4 w-4" />
-              Add your first expense
-            </Button>
-          </div>
-        ) : (
-          <ul className="divide-y divide-hairline">
-            {rows.map((row) => (
-              <li key={row.id} className="flex items-center gap-3 px-4 py-3">
-                <div className="min-w-0 flex-1">
-                  <div className="truncate text-sm font-medium">{row.merchant_name}</div>
-                  <div className="text-xs text-foreground-muted">
-                    {format(parseISO(row.posted_at), "d MMM yyyy")}
-                    {row.category_id && categoryNames[row.category_id]
-                      ? ` · ${categoryNames[row.category_id]}`
-                      : ""}
-                    {row.is_recurring ? " · recurring" : ""}
+      {isEmpty && user ? (
+        <ExpensesEmptyState
+          userId={user.id}
+          onImport={() => setImportOpen(true)}
+          onAdd={() => setAddOpen(true)}
+          onIncomeSet={load}
+        />
+      ) : (
+        /* Transaction list (minimal — the full searchable log is a later issue) */
+        <div className="overflow-hidden rounded-xl border border-hairline bg-surface">
+          {loading ? (
+            <div className="px-4 py-10 text-center text-sm text-foreground-muted">Loading…</div>
+          ) : error ? (
+            <div className="flex flex-col items-center gap-3 px-4 py-12 text-center">
+              <p className="text-sm text-foreground-muted">Couldn&apos;t load your expenses.</p>
+              <Button variant="outline" size="sm" onClick={() => void load()}>
+                <RotateCw className="h-4 w-4" />
+                Retry
+              </Button>
+            </div>
+          ) : (
+            <ul className="divide-y divide-hairline">
+              {rows.map((row) => (
+                <li key={row.id} className="flex items-center gap-3 px-4 py-3">
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate text-sm font-medium">{row.merchant_name}</div>
+                    <div className="text-xs text-foreground-muted">
+                      {format(parseISO(row.posted_at), "d MMM yyyy")}
+                      {row.category_id && categoryNames[row.category_id]
+                        ? ` · ${categoryNames[row.category_id]}`
+                        : ""}
+                      {row.is_recurring ? " · recurring" : ""}
+                    </div>
                   </div>
-                </div>
-                <div className="font-mono text-sm tabular-nums">
-                  {formatCurrency(row.amount, row.currency)}
-                </div>
-              </li>
-            ))}
-          </ul>
-        )}
-      </div>
+                  <div className="font-mono text-sm tabular-nums">
+                    {formatCurrency(row.amount, row.currency)}
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
 
       {user && (
         <>

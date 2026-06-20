@@ -66,10 +66,11 @@ describe("Expenses route", () => {
     expect(await screen.findByText("Tesco")).toBeInTheDocument();
   });
 
-  it("shows the empty state when there are no expenses", async () => {
+  it("shows the import-led onboarding when there are no expenses", async () => {
     mockLoad([]);
     render(<Expenses />);
-    expect(await screen.findByText("No expenses yet.")).toBeInTheDocument();
+    expect(await screen.findByText("Start tracking your spending")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /import transactions/i })).toBeInTheDocument();
   });
 
   it("shows a distinct error state with retry when the load fails", async () => {
