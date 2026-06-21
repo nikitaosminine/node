@@ -27,6 +27,8 @@ SUPABASE_URL = "https://sfqowvpuzsqgmwlecgdx.supabase.co"
 # wrangler secret put SUB_AGENT_SYSTEM_PROMPT
 # wrangler secret put SUB_AGENT_PLANNING_SYSTEM_PROMPT
 # wrangler secret put GROK_WEB_SEARCH_MODEL
+# wrangler secret put GROK_NORMALIZATION_MODEL  (default: grok-4.3 — expense/CSV categorization)
+# wrangler secret put GROK_NORMALIZATION_EFFORT  (default: none — none|low|medium|high; reasoning over a whole CSV times out)
 # wrangler secret put POLYMARKET_GAMMA_BASE_URL  (default: https://gamma-api.polymarket.com)
 
 [[queues.producers]]

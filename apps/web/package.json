@@ -6,7 +6,9 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint ."
+    "lint": "eslint .",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "dependencies": {
     "@hookform/resolvers": "^5.2.2",
@@ -79,6 +81,11 @@
   "devDependencies": {
     "@eslint/js": "^9.32.0",
     "@next/eslint-plugin-next": "^16.2.6",
+    "@testing-library/dom": "^10.4.0",
+    "@testing-library/jest-dom": "^6.6.3",
+    "@testing-library/react": "^16.1.0",
+    "@testing-library/user-event": "^14.5.2",
+    "@vitejs/plugin-react": "^4.3.4",
     "@types/d3-geo": "^3.1.0",
     "@types/node": "^22.16.5",
     "@types/papaparse": "^5.5.2",
@@ -90,8 +97,10 @@
     "eslint-plugin-prettier": "^5.2.6",
     "eslint-plugin-react-hooks": "^5.2.0",
     "globals": "^15.15.0",
+    "jsdom": "^25.0.1",
     "prettier": "^3.7.3",
     "typescript": "^5.8.3",
-    "typescript-eslint": "^8.56.1"
+    "typescript-eslint": "^8.56.1",
+    "vitest": "^3.2.6"
   }
 }

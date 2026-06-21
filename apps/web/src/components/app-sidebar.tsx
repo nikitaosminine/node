@@ -13,6 +13,7 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
   Settings,
+  Wallet,
 } from "lucide-react";
 import { NodeLogo } from "@/components/node-logo";
 import { ThemeSwitcher } from "@/components/ThemeSwitcher";
@@ -100,6 +101,7 @@ function SidebarInner({ collapsed }: { collapsed: boolean }) {
   }, [activePortfolioId]);
 
   const isSettingsActive = pathname.startsWith("/settings");
+  const isExpensesActive = pathname.startsWith("/expenses");
 
   return (
     <nav className="flex flex-1 flex-col overflow-y-auto py-3">
@@ -190,7 +192,23 @@ function SidebarInner({ collapsed }: { collapsed: boolean }) {
         })}
       </ul>
 
-      {/* ── Spacer + Settings ────────────────────────────────────────────── */}
+      {/* ── Expenses (own top-level section) ─────────────────────────────── */}
+      <div className="mt-3 px-2">
+        <Link
+          href="/expenses"
+          title={collapsed ? "Expenses" : undefined}
+          className={`flex items-center gap-2.5 rounded-md px-2 py-1.5 text-sm font-medium transition-colors ${
+            isExpensesActive
+              ? "bg-foreground/10 text-foreground"
+              : "text-foreground-muted hover:bg-surface-2 hover:text-foreground"
+          } ${collapsed ? "justify-center" : ""}`}
+        >
+          <Wallet className="h-4 w-4 shrink-0" />
+          {!collapsed && <span className="truncate">Expenses</span>}
+        </Link>
+      </div>
+
+      {/* ── Settings (pinned to bottom) ──────────────────────────────────── */}
       <div className="mt-auto px-2">
         <div className="my-2 border-t border-hairline" />
         <Link

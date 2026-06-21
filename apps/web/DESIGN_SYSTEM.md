@@ -88,6 +88,28 @@ consumed only as raw `var()`: `var(--accent-teal)` in the portfolio chart
 | `--negative`         | `text-negative`      | `oklch(0.58 0.2 25)`         | `oklch(0.7 0.2 25)`          |
 | `--chart-accent`     | —                    | `#0a0a0a`                    | `#ffffff`                    |
 
+### Heatmap ramp (`--heat-empty`, `--heat-1..5`)
+
+The **second sanctioned chromatic exception** (after the allocation strip): the Expenses
+spending heatmap. A single-hue intensity ramp, **warm orange in light mode, indigo blue in
+dark mode** (the mockup is the source of truth for this element — it is intentionally *not*
+teal). Consumed as raw `var(--heat-*)` only (no Tailwind utility); `--heat-empty` is a
+no-spend cell, visually distinct from a low-but-nonzero `--heat-1`. Used in
+`components/expenses/spending-heatmap.tsx`.
+
+| Token         | Light (orange)            | Dark (indigo)             |
+| ------------- | ------------------------- | ------------------------- |
+| `--heat-empty`| `oklch(0.965 0.004 70)`   | `oklch(0.17 0.012 275)`   |
+| `--heat-1`    | `oklch(0.93 0.05 72)`     | `oklch(0.3 0.07 278)`     |
+| `--heat-2`    | `oklch(0.87 0.09 64)`     | `oklch(0.38 0.11 274)`    |
+| `--heat-3`    | `oklch(0.8 0.13 56)`      | `oklch(0.47 0.145 270)`   |
+| `--heat-4`    | `oklch(0.72 0.16 48)`     | `oklch(0.57 0.17 267)`    |
+| `--heat-5`    | `oklch(0.63 0.185 42)`    | `oklch(0.67 0.19 265)`    |
+| `--heat-foreground` | `oklch(1 0 0)`      | `oklch(1 0 0)`            |
+
+Cell text is `--foreground` on `--heat-1..3` and `--heat-foreground` (white, both modes)
+on the saturated `--heat-4/5` steps. Never hardcode `#fff` — use the token.
+
 ### Chart series (`--chart-1..5`)
 
 | Token       | Light                  | Dark                   |

@@ -8,6 +8,171 @@ export type Database = {
   };
   public: {
     Tables: {
+      expense_categories: {
+        Row: {
+          created_at: string;
+          display_name: string;
+          id: string;
+          is_fixed_default: boolean;
+          parent_id: string | null;
+          pfc_detailed: string | null;
+          pfc_primary: string;
+          user_id: string | null;
+        };
+        Insert: {
+          created_at?: string;
+          display_name: string;
+          id?: string;
+          is_fixed_default?: boolean;
+          parent_id?: string | null;
+          pfc_detailed?: string | null;
+          pfc_primary: string;
+          user_id?: string | null;
+        };
+        Update: {
+          created_at?: string;
+          display_name?: string;
+          id?: string;
+          is_fixed_default?: boolean;
+          parent_id?: string | null;
+          pfc_detailed?: string | null;
+          pfc_primary?: string;
+          user_id?: string | null;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "expense_categories_parent_id_fkey";
+            columns: ["parent_id"];
+            isOneToOne: false;
+            referencedRelation: "expense_categories";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      expense_transactions: {
+        Row: {
+          amount: number;
+          category_id: string | null;
+          created_at: string;
+          currency: string;
+          external_id: string | null;
+          id: string;
+          is_recurring: boolean;
+          merchant_name: string;
+          note: string | null;
+          posted_at: string;
+          source: string;
+          updated_at: string;
+          user_id: string;
+        };
+        Insert: {
+          amount: number;
+          category_id?: string | null;
+          created_at?: string;
+          currency?: string;
+          external_id?: string | null;
+          id?: string;
+          is_recurring?: boolean;
+          merchant_name: string;
+          note?: string | null;
+          posted_at: string;
+          source?: string;
+          updated_at?: string;
+          user_id: string;
+        };
+        Update: {
+          amount?: number;
+          category_id?: string | null;
+          created_at?: string;
+          currency?: string;
+          external_id?: string | null;
+          id?: string;
+          is_recurring?: boolean;
+          merchant_name?: string;
+          note?: string | null;
+          posted_at?: string;
+          source?: string;
+          updated_at?: string;
+          user_id?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "expense_transactions_category_id_fkey";
+            columns: ["category_id"];
+            isOneToOne: false;
+            referencedRelation: "expense_categories";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      expense_income: {
+        Row: {
+          amount: number;
+          created_at: string;
+          currency: string;
+          id: string;
+          month: string;
+          updated_at: string;
+          user_id: string;
+        };
+        Insert: {
+          amount: number;
+          created_at?: string;
+          currency?: string;
+          id?: string;
+          month: string;
+          updated_at?: string;
+          user_id: string;
+        };
+        Update: {
+          amount?: number;
+          created_at?: string;
+          currency?: string;
+          id?: string;
+          month?: string;
+          updated_at?: string;
+          user_id?: string;
+        };
+        Relationships: [];
+      };
+      expense_budgets: {
+        Row: {
+          amount: number;
+          category_id: string | null;
+          created_at: string;
+          id: string;
+          period: string;
+          updated_at: string;
+          user_id: string;
+        };
+        Insert: {
+          amount: number;
+          category_id?: string | null;
+          created_at?: string;
+          id?: string;
+          period?: string;
+          updated_at?: string;
+          user_id: string;
+        };
+        Update: {
+          amount?: number;
+          category_id?: string | null;
+          created_at?: string;
+          id?: string;
+          period?: string;
+          updated_at?: string;
+          user_id?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "expense_budgets_category_id_fkey";
+            columns: ["category_id"];
+            isOneToOne: false;
+            referencedRelation: "expense_categories";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
       agent_portfolio_settings: {
         Row: {
           agent_enabled: boolean;

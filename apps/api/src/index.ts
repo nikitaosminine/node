@@ -41,6 +41,8 @@ export interface Env {
   GROK_SUB_API_KEY?: string;
   GROK_NORMALIZATION_API_KEY?: string;
   GROK_WEB_SEARCH_MODEL?: string;
+  GROK_NORMALIZATION_MODEL?: string;
+  GROK_NORMALIZATION_EFFORT?: string;
   GROK_API_BASE_URL?: string;
   MAIN_AGENT_SYSTEM_PROMPT?: string;
   SUB_AGENT_SYSTEM_PROMPT?: string;
@@ -4051,6 +4053,172 @@ export default {
         supabase = "error";
       }
       return json({ status: "ok", supabase, timestamp: new Date().toISOString() });
+    }
+
+    // POST /api/expenses/import/preview — normalize a bank/card CSV into expense rows
+    // via the LLM (Grok). User-scoped (expenses are owner-owned, not portfolio-scoped).
+    // Writes nothing: the web client confirms + inserts via RLS (per the direct-client
+    // write decision). Mirrors /api/portfolios/:id/transactions/preview.
+    if (method === "POST" && pathname === "/api/expenses/import/preview") {
+      const auth = await requireAuth(request, env);
+      if (auth instanceof Response) return auth;
+      if (!env.GROK_NORMALIZATION_API_KEY) {
+        return json({ error: "Server misconfiguration: GROK_NORMALIZATION_API_KEY is missing" }, 500);
+      }
+
+      const body = (await request.json().catch(() => ({}))) as { csv?: string };
+      const csv = String(body.csv ?? "");
+      if (!csv.trim()) return json({ error: "csv is required" }, 400);
+
+      const instructions = [
+        "You are a personal-finance data normalizer. Map each bank or card CSV row to this exact schema:",
+        "posted_at: ISO date YYYY-MM-DD.",
+        "merchant_name: cleaned merchant or payee name (strip card/ref noise).",
+        "amount: positive number string of the absolute value (no sign, keep decimals).",
+        "currency: 3-letter ISO code; default EUR if absent.",
+        'kind: "spend" for money out, "income" for money in (salary, refunds treated as income).',
+        "is_recurring: true for rent, utilities, subscriptions, insurance, loan repayments, and salary; false for one-off purchases.",
+        "pfc_primary: ONE of exactly these Plaid PFCv2 primary categories:",
+        "INCOME, TRANSFER_IN, TRANSFER_OUT, LOAN_PAYMENTS, BANK_FEES, ENTERTAINMENT, FOOD_AND_DRINK, GENERAL_MERCHANDISE, HOME_IMPROVEMENT, MEDICAL, PERSONAL_CARE, GENERAL_SERVICES, GOVERNMENT_AND_NON_PROFIT, TRANSPORTATION, TRAVEL, RENT_AND_UTILITIES.",
+        "external_ref: the bank's own transaction id/reference if such a column exists, else null.",
+        "confidence: number 0 to 1 for how sure you are of pfc_primary and kind.",
+        "Rules: do not invent missing data; skip empty/summary/balance rows. Keep amounts positive.",
+        'Return only JSON: { "columns_detected": string[], "rows": [ { posted_at, merchant_name, amount, currency, kind, is_recurring, pfc_primary, external_ref, confidence } ], "errors": string[] }',
+        "",
+        "Disambiguation rules:",
+        "- Payment processors (SQ *, SQUARE, PAYPAL *, SP *, TST*, IZ *, ZTL*) are NOT the merchant: strip the prefix and categorize by the underlying name that follows.",
+        "- is_recurring=true ONLY for charges that clearly repeat on a schedule: rent, utilities, insurance, loan/mortgage repayments, named subscriptions (Netflix, Spotify, gym, mobile plans), and salary. A one-off purchase at a recurring-looking merchant stays false.",
+        "- Account transfers and credit-card repayments → TRANSFER_OUT (money out) or TRANSFER_IN (money in). Salary and refunds → kind=income.",
+        "- Lower confidence (≤0.4) when the descriptor is cryptic or the category is a genuine guess.",
+        "Examples (raw descriptor → key fields):",
+        '  "TFL TRAVEL CH LONDON GB" → merchant_name="Transport for London", kind="spend", is_recurring=false, pfc_primary="TRANSPORTATION"',
+        '  "UBER *EATS help.uber.com" → merchant_name="Uber Eats", kind="spend", is_recurring=false, pfc_primary="FOOD_AND_DRINK"',
+        '  "SQ *BLUE BOTTLE COFFEE" → merchant_name="Blue Bottle Coffee", kind="spend", is_recurring=false, pfc_primary="FOOD_AND_DRINK"',
+        '  "PAYPAL *STEAMGAMES 4029357" → merchant_name="Steam Games", kind="spend", is_recurring=false, pfc_primary="ENTERTAINMENT"',
+        '  "NETFLIX.COM 8662232" → merchant_name="Netflix", kind="spend", is_recurring=true, pfc_primary="ENTERTAINMENT"',
+        '  "THAMES WATER DD" → merchant_name="Thames Water", kind="spend", is_recurring=true, pfc_primary="RENT_AND_UTILITIES"',
+        '  "ACME LTD SALARY JUN" → merchant_name="Acme Ltd", kind="income", is_recurring=true, pfc_primary="INCOME"',
+        '  "MONTHLY ACCOUNT FEE" → merchant_name="Account fee", kind="spend", is_recurring=true, pfc_primary="BANK_FEES"',
+        "",
+        "The first CSV line below is the header (column names) — use it to read the columns but do NOT emit a row for it.",
+      ];
+
+      // A single LLM call over a large CSV is dominated by OUTPUT-token generation: hundreds
+      // of rows × ~9 fields is tens of thousands of tokens emitted sequentially, which blows
+      // any reasonable timeout no matter how trivial each row is. So split the rows into small
+      // batches and normalize them concurrently — wall-clock collapses to roughly one batch,
+      // and a slow/failed batch degrades to a skip-with-error instead of failing the import.
+      const allLines = csv.split(/\r?\n/).filter((line) => line.trim().length > 0);
+      const header = allLines[0] ?? "";
+      let dataLines = allLines.slice(1);
+
+      const MAX_ROWS = 1000;
+      const preErrors: string[] = [];
+      if (dataLines.length > MAX_ROWS) {
+        preErrors.push(
+          `Only the first ${MAX_ROWS} of ${dataLines.length} rows were processed — re-upload the rest separately.`,
+        );
+        dataLines = dataLines.slice(0, MAX_ROWS);
+      }
+      if (dataLines.length === 0) {
+        return json({ columns_detected: [], rows: [], errors: ["No data rows found in the CSV."] });
+      }
+
+      const CHUNK_SIZE = 50;
+      const chunks: string[] = [];
+      for (let i = 0; i < dataLines.length; i += CHUNK_SIZE) {
+        chunks.push([header, ...dataLines.slice(i, i + CHUNK_SIZE)].join("\n"));
+      }
+
+      type ChunkResult = { columns: string[]; rows: unknown[]; errors: string[] };
+      const normalizeChunk = async (chunkCsv: string): Promise<ChunkResult> => {
+        const prompt = [...instructions, "", "CSV:", chunkCsv].join("\n");
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 60000);
+        try {
+          const res = await fetch(`${getGrokBaseUrl(env)}/chat/completions`, {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${env.GROK_NORMALIZATION_API_KEY}`,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              // Dedicated model for expense normalization (decoupled from GROK_WEB_SEARCH_MODEL).
+              // Small batches make reasoning affordable again: grok-4.3 at reasoning_effort
+              // "low" sharpens category/recurring inference without blowing the per-batch bound.
+              model: env.GROK_NORMALIZATION_MODEL || "grok-4.3",
+              reasoning_effort: env.GROK_NORMALIZATION_EFFORT || "low",
+              messages: [{ role: "user", content: prompt }],
+              response_format: { type: "json_object" },
+              max_tokens: 16000,
+            }),
+            signal: controller.signal,
+          });
+          if (!res.ok) {
+            const text = await res.text();
+            return { columns: [], rows: [], errors: [`A batch failed (${res.status}): ${text.slice(0, 150)}`] };
+          }
+          const llmData = (await res.json()) as GrokChatResponse;
+          const content: string = llmData.choices?.[0]?.message?.content ?? "";
+          const stripped = content
+            .trim()
+            .replace(/^```json\s*/i, "")
+            .replace(/^```\s*/i, "")
+            .replace(/```\s*$/i, "")
+            .trim();
+          let parsed: Record<string, unknown>;
+          try {
+            parsed = JSON.parse(stripped) as Record<string, unknown>;
+          } catch {
+            const start = stripped.indexOf("{");
+            const end = stripped.lastIndexOf("}");
+            if (start >= 0 && end > start) {
+              parsed = JSON.parse(stripped.slice(start, end + 1)) as Record<string, unknown>;
+            } else {
+              return { columns: [], rows: [], errors: ["A batch returned unparseable content and was skipped."] };
+            }
+          }
+          return {
+            columns: Array.isArray(parsed.columns_detected) ? (parsed.columns_detected as string[]) : [],
+            rows: Array.isArray(parsed.rows) ? (parsed.rows as unknown[]) : [],
+            errors: Array.isArray(parsed.errors) ? (parsed.errors as string[]) : [],
+          };
+        } catch (error) {
+          const message =
+            error instanceof Error && error.name === "AbortError"
+              ? "A batch timed out and was skipped."
+              : error instanceof Error
+                ? error.message
+                : "A batch failed.";
+          return { columns: [], rows: [], errors: [message] };
+        } finally {
+          clearTimeout(timeout);
+        }
+      };
+
+      // Bounded concurrency: several batches at once, but not all of them if the CSV is large
+      // (stays under subrequest/rate limits). A shared cursor hands each worker the next chunk.
+      const CONCURRENCY = 8;
+      const results: ChunkResult[] = new Array(chunks.length);
+      let cursor = 0;
+      await Promise.all(
+        Array.from({ length: Math.min(CONCURRENCY, chunks.length) }, async () => {
+          for (let index = cursor++; index < chunks.length; index = cursor++) {
+            results[index] = await normalizeChunk(chunks[index]);
+          }
+        }),
+      );
+
+      const rows = results.flatMap((r) => r.rows);
+      const columns_detected = Array.from(new Set(results.flatMap((r) => r.columns)));
+      const errors = [...preErrors, ...results.flatMap((r) => r.errors)];
+
+      // Total failure only when every batch produced nothing; otherwise return the partial
+      // rows plus the per-batch errors (the review UI surfaces them).
+      if (rows.length === 0) {
+        return json({ error: errors[0] ?? "Normalization produced no rows" }, 502);
+      }
+      return json({ columns_detected, rows, errors });
     }
 
     if (method === "GET" && pathname === "/api/benchmarks/search") {
