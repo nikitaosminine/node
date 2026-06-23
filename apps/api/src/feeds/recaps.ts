@@ -1003,7 +1003,7 @@ function buildResearchToolHandlers(
   client: ReturnType<typeof db>,
   portfolioId: string,
   ctx: GatheredContext,
-  collectedSources: { mover: SlideSource[]; moverSummaries: string[]; macro: SlideSource[]; macroSummaries: string[]; watch: typeof ctx.watch },
+  collectedSources: CollectedSources,
 ): Record<string, (args: Record<string, unknown>) => Promise<Record<string, unknown>>> {
   // Per-run search controls. Exa rate-limits at 10 req/s on a key shared with
   // the rest of the Worker, so we (a) dedupe identical queries (the agent tends
@@ -1122,8 +1122,9 @@ function buildResearchToolHandlers(
         };
       });
 
-      // If the dominant mover matches, update collectedSources.
-      if (articles.length > 0 && (ctx.dominantMover?.ticker === ticker)) {
+      // Fill mover sources from stored news for the dominant mover — but only if
+      // search_news hasn't already populated them (don't clobber prior results).
+      if (articles.length > 0 && ctx.dominantMover?.ticker === ticker && collectedSources.mover.length === 0) {
         collectedSources.mover = articles.map((a) => ({ title: a.title, url: a.url, source: a.source }));
         collectedSources.moverSummaries = articles.map((a) => a.snippet || a.title);
       }
