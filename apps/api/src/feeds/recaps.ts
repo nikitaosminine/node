@@ -21,8 +21,7 @@ import { withRunTree } from "langsmith/traceable";
 import { langsmithClient } from "../llm/langsmith";
 import {
   invokeGeminiStructured,
-  invokeGeminiWithTools,
-  MaxIterationsError,
+  invokeGeminiResearch,
   geminiModel,
   type GeminiSchema,
   type GeminiFunctionDeclaration,
@@ -85,19 +84,6 @@ const EXCHANGE_INDEX_DEFAULTS: Record<string, Array<{ ticker: string; label: str
   TSE: [{ ticker: "^N225", label: "Nikkei 225" }],
 };
 
-const EXCHANGE_REGION: Record<string, { label: string; userLocation: string }> = {
-  NYSE: { label: "the US", userLocation: "us" },
-  NASDAQ: { label: "the US", userLocation: "us" },
-  EURONEXT: { label: "Europe", userLocation: "fr" },
-  XETRA: { label: "Germany", userLocation: "de" },
-  LSE: { label: "the UK", userLocation: "gb" },
-  TSE: { label: "Japan", userLocation: "jp" },
-};
-
-// Exa relevance floor for the mover search. Below this (or zero results) we
-// switch to the no-press fallback. Starts permissive; recalibrate from
-// observed Exa output (see plan verification).
-const MOVER_MIN_SCORE = 0.25;
 const EXA_BASE = "https://api.exa.ai";
 
 // Series colors map to design-system tokens (resolved on the web). The
@@ -217,35 +203,84 @@ interface ExaResult {
   summary?: string;
 }
 
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+// Outcome distinguishes "no news" (ok + empty) from a transient failure
+// (rate_limited / error). Exa enforces 10 req/s per API KEY, shared across the
+// whole Worker (news cron, geography, polymarket) — so 429s happen under load.
+// The old code swallowed every non-200 to [], making a 429 look identical to
+// "no news", which produced confident-but-ungrounded slides. We now retry 429/
+// 5xx with backoff and report the status so callers can react.
+//
+// includeDomains is the curated NEWS_INCLUDE_DOMAINS allowlist. Exa 403s the
+// WHOLE request if it names a domain Exa no longer indexes, so that list is kept
+// to live domains only (see the note on NEWS_INCLUDE_DOMAINS in news.ts).
+// A 403 here is surfaced as `error`, not silently swallowed.
+type ExaStatus = "ok" | "rate_limited" | "error";
+interface ExaOutcome {
+  results: ExaResult[];
+  status: ExaStatus;
+}
+
 async function exaSearch(
   apiKey: string,
   query: string,
   startPublishedDate: string,
+  endPublishedDate: string,
   userLocation: string,
   numResults: number,
   includeDomains?: string[],
-): Promise<ExaResult[]> {
-  try {
-    const res = await fetch(`${EXA_BASE}/search`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "x-api-key": apiKey },
-      body: JSON.stringify({
-        query,
-        type: "auto",
-        category: "news",
-        numResults,
-        startPublishedDate,
-        userLocation,
-        ...(includeDomains && includeDomains.length ? { includeDomains } : {}),
-        contents: { summary: { query } },
-      }),
-    });
-    if (!res.ok) return [];
-    const data = (await res.json()) as { results?: ExaResult[] };
-    return data.results ?? [];
-  } catch {
-    return [];
+): Promise<ExaOutcome> {
+  const body = JSON.stringify({
+    query,
+    type: "auto",
+    category: "news",
+    numResults,
+    startPublishedDate,
+    endPublishedDate,
+    userLocation,
+    ...(includeDomains && includeDomains.length ? { includeDomains } : {}),
+    contents: { summary: { query } },
+  });
+
+  const maxAttempts = 3;
+  let lastStatus: ExaStatus = "error";
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const res = await fetch(`${EXA_BASE}/search`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-api-key": apiKey },
+        body,
+      });
+      if (res.ok) {
+        const data = (await res.json()) as { results?: ExaResult[] };
+        return { results: data.results ?? [], status: "ok" };
+      }
+      const errText = await res.text().catch(() => "");
+      // Retry rate-limits and transient 5xx; a per-second window clears fast.
+      if (res.status === 429 || res.status >= 500) {
+        lastStatus = res.status === 429 ? "rate_limited" : "error";
+        if (attempt < maxAttempts) {
+          await sleep(350 * attempt + Math.floor(Math.random() * 150));
+          continue;
+        }
+        console.warn(`[exa] ${res.status} after ${attempt} attempts: ${errText.slice(0, 160)}`);
+        return { results: [], status: lastStatus };
+      }
+      // Other 4xx — a real request problem, not worth retrying. Surface it.
+      console.warn(`[exa] ${res.status}: ${errText.slice(0, 160)}`);
+      return { results: [], status: "error" };
+    } catch (err) {
+      lastStatus = "error";
+      if (attempt < maxAttempts) {
+        await sleep(350 * attempt);
+        continue;
+      }
+      console.warn(`[exa] fetch threw after ${attempt} attempts: ${err instanceof Error ? err.message : String(err)}`);
+      return { results: [], status: "error" };
+    }
   }
+  return { results: [], status: lastStatus };
 }
 
 function toSources(results: ExaResult[], limit: number): SlideSource[] {
@@ -279,6 +314,8 @@ interface MoverInfo {
 interface GatheredContext {
   type: RecapType;
   periodLabel: string; // "today" | "this week"
+  periodStart: string; // recap.period_start (YYYY-MM-DD) — anchors the news window
+  periodEnd: string;   // recap.period_end   (YYYY-MM-DD)
   // performance
   returnPct: number;
   portfolioSeries: Array<{ date: string; close: number }>;
@@ -316,7 +353,6 @@ interface RecapRowLite {
 async function gatherContext(
   env: Env,
   recap: RecapRowLite,
-  macroCache: Map<string, { sources: SlideSource[]; summaries: string[] }>,
 ): Promise<GatheredContext | null> {
   const client = db(env);
   const type = recap.type;
@@ -516,104 +552,27 @@ async function gatherContext(
     };
   });
 
-  // --- narrative retrieval (Exa) ---
-  const region = EXCHANGE_REGION[primaryExchange] ?? { label: "global markets", userLocation: "us" };
-  const windowDays = type === "daily" ? 2 : 8;
-  const startPublished = new Date(Date.now() - windowDays * 86_400_000).toISOString();
-
-  let moverPress: SlideSource[] = [];
-  let moverPressSummaries: string[] = [];
-  let moverNoPress = true;
-  if (dominantMover && env.EXA_SEARCH) {
-    // Reuse stored news_clusters first (zero cost).
-    const { data: clusterRows } = await client
-      .from("portfolio_news_matches")
-      .select(`score, news_clusters!inner(primary_article, entities, expires_at)`)
-      .eq("portfolio_id", recap.portfolio_id)
-      .gt("news_clusters.expires_at", new Date().toISOString())
-      .order("score", { ascending: false })
-      .limit(10);
-    const moverTicker = dominantMover.ticker;
-    const matchedClusters = (clusterRows ?? []).filter((r) => {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const ents = (r as any).news_clusters?.entities ?? {};
-      const tickers: string[] = (ents.tickers ?? []).map((t: string) => String(t).toUpperCase());
-      return tickers.includes(moverTicker);
-    });
-    if (matchedClusters.length > 0) {
-      moverPress = matchedClusters.slice(0, 3).map((r) => {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const a = (r as any).news_clusters?.primary_article ?? {};
-        return { title: String(a.title ?? ""), url: String(a.url ?? ""), source: String(a.source ?? "") };
-      });
-      moverPressSummaries = matchedClusters.slice(0, 3).map((r) => {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const a = (r as any).news_clusters?.primary_article ?? {};
-        return String(a.snippet ?? a.title ?? "");
-      });
-      moverNoPress = false;
-    } else {
-      const dir = dominantMover.changePct >= 0 ? "rise" : "fall";
-      // Premium allowlist: small-caps with no premium coverage fall through to
-      // the no-press framing (desired) rather than citing SEO junk.
-      const results = await exaSearch(
-        env.EXA_SEARCH,
-        `What drove ${dominantMover.name} (${dominantMover.ticker}) stock to ${dir} ${periodLabel}?`,
-        startPublished,
-        region.userLocation,
-        8,
-        NEWS_INCLUDE_DOMAINS,
-      );
-      const onTarget = results.filter((r) => (r.score ?? 0) >= MOVER_MIN_SCORE);
-      if (onTarget.length > 0) {
-        moverPress = toSources(onTarget, 3);
-        moverPressSummaries = onTarget.slice(0, 3).map((r) => r.summary ?? r.title ?? "");
-        moverNoPress = false;
-      }
-    }
-  }
-
-  // Macro press — shared across portfolios per region within a fanout batch.
-  // Restricted to the premium financial-press allowlist (FT/WSJ/Bloomberg/
-  // Reuters/Economist/lesechos…) — the "markets wrap" tier — so we never cite
-  // the .sg/.hk/SEO long tail.
-  let macroPress: SlideSource[] = [];
-  let macroPressSummaries: string[] = [];
-  const macroKey = `${primaryExchange}:${type}`;
-  if (env.EXA_SEARCH) {
-    const cached = macroCache.get(macroKey);
-    if (cached) {
-      macroPress = cached.sources;
-      macroPressSummaries = cached.summaries;
-    } else {
-      const results = await exaSearch(
-        env.EXA_SEARCH,
-        `${region.label} stock market wrap: what moved markets ${periodLabel}`,
-        startPublished,
-        region.userLocation,
-        10,
-        NEWS_INCLUDE_DOMAINS,
-      );
-      macroPress = toSources(results, 3);
-      macroPressSummaries = results.slice(0, 3).map((r) => r.summary ?? r.title ?? "");
-      macroCache.set(macroKey, { sources: macroPress, summaries: macroPressSummaries });
-    }
-  }
-
+  // Narrative retrieval (news/macro press) is NOT done here. It belongs to the
+  // research stage (stage 1 of generateRecap), where the agent decides what to
+  // look up via its tools (get_stored_news, search_news, get_polymarket_events)
+  // and fills `collectedSources`. gatherContext is now purely deterministic
+  // facts. Press fields start empty and are populated by the research stage.
   return {
     type,
     periodLabel,
+    periodStart: recap.period_start,
+    periodEnd: recap.period_end,
     returnPct,
     portfolioSeries,
     gainer,
     loser,
     dominantMover,
-    moverPress,
-    moverPressSummaries,
-    moverNoPress,
+    moverPress: [],
+    moverPressSummaries: [],
+    moverNoPress: true,
     indices,
-    macroPress,
-    macroPressSummaries,
+    macroPress: [],
+    macroPressSummaries: [],
     watch,
     usPct,
     holdingsSummary: holdings.map((h) => ({ ticker: h.ticker, name: h.name })),
@@ -649,29 +608,10 @@ function buildLlmSchema(type: RecapType): GeminiSchema {
   };
 }
 
-function buildStaticSystemPrompt(type: RecapType): string {
-  const slideCount = type === "daily" ? "3" : "4";
-  const slideOrder = type === "daily"
-    ? "performance, macro, mover"
-    : "performance, macro, mover, watch";
-  const watchLine = type === "weekly"
-    ? "For the watch slide, name the 1-2 most important concrete, dated catalysts from the provided items; avoid vague themes like 'monitor inflation' unless tied to a specific named event."
-    : "";
-  return [
-    `You write a ${slideCount}-slide ${type} portfolio recap for a retail investor.`,
-    "Voice: calm, factual, sharp, concise. Each slide is 1-3 short lines. Short and sweet.",
-    "Use ONLY the facts and source snippets provided for prices, news, and specific events.",
-    "Put NO prices, currency amounts, or percentage figures in your prose — those are rendered separately from structured data. Do not restate the numbers.",
-    "Make no quantified factual claim (e.g. 'third straight day', 'two-week low', 'record high') and cite no specific event or catalyst unless a provided source snippet states it.",
-    "You MAY use well-known general knowledge of a company's industry/sector and broad, established sector themes for context (e.g. 'the semiconductor maker, a beneficiary of AI demand'). Do not invent company-specific news, figures, or dates.",
-    "Only relate a holding to a market index when the holding actually trades in that market — e.g. do not imply a French-listed stock tracks the Nasdaq. Compare it to its own market's index or its sector instead.",
-    "Never invent a cause. If told no company-specific news drove a move, say so plainly; attribute it to broad/sector movement only when that is supported.",
-    watchLine,
-    `Return the ${slideCount} slides in order: ${slideOrder}.`,
-  ].filter(Boolean).join(" ");
-}
-
-function buildUserPrompt(ctx: GatheredContext): string {
+// Shared FACTS block — the deterministic, already-computed context both the
+// research stage (to decide what to look up) and the compose stage (to write
+// from) need. Numbers are rendered separately, so prose never repeats them.
+function buildFactsLines(ctx: GatheredContext): string[] {
   const lines: string[] = [];
   lines.push(`PERIOD: ${ctx.type} recap (covers ${ctx.periodLabel}).`);
   lines.push("");
@@ -697,11 +637,6 @@ function buildUserPrompt(ctx: GatheredContext): string {
   if (!ctx.gainer && !ctx.loser) {
     lines.push("No notable individual movers identified.");
   }
-  if (ctx.dominantMover && ctx.moverNoPress) {
-    lines.push(
-      `NO company-specific news was found for ${ctx.dominantMover.name}. Do NOT invent a catalyst. You may note its industry/sector and broad sector themes; otherwise state plainly that no major company news drove the move.`,
-    );
-  }
   // Portfolio composition — so the model knows exactly which holdings are exposed to each risk.
   lines.push(
     "Portfolio holdings: " +
@@ -721,7 +656,82 @@ function buildUserPrompt(ctx: GatheredContext): string {
           .join("\n"),
     );
   }
-  lines.push("Also use the macro/market press snippets below to identify sector or macro catalysts that could move these specific holdings.");
+  return lines;
+}
+
+// ----- Stage 1: research prompts -----
+
+function buildResearchSystemPrompt(type: RecapType): string {
+  const isDaily = type === "daily";
+  const strategy = isDaily
+    ? "(1) get_stored_news for the biggest gainer and loser; (2) search_news for the day's catalysts (one search per name; language='fr' for .PA stocks)."
+    : "(1) get_stored_news for the biggest gainer and loser; (2) search_news for each mover and one for the macro backdrop (language='fr' for .PA stocks); (3) get_polymarket_events for forward-looking macro risk signals.";
+  return [
+    `You are a research analyst gathering real-world evidence for a ${type} portfolio recap.`,
+    "Your job is to GATHER and SYNTHESIZE narrative context — not to write the recap. A separate step turns your findings into slides.",
+    "You are given FACTS (returns, movers, indices, holdings) but NO news. Use your tools to find what actually drove the moves and what lies ahead.",
+    `Strategy: ${strategy}`,
+    "On every search_news call, set topic='mover' when searching a specific holding's news and topic='macro' for market/sector backdrop — it routes the citation to the right slide.",
+    "For .PA (French-listed) stocks, search in French: 'action {name} ({ticker}) bourse'.",
+    "Search efficiently: ONE search per name or topic with good keywords. The recency window is applied automatically — do not put dates or years in queries. If a search returns a 'rate-limited' or 'failed' note, that means UNKNOWN (not 'no news') — do not re-run the same query; move on and rely on stored news or sector context.",
+    "Ground every claim in a tool result. Never invent figures, dates, or company-specific news. If no company-specific news exists for a mover, say so explicitly so the writer attributes it to sector/broad movement.",
+    "When you have enough, STOP calling tools and reply with a concise plain-text findings brief, organized as: MOVERS (per-name catalyst, or 'no company news'), MACRO (market backdrop), and " +
+      (isDaily ? "(daily recaps have no forward-looking section)." : "WATCH (1-2 concrete, dated forward catalysts for these specific holdings, drawing on the polymarket signals)."),
+  ].filter(Boolean).join(" ");
+}
+
+function buildResearchUserPrompt(ctx: GatheredContext): string {
+  const lines = buildFactsLines(ctx);
+  lines.push("");
+  lines.push(
+    ctx.type === "daily"
+      ? `This recap covers the trading session of ${ctx.periodEnd}.`
+      : `This recap covers the trading week of ${ctx.periodStart} to ${ctx.periodEnd}.`,
+  );
+  lines.push("=== YOUR TASK ===");
+  lines.push("Research the catalysts behind the movers and the market backdrop, then synthesize a plain-text findings brief for the writer. Cite source titles where useful.");
+  if (ctx.type === "daily") {
+    lines.push("This is a DAILY recap — focus on that session: its moves, company announcements, intraday catalysts. The search recency window is applied for you; use keyword-only queries (no dates).");
+  } else {
+    lines.push("This is a WEEKLY recap — capture context across the full week plus forward-looking catalysts for next week. The search recency window is applied for you; use keyword-only queries (no dates).");
+  }
+  return lines.join("\n");
+}
+
+// ----- Stage 2: compose prompts -----
+
+function buildComposeSystemPrompt(type: RecapType): string {
+  const slideCount = type === "daily" ? "3" : "4";
+  const slideOrder = type === "daily"
+    ? "performance, macro, mover"
+    : "performance, macro, mover, watch";
+  const watchLine = type === "weekly"
+    ? "For the watch slide, name the 1-2 most important concrete, dated catalysts from the research findings; avoid vague themes like 'monitor inflation' unless tied to a specific named event."
+    : "";
+  return [
+    `You write a ${slideCount}-slide ${type} portfolio recap for a retail investor.`,
+    "Voice: calm, factual, sharp, concise. Each slide is 1-3 short lines. Short and sweet.",
+    "Use ONLY the FACTS, the RESEARCH FINDINGS, and the source snippets provided for prices, news, and specific events.",
+    "Put NO prices, currency amounts, or percentage figures in your prose — those are rendered separately from structured data. Do not restate the numbers.",
+    "Make no quantified factual claim (e.g. 'third straight day', 'two-week low', 'record high') and cite no specific event or catalyst unless the research findings or a source snippet states it.",
+    "You MAY use well-known general knowledge of a company's industry/sector and broad, established sector themes for context (e.g. 'the semiconductor maker, a beneficiary of AI demand'). Do not invent company-specific news, figures, or dates.",
+    "Only relate a holding to a market index when the holding actually trades in that market — e.g. do not imply a French-listed stock tracks the Nasdaq. Compare it to its own market's index or its sector instead.",
+    "Never invent a cause. If the research found no company-specific news drove a move, say so plainly; attribute it to broad/sector movement only when that is supported.",
+    watchLine,
+    `Return the ${slideCount} slides in order: ${slideOrder}.`,
+  ].filter(Boolean).join(" ");
+}
+
+function buildComposeUserPrompt(ctx: GatheredContext, findings: string): string {
+  const lines = buildFactsLines(ctx);
+  if (ctx.dominantMover && ctx.moverNoPress) {
+    lines.push(
+      `NO company-specific news was found for ${ctx.dominantMover.name}. Do NOT invent a catalyst. You may note its industry/sector and broad sector themes; otherwise state plainly that no major company news drove the move.`,
+    );
+  }
+  lines.push("");
+  lines.push("=== RESEARCH FINDINGS (your primary grounding; written by the research step) ===");
+  lines.push(findings.trim() ? findings.trim() : "(research returned no findings — write from FACTS and sector context only; do not invent catalysts)");
   lines.push("");
   lines.push("=== SOURCE SNIPPETS (cite these only; do not invent others) ===");
   if (ctx.macroPressSummaries.length > 0) {
@@ -733,24 +743,18 @@ function buildUserPrompt(ctx: GatheredContext): string {
     ctx.moverPressSummaries.forEach((s, i) => lines.push(`  [V${i + 1}] ${s}`));
   }
   if (ctx.macroPressSummaries.length === 0 && ctx.moverPressSummaries.length === 0) {
-    lines.push("(none)");
-  }
-  // Time-frame guidance for search_news tool calls
-  if (ctx.type === "daily") {
-    lines.push("SEARCH WINDOW: this is a DAILY recap. Search for news from the LAST 48 HOURS ONLY (set date_from to 2 days ago). Focus on what specifically happened today — today's market moves, company announcements, intraday catalysts.");
-  } else {
-    lines.push("SEARCH WINDOW: this is a WEEKLY recap. Search for news from the LAST 7-10 DAYS to capture context from across the full week.");
+    lines.push("(none — rely on the research findings above)");
   }
   lines.push("");
   lines.push("=== SLIDES TO WRITE ===");
   lines.push("performance: one line on whether the book was up or down and the broad reason.");
-  lines.push("macro: the market backdrop — how the relevant indices moved and why, grounded in the macro snippets.");
+  lines.push("macro: the market backdrop — how the relevant indices moved and why, grounded in the findings.");
   lines.push(
-    "mover: cover the biggest gainer AND the biggest loser. For each, why it moved — use the mover snippets if present, else its sector/industry context. Keep it sharp.",
+    "mover: cover the biggest gainer AND the biggest loser. For each, why it moved — use the findings if present, else its sector/industry context. Keep it sharp.",
   );
   if (ctx.type === "weekly") {
     lines.push(
-      "watch: 3-4 concrete catalysts to watch next week that could impact THIS portfolio's specific holdings. For each item, name the catalyst AND which holding(s) it affects. Draw from: (1) the Polymarket event probabilities above as crowd-consensus signals, (2) the macro press snippets as current news context — do not use Polymarket alone. Include sector-specific risks (e.g. oil price moves for TotalEnergies, rate decisions for growth/tech holdings). You may use up to 4 sentences.",
+      "watch: 3-4 concrete catalysts to watch next week that could impact THIS portfolio's specific holdings. For each item, name the catalyst AND which holding(s) it affects. Draw on the WATCH findings and the Polymarket probabilities. Include sector-specific risks (e.g. oil price moves for TotalEnergies, rate decisions for growth/tech holdings). You may use up to 4 sentences.",
     );
   }
   return lines.join("\n");
@@ -924,7 +928,7 @@ function assembleSlides(ctx: GatheredContext, llm: RecapLlmOutput): SlideSpec[] 
 }
 
 // ---------------------------------------------------------------------------
-// V1.3: Agentic tool declarations + handlers
+// Research tool declarations + handlers (stage 1)
 // ---------------------------------------------------------------------------
 
 // Tool parameter schemas use lowercase standard JSON Schema types.
@@ -932,16 +936,11 @@ function str(description: string): GeminiFunctionParam {
   return { type: "string", description };
 }
 
-function buildAgentTools(type: RecapType): GeminiFunctionDeclaration[] {
+// Tools the research agent uses to GATHER evidence. There is no write_slides
+// terminal tool — the research stage ends with a plain-text synthesis, and the
+// separate compose stage produces the structured slides.
+function buildResearchTools(type: RecapType): GeminiFunctionDeclaration[] {
   const isDaily = type === "daily";
-  const slideCount = isDaily ? "3" : "4";
-  const slideOrder = isDaily ? "performance, macro, mover" : "performance, macro, mover, watch";
-  const kindEnum = isDaily
-    ? ["performance", "macro", "mover"]
-    : ["performance", "macro", "mover", "watch"];
-  const searchDateHint = isDaily
-    ? "For a DAILY recap, always set date_from to 2 days ago (YYYY-MM-DD format)."
-    : "For a WEEKLY recap, set date_from to 7-10 days ago to cover the full week.";
 
   const tools: GeminiFunctionDeclaration[] = [
     {
@@ -950,15 +949,20 @@ function buildAgentTools(type: RecapType): GeminiFunctionDeclaration[] {
         "Search for news articles about a company, market, or macro topic via Exa. " +
         "Use language='fr' and French queries for French-listed stocks (.PA tickers) " +
         "or French market news — this retrieves French-language sources like " +
-        `boursorama.com, investir.lesechos.fr, latribune.fr. ${searchDateHint}`,
+        "boursorama.com, investir.lesechos.fr, latribune.fr. " +
+        "The recency window is applied automatically; do NOT put dates or years in the query text.",
       parameters: {
         type: "object",
         properties: {
-          query: str("The search query. Use French for .PA stocks (e.g. 'action SEMCO Technologies ALSEM.PA bourse')."),
+          query: str("The search query — keywords only, no dates/years (e.g. 'action Schneider Electric SU.PA bourse')."),
           language: { type: "string", enum: ["en", "fr"], description: "Query language and Exa userLocation." },
-          date_from: str("Required: ISO date (YYYY-MM-DD) for the lookback window start."),
+          topic: {
+            type: "string",
+            enum: ["mover", "macro"],
+            description: "What this search is for: 'mover' = news about a specific holding (e.g. the biggest gainer/loser), 'macro' = the broad market/sector backdrop. Controls which slide cites the results.",
+          },
         },
-        required: ["query", "language"],
+        required: ["query", "language", "topic"],
       },
     },
     {
@@ -974,42 +978,15 @@ function buildAgentTools(type: RecapType): GeminiFunctionDeclaration[] {
         required: ["ticker"],
       },
     },
-    {
-      name: "write_slides",
-      description:
-        "TERMINAL TOOL — call this when you have gathered enough context. " +
-        `Submit the final ${slideCount} slides: ${slideOrder}. ` +
-        "Prose only — do not include prices, percentages, or dollar amounts in headlines or body text. " +
-        "Numbers are rendered separately from structured data.",
-      parameters: {
-        type: "object",
-        properties: {
-          slides: {
-            type: "array",
-            description: `Exactly ${slideCount} slides in order: ${slideOrder}.`,
-            items: {
-              type: "object",
-              properties: {
-                kind: { type: "string", enum: kindEnum },
-                headline: str("Short headline, no numbers."),
-                body: { type: "array", items: str("One sentence."), description: "1-4 sentences of narrative." },
-              },
-              required: ["kind", "headline", "body"],
-            },
-          },
-        },
-        required: ["slides"],
-      },
-    },
   ];
 
   // get_polymarket_events is only useful for the weekly watch slide.
   if (!isDaily) {
-    tools.splice(2, 0, {
+    tools.push({
       name: "get_polymarket_events",
       description:
         "Retrieve the top portfolio-relevant Polymarket prediction markets (crowd-consensus probabilities for macro events). " +
-        "Use these as one signal alongside news — not the only source for the watch slide.",
+        "Use these as one signal alongside news — not the only source for the watch findings.",
       parameters: {
         type: "object",
         properties: {},
@@ -1021,30 +998,62 @@ function buildAgentTools(type: RecapType): GeminiFunctionDeclaration[] {
   return tools;
 }
 
-function buildAgentToolHandlers(
+function buildResearchToolHandlers(
   env: Env,
   client: ReturnType<typeof db>,
   portfolioId: string,
   ctx: GatheredContext,
-  collectedSources: { mover: SlideSource[]; moverSummaries: string[]; macro: SlideSource[]; macroSummaries: string[]; watch: typeof ctx.watch },
+  collectedSources: CollectedSources,
 ): Record<string, (args: Record<string, unknown>) => Promise<Record<string, unknown>>> {
+  // Per-run search controls. Exa rate-limits at 10 req/s on a key shared with
+  // the rest of the Worker, so we (a) dedupe identical queries (the agent tends
+  // to re-search the same name when it sees empty results) and (b) cap total
+  // calls. Together with exaSearch's 429 retry, this stops the spiral that left
+  // every search empty and the slides ungrounded.
+  const searchCache = new Map<string, Record<string, unknown>>();
+  let exaCalls = 0;
+  const MAX_EXA_CALLS = ctx.type === "daily" ? 6 : 8;
+
+  // News window anchored to the recap PERIOD, not run time — so the news matches
+  // the day(s) being recapped and a backfill/re-run is reproducible (no leaking
+  // of "now" news into a past-period recap). Floor a few days before period_start
+  // for context; ceiling is the day after period_end so the whole last day counts.
+  const addDaysUTC = (ymd: string, n: number) => {
+    const d = new Date(`${ymd}T00:00:00.000Z`);
+    d.setUTCDate(d.getUTCDate() + n);
+    return d.toISOString();
+  };
+  const startPublished = addDaysUTC(ctx.periodStart, ctx.type === "daily" ? -3 : -2);
+  const endPublished = addDaysUTC(ctx.periodEnd, 1);
+
   return {
     search_news: async (args) => {
       if (!env.EXA_SEARCH) return { results: [], note: "EXA_SEARCH not configured" };
-      const query = String(args.query ?? "");
+      const query = String(args.query ?? "").trim();
       const language = args.language === "fr" ? "fr" : "en";
-      const dateFrom = typeof args.date_from === "string" && args.date_from
-        ? args.date_from
-        : new Date(Date.now() - 14 * 86_400_000).toISOString().slice(0, 10);
-      const startPublished = new Date(`${dateFrom}T00:00:00.000Z`).toISOString();
+      const topic = args.topic === "mover" ? "mover" : "macro";
 
-      // Code decides the domain allowlist — agent cannot override it.
+      // Dedupe identical searches within this run — return the prior result, no
+      // new Exa call. This neutralizes the agent's retry-the-same-query behavior.
+      const cacheKey = `${language}|${topic}|${query.toLowerCase()}`;
+      const cached = searchCache.get(cacheKey);
+      if (cached) return cached;
+
+      if (exaCalls >= MAX_EXA_CALLS) {
+        return { results: [], note: "Search budget reached for this recap. Synthesize from what you already have and finish." };
+      }
+      exaCalls++;
+
+      // Code decides the domain allowlist — the agent cannot override it. French
+      // queries also get the French-specific secondary list. NEWS_INCLUDE_DOMAINS
+      // is curated to domains Exa still indexes, so this is one subrequest (no
+      // 403/retry); a future de-index would surface as `error`, not silent empty.
       const isFrench = language === "fr";
       const domains = isFrench
         ? [...NEWS_INCLUDE_DOMAINS, ...NEWS_INCLUDE_DOMAINS_SECONDARY]
         : NEWS_INCLUDE_DOMAINS;
 
-      const results = await exaSearch(env.EXA_SEARCH, query, startPublished, language === "fr" ? "fr" : "us", 8, domains);
+      const { results, status } = await exaSearch(env.EXA_SEARCH, query, startPublished, endPublished, isFrench ? "fr" : "us", 8, domains);
       const out = results
         .filter((r) => r.url && r.title)
         .slice(0, 5)
@@ -1057,14 +1066,32 @@ function buildAgentToolHandlers(
           published: r.publishedDate ?? "",
         }));
 
-      // Accumulate any useful results into collectedSources for assembleSlides.
-      // The agent can search for both macro and mover context — we sort by usage later.
-      if (out.length > 0 && collectedSources.macro.length < 3) {
-        collectedSources.macro.push(...toSources(results, 3 - collectedSources.macro.length));
-        collectedSources.macroSummaries.push(...results.slice(0, 2).map((r) => r.summary ?? r.title ?? ""));
+      // Route results to the slide they belong to (the agent declared `topic`),
+      // so the mover slide cites mover news and the macro slide cites macro news.
+      // get_stored_news may already have filled the mover bucket; don't clobber it.
+      if (out.length > 0) {
+        const bucket = topic === "mover" ? "mover" : "macro";
+        const sumsKey = topic === "mover" ? "moverSummaries" : "macroSummaries";
+        if (collectedSources[bucket].length < 3) {
+          collectedSources[bucket].push(...toSources(results, 3 - collectedSources[bucket].length));
+          collectedSources[sumsKey].push(...results.slice(0, 2).map((r) => r.summary ?? r.title ?? ""));
+        }
       }
 
-      return { results: out };
+      // Tell the agent the difference between "no news" and "search failed" so it
+      // doesn't treat a transient rate-limit as evidence and spiral on retries.
+      const response: Record<string, unknown> =
+        status === "ok"
+          ? { results: out }
+          : { results: out, note: status === "rate_limited"
+              ? "News search was rate-limited (already retried with backoff). Treat as UNKNOWN, not 'no news' — do not invent a catalyst; rely on stored news / sector context."
+              : "News search failed transiently. Treat as UNKNOWN, not 'no news'." };
+      // Cache every outcome (ok or failed). A repeated query returns the cached
+      // response with no new Exa call — exaSearch already did the backoff retries,
+      // so re-firing the same query in-run can't clear a persistent throttle and
+      // would only add load. The budget counts this call regardless of outcome.
+      searchCache.set(cacheKey, response);
+      return response;
     },
 
     get_stored_news: async (args) => {
@@ -1095,8 +1122,9 @@ function buildAgentToolHandlers(
         };
       });
 
-      // If the dominant mover matches, update collectedSources.
-      if (articles.length > 0 && (ctx.dominantMover?.ticker === ticker)) {
+      // Fill mover sources from stored news for the dominant mover — but only if
+      // search_news hasn't already populated them (don't clobber prior results).
+      if (articles.length > 0 && ctx.dominantMover?.ticker === ticker && collectedSources.mover.length === 0) {
         collectedSources.mover = articles.map((a) => ({ title: a.title, url: a.url, source: a.source }));
         collectedSources.moverSummaries = articles.map((a) => a.snippet || a.title);
       }
@@ -1116,29 +1144,29 @@ function buildAgentToolHandlers(
   };
 }
 
-// ---------------------------------------------------------------------------
-// Agent system prompt (for tool-calling mode)
-// ---------------------------------------------------------------------------
+// Sources the research tool handlers accumulate as the agent searches.
+interface CollectedSources {
+  mover: SlideSource[];
+  moverSummaries: string[];
+  macro: SlideSource[];
+  macroSummaries: string[];
+  watch: GatheredContext["watch"];
+}
 
-function buildAgentSystemPrompt(type: RecapType): string {
-  const isDaily = type === "daily";
-  const slideCount = isDaily ? "3" : "4";
-  const searchTimeframe = isDaily
-    ? "Search for news from the LAST 48 HOURS ONLY (date_from = 2 days ago). Focus on today's session."
-    : "Search for news from the LAST 7-10 DAYS to cover the full week.";
-  const strategySteps = isDaily
-    ? "(1) call get_stored_news for the biggest gainer and loser; (2) call search_news for today's context — use date_from 2 days ago, use language='fr' for .PA stocks; (3) call write_slides."
-    : "(1) call get_stored_news for the biggest gainer and loser; (2) call search_news for any holding or macro topic — use language='fr' for .PA stocks; (3) call get_polymarket_events for macro risk signals; (4) call write_slides.";
-  const frenchNote = "For .PA (French-listed) stocks, always search in French: 'action {name} ({ticker}) bourse aujourd'hui' (daily) or 'cette semaine' (weekly).";
-  return [
-    `You are writing a ${slideCount}-slide ${type} portfolio recap for a retail investor. Voice: calm, factual, sharp.`,
-    "You have tools to gather narrative context. Use them before writing slides.",
-    `Strategy: ${strategySteps}`,
-    `TIME FRAME: ${searchTimeframe}`,
-    "GROUNDING RULES: Never contradict the FACTS section. Never invent figures, dates, or company-specific news. No prices, %, or currency amounts in slide prose — those render from structured data.",
-    frenchNote,
-    "write_slides prose only — no numbers. Each slide: 1-4 short sentences.",
-  ].join(" ");
+// Fold the research agent's retrieved sources into the context the compose
+// prompt and assembleSlides consume. Mover press prefers what the agent found;
+// macro press is whatever was collected (seeded from gatherContext, enriched by
+// the agent). moverNoPress is true only when neither the agent nor the seed
+// turned up mover coverage.
+function mergeCollectedSources(ctx: GatheredContext, collected: CollectedSources): GatheredContext {
+  return {
+    ...ctx,
+    moverPress: collected.mover.length > 0 ? collected.mover : ctx.moverPress,
+    moverPressSummaries: collected.moverSummaries.length > 0 ? collected.moverSummaries : ctx.moverPressSummaries,
+    macroPress: collected.macro,
+    macroPressSummaries: collected.macroSummaries,
+    moverNoPress: collected.mover.length === 0 && ctx.moverPress.length === 0,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -1148,7 +1176,6 @@ function buildAgentSystemPrompt(type: RecapType): string {
 export async function generateRecap(
   env: Env,
   recapId: string,
-  macroCache: Map<string, { sources: SlideSource[]; summaries: string[] }> = new Map(),
 ): Promise<{ status: "ready" | "skipped"; reason?: string }> {
   const client = db(env);
   const { data: row, error } = await client
@@ -1159,7 +1186,7 @@ export async function generateRecap(
   if (error || !row) throw new Error(`recap ${recapId} not found: ${error?.message ?? "missing"}`);
   const recap = row as RecapRowLite;
 
-  const ctx = await gatherContext(env, recap, macroCache);
+  const ctx = await gatherContext(env, recap);
   if (!ctx) {
     await client
       .from("recaps")
@@ -1170,66 +1197,62 @@ export async function generateRecap(
 
   if (!env.GEMINI_API_KEY) throw new Error("Missing GEMINI_API_KEY for recap generation");
 
-  // Sources collected by tool handlers (agent fills these as it searches).
-  const collectedSources = {
-    mover: [] as SlideSource[],
-    moverSummaries: [] as string[],
-    macro: ctx.macroPress,       // pre-seeded from gatherContext for fallback
-    macroSummaries: ctx.macroPressSummaries,
+  // Sources the research tool handlers fill as the agent searches. All news
+  // retrieval now happens in the research stage — these start empty (gatherContext
+  // is facts-only). `watch` is deterministic (polymarket from the DB) so it seeds.
+  const collectedSources: CollectedSources = {
+    mover: [],
+    moverSummaries: [],
+    macro: [],
+    macroSummaries: [],
     watch: ctx.watch,
   };
 
-  // The agentic path with static single-shot fallback. Extracted to a closure
-  // so it can run inside a LangSmith run-tree context (withRunTree) — that is
-  // what makes the wrapped Gemini calls nest as child spans. The body is
-  // unchanged from the un-traced version; tracing is purely additive.
+  // Two-stage generation, extracted to a closure so it runs inside a LangSmith
+  // run-tree (withRunTree) — that is what makes the wrapped Gemini calls nest as
+  // child spans. Tracing is purely additive.
+  //
+  // Stage 1 (research): a real agent with tools (AUTO mode) gathers evidence and
+  // returns a plain-text findings synthesis. It has NO write_slides tool, so it
+  // cannot stall the way the old single-agent design did.
+  // Stage 2 (compose): a deterministic invokeGeminiStructured call turns the
+  // findings + facts into slides via responseSchema. Structured output is
+  // guaranteed by the schema, so "the agent never produced slides" cannot happen.
   const runGeneration = async (): Promise<{
     llm: RecapLlmOutput;
     usage: { promptTokens: number; completionTokens: number; totalTokens: number };
     toolCallLog: ToolCallRecord[];
   }> => {
-    let llm: RecapLlmOutput;
-    let usage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
-    let toolCallLog: ToolCallRecord[] = [];
+    // --- Stage 1: research ---
+    const handlers = buildResearchToolHandlers(env, client, recap.portfolio_id, ctx, collectedSources);
+    const research = await invokeGeminiResearch(env, {
+      system: buildResearchSystemPrompt(ctx.type),
+      user: buildResearchUserPrompt(ctx),
+      tools: buildResearchTools(ctx.type),
+      handlers,
+      maxIterations: ctx.type === "daily" ? 5 : 6,
+    });
+    console.log(`[recaps] research stage: ${research.toolCalls.length} tool calls, ${research.findings.length} chars of findings`);
 
-    try {
-      // --- Agentic path ---
-      const handlers = buildAgentToolHandlers(env, client, recap.portfolio_id, ctx, collectedSources);
-      const agentResult = await invokeGeminiWithTools(env, {
-        system: buildAgentSystemPrompt(ctx.type),
-        user: buildUserPrompt(ctx),
-        tools: buildAgentTools(ctx.type),
-        handlers,
-        terminalTool: "write_slides",
-        maxIterations: ctx.type === "daily" ? 5 : 6,
-      });
+    // Merge any sources the research agent retrieved so the compose prompt and
+    // the assembled source chips both reflect the enriched evidence.
+    const enrichedCtx = mergeCollectedSources(ctx, collectedSources);
 
-      // Extract slides from the write_slides tool call output.
-      const rawSlides = agentResult.output.slides;
-      if (!Array.isArray(rawSlides)) throw new Error("Agent write_slides did not include slides[]");
-      llm = { slides: rawSlides as RecapLlmOutput["slides"] };
-      usage = agentResult.usage;
-      toolCallLog = agentResult.toolCalls;
-      console.log(`[recaps] agentic path: ${toolCallLog.length} tool calls`);
-    } catch (err) {
-      // --- Fallback: static single-shot path ---
-      if (err instanceof MaxIterationsError) {
-        toolCallLog = err.toolCalls;
-        console.warn(`[recaps] agent hit max iterations (${toolCallLog.length} calls), falling back to static path`);
-      } else {
-        console.warn(`[recaps] agent error, falling back:`, err instanceof Error ? err.message : err);
-      }
+    // --- Stage 2: compose (deterministic structured output) ---
+    const composed = await invokeGeminiStructured(env, {
+      system: buildComposeSystemPrompt(ctx.type),
+      user: buildComposeUserPrompt(enrichedCtx, research.findings),
+      schema: buildLlmSchema(ctx.type),
+    });
+    const llm = parseLlmOutput(composed.text);
 
-      const staticResult = await invokeGeminiStructured(env, {
-        system: buildStaticSystemPrompt(ctx.type),
-        user: buildUserPrompt(ctx),
-        schema: buildLlmSchema(ctx.type),
-      });
-      llm = parseLlmOutput(staticResult.text);
-      usage = staticResult.usage;
-    }
+    const usage = {
+      promptTokens: research.usage.promptTokens + composed.usage.promptTokens,
+      completionTokens: research.usage.completionTokens + composed.usage.completionTokens,
+      totalTokens: research.usage.totalTokens + composed.usage.totalTokens,
+    };
 
-    return { llm, usage, toolCallLog };
+    return { llm, usage, toolCallLog: research.toolCalls };
   };
 
   // --- LangSmith tracing (additive) ---
@@ -1308,15 +1331,9 @@ export async function generateRecap(
   // click (re-votes pollute the aggregate) and a single score can't represent
   // per-slide sentiment. A proper idempotent run metric belongs in the eval loop.
 
-  // Merge any sources the agent retrieved into ctx for assembleSlides.
-  const mergedCtx: GatheredContext = {
-    ...ctx,
-    moverPress: collectedSources.mover.length > 0 ? collectedSources.mover : ctx.moverPress,
-    moverPressSummaries: collectedSources.moverSummaries.length > 0 ? collectedSources.moverSummaries : ctx.moverPressSummaries,
-    macroPress: collectedSources.macro,
-    macroPressSummaries: collectedSources.macroSummaries,
-    moverNoPress: (collectedSources.mover.length === 0 && ctx.moverPress.length === 0),
-  };
+  // Merge any sources the research agent retrieved into ctx for assembleSlides
+  // (same merge the compose prompt saw).
+  const mergedCtx = mergeCollectedSources(ctx, collectedSources);
 
   const slides = assembleSlides(mergedCtx, llm);
 

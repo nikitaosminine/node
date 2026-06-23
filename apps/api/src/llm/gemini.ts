@@ -1,23 +1,22 @@
 // ============================================================
-// Gemini client — split by surface (see the recap-agent investigation):
-//   invokeGeminiStructured — single-shot, raw REST. No multi-turn
-//     contract to track, so raw fetch stays simple and gives tight
-//     control over responseMimeType + responseSchema.
-//   invokeGeminiWithTools  — agentic loop, via the @google/genai SDK.
-//     This is the surface where Gemini's function-calling contract
-//     churns (function-call `id` round-tripping, thought-signature
-//     preservation, response-count matching). Gemini 3.5 Flash GA now
-//     ENFORCES that contract: a function response missing its `id`
-//     yields an empty `finishReason: STOP` turn. The old hand-rolled
-//     loop treated that empty turn as "exhausted" and bailed to the
-//     static fallback, which is why grounded tool calls silently
-//     vanished. The SDK echoes the `id` and preserves thought
-//     signatures automatically; we keep the terminal-tool capture
-//     pattern on top of it.
+// Gemini client — split by surface. Recap generation is a two-stage
+// pipeline and these are its two Gemini surfaces:
+//   invokeGeminiResearch — STAGE 1, the agentic research loop, via the
+//     @google/genai SDK. Function-calling mode is AUTO: the agent picks
+//     tools (stored news, Exa search, polymarket) and finishes with a
+//     plain-text findings synthesis (no terminal tool — "I'm done" is a
+//     natural text turn). This is where Gemini 3.x's function-calling
+//     contract matters: function-call `id` round-tripping and
+//     thought-signature preservation across turns, both handled in the
+//     loop. The bound is closed with one mode=NONE call when needed.
+//   invokeGeminiStructured — STAGE 2 (compose), single-shot raw REST.
+//     Turns the findings + facts into slides with responseMimeType/
+//     responseSchema. No multi-turn contract, so raw fetch stays simple
+//     and structured output is guaranteed by the schema.
 //
-// IMPORTANT: Gemini function-calling and responseMimeType/
-// responseSchema cannot be used together. The agentic mode uses
-// write_slides as the terminal tool to deliver structured output.
+// IMPORTANT: Gemini function-calling and responseMimeType/responseSchema
+// cannot be used together — which is exactly why research (tools) and
+// compose (responseSchema) are separate calls.
 //
 // Both invoke* functions are wrapped with LangSmith `traceable` so
 // they appear as child spans under the recap-generation run. Tracing
@@ -28,7 +27,7 @@
 // ============================================================
 
 import { traceable } from "langsmith/traceable";
-import { GoogleGenAI, ThinkingLevel } from "@google/genai";
+import { GoogleGenAI, ThinkingLevel, FunctionCallingConfigMode } from "@google/genai";
 import type { Content, Part as GenaiPart } from "@google/genai";
 
 export interface GeminiEnv {
@@ -197,9 +196,10 @@ export interface ToolCallRecord {
   durationMs: number;
 }
 
-export interface AgentResult {
-  // The captured output from the terminal write_slides tool call.
-  output: Record<string, unknown>;
+export interface ResearchResult {
+  // The agent's final plain-text synthesis of what it found. This is the
+  // grounding the compose stage writes slides from. NOT the slides themselves.
+  findings: string;
   toolCalls: ToolCallRecord[];
   usage: {
     promptTokens: number;
@@ -208,55 +208,65 @@ export interface AgentResult {
   };
 }
 
-export class MaxIterationsError extends Error {
-  toolCalls: ToolCallRecord[];
-  constructor(toolCalls: ToolCallRecord[]) {
-    super(`Gemini agent reached max iterations without calling write_slides`);
-    this.toolCalls = toolCalls;
-  }
+// First non-thought text on the candidate, concatenated and trimmed.
+function responseText(resp: {
+  candidates?: Array<{ content?: { parts?: Array<{ text?: string; thought?: boolean }> } }>;
+}): string {
+  const parts = resp.candidates?.[0]?.content?.parts ?? [];
+  return parts
+    .filter((p) => !p.thought)
+    .map((p) => p.text ?? "")
+    .join("")
+    .trim();
 }
 
 /**
- * Agentic Gemini call with function-calling support, via the @google/genai SDK.
+ * Stage 1 of recap generation: the RESEARCH agent (via @google/genai SDK).
  *
- * The agent iterates: call Gemini → intercept functionCall parts → execute
- * each handler → push functionResponse back → repeat until it calls
- * `write_slides` (the terminal tool) or max iterations are hit.
+ * This is a genuine agent — function-calling mode is AUTO, so the model
+ * decides which tools to call (stored news, Exa search, polymarket) and in
+ * what order, then decides when it has enough. We do NOT force tool calls and
+ * there is NO terminal tool: "I'm done researching" is a natural plain-text
+ * turn (no functionCall), which is exactly how models like to finish. That
+ * text IS the output — a synthesis the compose stage turns into slides.
  *
- * Two contract details Gemini 3.x enforces, both handled here:
- *   1. Every functionResponse must echo the `id` (and `name`) of the
- *      functionCall it answers, with one response per call. We forward
- *      `call.id` on the response; a mismatch makes the model return an
- *      empty `finishReason: STOP` turn.
- *   2. Thought signatures must survive across turns. We push the model's
- *      `candidate.content` back verbatim (it carries `thoughtSignature`
- *      parts), rather than reconstructing a stripped-down model turn.
+ * Why AUTO works here (and didn't in the old single-agent design): this prompt
+ * hands the model FACTS only, never pre-fetched news snippets. With the
+ * narrative genuinely missing, the model reaches for its tools instead of
+ * answering from context. Separating "gather evidence" from "write slides"
+ * removes the contradiction that made the old loop skip tools and stall.
  *
- * A turn with no function call is NOT treated as terminal. The model may
- * emit a thinking/text-only turn before deciding to call a tool; we nudge
- * it ("call a tool or the terminal tool") and continue until maxIterations
- * is genuinely exhausted. Only then do we throw MaxIterationsError, on which
- * the caller falls back to invokeGeminiStructured.
+ * Two Gemini 3.x function-calling contract details, both handled across the
+ * multi-turn tool loop:
+ *   1. Every functionResponse echoes the `id` (and `name`) of the functionCall
+ *      it answers, one response per call. A mismatch yields an empty STOP turn.
+ *   2. Thought signatures survive across turns: we push the model's
+ *      `candidate.content` back verbatim (it carries `thoughtSignature` parts).
+ *
+ * The loop is bounded by maxIterations. If the agent is still calling tools
+ * when the bound is hit, one final mode=NONE call (no function calls allowed)
+ * forces the text synthesis — so `findings` is always populated. There is no
+ * error path: research is best-effort, and the compose stage still runs on
+ * FACTS alone if findings come back thin.
  */
-async function invokeGeminiWithToolsImpl(
+async function invokeGeminiResearchImpl(
   env: GeminiEnv,
   args: {
     system: string;
     user: string;
     tools: GeminiFunctionDeclaration[];
     handlers: Record<string, GeminiToolHandler>;
-    terminalTool: string; // e.g. "write_slides" — loop exits when this is called
     maxIterations?: number;
     // Gemini 3.x: prefer thinkingLevel over the deprecated thinkingBudget, and
-    // do NOT set temperature (reasoning is tuned for the default). Lower levels
-    // mean fewer, faster tool calls — a good fit for this bounded recap agent.
+    // do NOT set temperature (reasoning is tuned for the default).
     thinkingLevel?: ThinkingLevel;
   },
-): Promise<AgentResult> {
+): Promise<ResearchResult> {
   if (!env.GEMINI_API_KEY) throw new Error("Missing GEMINI_API_KEY");
   const model = geminiModel(env);
   const maxIter = args.maxIterations ?? 6;
   const baseUrl = env.GEMINI_API_BASE_URL ? geminiBaseUrl(env) : undefined;
+  const thinkingLevel = args.thinkingLevel ?? ThinkingLevel.LOW;
 
   const ai = new GoogleGenAI({
     apiKey: env.GEMINI_API_KEY,
@@ -276,6 +286,12 @@ async function invokeGeminiWithToolsImpl(
   const toolCalls: ToolCallRecord[] = [];
   const totalUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
 
+  const addUsage = (meta?: { promptTokenCount?: number; candidatesTokenCount?: number; totalTokenCount?: number }) => {
+    totalUsage.promptTokens += meta?.promptTokenCount ?? 0;
+    totalUsage.completionTokens += meta?.candidatesTokenCount ?? 0;
+    totalUsage.totalTokens += meta?.totalTokenCount ?? 0;
+  };
+
   for (let iter = 0; iter < maxIter; iter++) {
     const response = await ai.models.generateContent({
       model,
@@ -283,35 +299,24 @@ async function invokeGeminiWithToolsImpl(
       config: {
         systemInstruction: args.system,
         tools: [{ functionDeclarations }],
-        thinkingConfig: { thinkingLevel: args.thinkingLevel ?? ThinkingLevel.LOW },
+        // AUTO: the agent chooses tools or finishes with a text synthesis.
+        toolConfig: { functionCallingConfig: { mode: FunctionCallingConfigMode.AUTO } },
+        thinkingConfig: { thinkingLevel },
       },
     });
+    addUsage(response.usageMetadata);
 
-    const meta = response.usageMetadata;
-    totalUsage.promptTokens += meta?.promptTokenCount ?? 0;
-    totalUsage.completionTokens += meta?.candidatesTokenCount ?? 0;
-    totalUsage.totalTokens += meta?.totalTokenCount ?? 0;
-
-    // Push the model's turn back verbatim — this preserves thoughtSignature
-    // parts the SDK needs to round-trip reasoning context across turns.
+    // Push the model's turn back verbatim — preserves thoughtSignature parts
+    // the SDK needs to round-trip reasoning context across turns.
     const modelContent = response.candidates?.[0]?.content;
     if (modelContent) contents.push(modelContent);
 
     const fnCalls = response.functionCalls ?? [];
 
     if (fnCalls.length === 0) {
-      // Thinking/text-only turn — not terminal. Nudge and keep going. If the
-      // model never commits to a tool, maxIterations bounds the loop and we
-      // fall through to MaxIterationsError below.
-      contents.push({
-        role: "user",
-        parts: [{
-          text:
-            `You did not call a function. Call one of the available tools to gather context, ` +
-            `or call "${args.terminalTool}" to finish.`,
-        }],
-      });
-      continue;
+      // Natural completion: no tool call means the agent is done researching.
+      // Its text is the findings synthesis.
+      return { findings: responseText(response), toolCalls, usage: totalUsage };
     }
 
     // Execute each tool call; build the function-response turn. Gemini 3.x
@@ -320,15 +325,9 @@ async function invokeGeminiWithToolsImpl(
     for (const call of fnCalls) {
       const name = call.name ?? "";
       const fnArgs = (call.args ?? {}) as Record<string, unknown>;
-
-      // Terminal tool: capture output and exit.
-      if (name === args.terminalTool) {
-        return { output: fnArgs, toolCalls, usage: totalUsage };
-      }
-
       const handler = args.handlers[name];
       if (!handler) {
-        console.warn(`[gemini-agent] Unknown tool called: ${name} — returning empty result`);
+        console.warn(`[gemini-research] Unknown tool called: ${name} — returning empty result`);
         responseParts.push({
           functionResponse: { id: call.id, name, response: { error: `Unknown tool: ${name}` } },
         });
@@ -348,43 +347,52 @@ async function invokeGeminiWithToolsImpl(
       responseParts.push({ functionResponse: { id: call.id, name, response: output } });
     }
 
-    // Push the tool results as a user turn for the next iteration.
     contents.push({ role: "user", parts: responseParts });
   }
 
-  throw new MaxIterationsError(toolCalls);
+  // Bound hit while still calling tools. Force a text-only synthesis (mode
+  // NONE = no function calls) so findings are never empty.
+  const finalResponse = await ai.models.generateContent({
+    model,
+    contents,
+    config: {
+      systemInstruction: args.system,
+      tools: [{ functionDeclarations }],
+      toolConfig: { functionCallingConfig: { mode: FunctionCallingConfigMode.NONE } },
+      thinkingConfig: { thinkingLevel },
+    },
+  });
+  addUsage(finalResponse.usageMetadata);
+  return { findings: responseText(finalResponse), toolCalls, usage: totalUsage };
 }
 
 /**
- * Traceable wrapper for the agentic loop. run_type "chain" (it orchestrates
- * multiple LLM turns + tool calls, not a single completion). Logs the prompt,
- * terminal tool, and declared tool names — never `env` or the handler
- * closures. No-op passthrough outside a run-tree context.
+ * Traceable wrapper for the research loop. run_type "chain" (it orchestrates
+ * multiple LLM turns + tool calls, not a single completion). Logs the prompt
+ * and declared tool names — never `env` or the handler closures. No-op
+ * passthrough outside a run-tree context.
  */
-export const invokeGeminiWithTools = traceable(invokeGeminiWithToolsImpl, {
-  name: "gemini.agentic",
+export const invokeGeminiResearch = traceable(invokeGeminiResearchImpl, {
+  name: "gemini.research",
   run_type: "chain",
   processInputs: (inputs) => {
     const a = ((inputs as { args?: unknown[] }).args?.[1] ?? {}) as {
       system?: string;
       user?: string;
       tools?: GeminiFunctionDeclaration[];
-      terminalTool?: string;
       maxIterations?: number;
       thinkingLevel?: ThinkingLevel;
     };
     return {
       system: a.system,
       user: a.user,
-      terminal_tool: a.terminalTool,
       tools: a.tools?.map((t) => t.name),
       max_iterations: a.maxIterations,
       thinking_level: a.thinkingLevel ?? ThinkingLevel.LOW,
     };
   },
   processOutputs: (outputs) => {
-    const r = outputs as Partial<AgentResult>;
-    // Log the generated slides (the write_slides output), not just metrics.
-    return { output: r.output, usage: r.usage, tool_calls: r.toolCalls?.map((t) => t.tool) };
+    const r = outputs as Partial<ResearchResult>;
+    return { findings: r.findings, usage: r.usage, tool_calls: r.toolCalls?.map((t) => t.tool) };
   },
 });
