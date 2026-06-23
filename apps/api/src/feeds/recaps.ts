@@ -226,6 +226,7 @@ async function exaSearch(
   apiKey: string,
   query: string,
   startPublishedDate: string,
+  endPublishedDate: string,
   userLocation: string,
   numResults: number,
   includeDomains?: string[],
@@ -236,6 +237,7 @@ async function exaSearch(
     category: "news",
     numResults,
     startPublishedDate,
+    endPublishedDate,
     userLocation,
     ...(includeDomains && includeDomains.length ? { includeDomains } : {}),
     contents: { summary: { query } },
@@ -312,6 +314,8 @@ interface MoverInfo {
 interface GatheredContext {
   type: RecapType;
   periodLabel: string; // "today" | "this week"
+  periodStart: string; // recap.period_start (YYYY-MM-DD) — anchors the news window
+  periodEnd: string;   // recap.period_end   (YYYY-MM-DD)
   // performance
   returnPct: number;
   portfolioSeries: Array<{ date: string; close: number }>;
@@ -556,6 +560,8 @@ async function gatherContext(
   return {
     type,
     periodLabel,
+    periodStart: recap.period_start,
+    periodEnd: recap.period_end,
     returnPct,
     portfolioSeries,
     gainer,
@@ -677,11 +683,15 @@ function buildResearchSystemPrompt(type: RecapType): string {
 function buildResearchUserPrompt(ctx: GatheredContext): string {
   const lines = buildFactsLines(ctx);
   lines.push("");
-  lines.push(`Today's date is ${new Date().toISOString().slice(0, 10)}.`);
+  lines.push(
+    ctx.type === "daily"
+      ? `This recap covers the trading session of ${ctx.periodEnd}.`
+      : `This recap covers the trading week of ${ctx.periodStart} to ${ctx.periodEnd}.`,
+  );
   lines.push("=== YOUR TASK ===");
   lines.push("Research the catalysts behind the movers and the market backdrop, then synthesize a plain-text findings brief for the writer. Cite source titles where useful.");
   if (ctx.type === "daily") {
-    lines.push("This is a DAILY recap — focus on the latest session: today's moves, company announcements, intraday catalysts. The search recency window is applied for you; use keyword-only queries (no dates).");
+    lines.push("This is a DAILY recap — focus on that session: its moves, company announcements, intraday catalysts. The search recency window is applied for you; use keyword-only queries (no dates).");
   } else {
     lines.push("This is a WEEKLY recap — capture context across the full week plus forward-looking catalysts for next week. The search recency window is applied for you; use keyword-only queries (no dates).");
   }
@@ -1003,7 +1013,18 @@ function buildResearchToolHandlers(
   const searchCache = new Map<string, Record<string, unknown>>();
   let exaCalls = 0;
   const MAX_EXA_CALLS = ctx.type === "daily" ? 6 : 8;
-  const lookbackDays = ctx.type === "daily" ? 3 : 10;
+
+  // News window anchored to the recap PERIOD, not run time — so the news matches
+  // the day(s) being recapped and a backfill/re-run is reproducible (no leaking
+  // of "now" news into a past-period recap). Floor a few days before period_start
+  // for context; ceiling is the day after period_end so the whole last day counts.
+  const addDaysUTC = (ymd: string, n: number) => {
+    const d = new Date(`${ymd}T00:00:00.000Z`);
+    d.setUTCDate(d.getUTCDate() + n);
+    return d.toISOString();
+  };
+  const startPublished = addDaysUTC(ctx.periodStart, ctx.type === "daily" ? -3 : -2);
+  const endPublished = addDaysUTC(ctx.periodEnd, 1);
 
   return {
     search_news: async (args) => {
@@ -1023,11 +1044,6 @@ function buildResearchToolHandlers(
       }
       exaCalls++;
 
-      // Code controls the recency window — the agent has no clock and would
-      // otherwise guess wrong years. Floor only (published-after); the run time
-      // is "now", so this captures the recap window.
-      const startPublished = new Date(Date.now() - lookbackDays * 86_400_000).toISOString();
-
       // Code decides the domain allowlist — the agent cannot override it. French
       // queries also get the French-specific secondary list. NEWS_INCLUDE_DOMAINS
       // is curated to domains Exa still indexes, so this is one subrequest (no
@@ -1037,7 +1053,7 @@ function buildResearchToolHandlers(
         ? [...NEWS_INCLUDE_DOMAINS, ...NEWS_INCLUDE_DOMAINS_SECONDARY]
         : NEWS_INCLUDE_DOMAINS;
 
-      const { results, status } = await exaSearch(env.EXA_SEARCH, query, startPublished, isFrench ? "fr" : "us", 8, domains);
+      const { results, status } = await exaSearch(env.EXA_SEARCH, query, startPublished, endPublished, isFrench ? "fr" : "us", 8, domains);
       const out = results
         .filter((r) => r.url && r.title)
         .slice(0, 5)
