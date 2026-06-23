@@ -64,12 +64,18 @@ const FANOUT_WINDOW = 200;
 
 // Source-quality allowlist: curated premium financial/news outlets. An allowlist
 // (not blocklist) decisively cuts the long tail of quote pages / SEO junk.
+// NOTE: Exa returns HTTP 403 ("domains not available") for the WHOLE request if
+// includeDomains names a domain it no longer indexes — and these were dropped
+// from Exa's index (publisher opt-outs / removed crawl): wsj.com, bloomberg.com,
+// reuters.com, apnews.com, breakingviews.reuters.com. They are removed below so
+// the allowlist works; only add a domain back after confirming Exa still indexes
+// it (a single search with includeDomains:[domain] 403s if it doesn't).
 export const NEWS_INCLUDE_DOMAINS = [
-  "ft.com", "wsj.com", "bloomberg.com", "economist.com", "reuters.com",
-  "apnews.com", "barrons.com", "marketwatch.com", "cnbc.com", "seekingalpha.com",
+  "ft.com", "economist.com",
+  "barrons.com", "marketwatch.com", "cnbc.com", "seekingalpha.com",
   "morningstar.com", "imf.org", "worldbank.org", "bis.org", "ecb.europa.eu",
   "banque-france.fr", "sec.gov", "amf-france.org", "oecd.org", "alphaville.ft.com",
-  "breakingviews.reuters.com", "institutionalinvestor.com", "pensions-investments.com",
+  "institutionalinvestor.com", "pensions-investments.com",
   "zerohedge.com", "calculatedriskblog.com", "lesechos.fr", "latribune.fr",
   "boursier.com", "boursorama.com", "challenges.fr", "euronews.com",
 ];
