@@ -9,7 +9,7 @@ export const DEPLOYED_API_BASE_URL = "https://binturong-api.nikita-osminine.work
 // Base origin for every Worker API call. NEXT_PUBLIC_API_URL always wins (set in
 // .env.production for prod and .env.local for dev); otherwise prod falls back to
 // the deployed Worker and dev to the local wrangler port (127.0.0.1:8787, matching
-// .env.example and CLAUDE.md). Import this instead of redeclaring it per file.
+// .env.example and AGENTS.md). Import this instead of redeclaring it per file.
 export const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_URL ??
   (process.env.NODE_ENV === "production" ? DEPLOYED_API_BASE_URL : "http://127.0.0.1:8787");

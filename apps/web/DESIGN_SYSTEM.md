@@ -223,6 +223,13 @@ viewport. Tailwind v4 ships container queries natively (no plugin, no config).
 longer be sized by its own contents. On a shrink-to-fit wrapper (`mx-auto` with no `w-full`,
 inside a flex column) that collapses it to zero content width.
 
+**Full-height wrappers must subtract the mobile top bar.** Below `md` the shell puts a sticky
+`h-14` (3.5rem) bar inside the viewport, so a bare `min-h-screen` / `h-screen` overflows the
+document by exactly that bar and short pages scroll for nothing. Write the height mobile-first
+as `min-h-[calc(100dvh-3.5rem)] md:min-h-screen` — `dvh` so mobile browser chrome is accounted
+for — and use `h-` instead of `min-h-` only where the page needs a fixed height for its own
+`overflow-hidden` scroll panes.
+
 ## Icons
 
 **`lucide-react` is the sole icon library.** Browse the full set at
