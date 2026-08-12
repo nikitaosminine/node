@@ -80,11 +80,8 @@ the desktop `<aside>` is `hidden md:flex` and a `md:hidden` top bar opens the sa
 JS branch causes a hydration flash. Collapse state persists under `binturong.sidebar-collapsed`
 (the `binturong.` key prefix is the convention).
 
-**Tailwind v4 container queries:** `@container` sets `container-type: inline-size`, which applies
-inline-size containment — the element can no longer be sized by its own contents. On a wrapper that
-was shrink-to-fit (`mx-auto` with no `w-full`, inside a flex column) this collapses it to zero
-width. Always pair `@container` with an explicit `w-full`. There is no `tailwind.config.js` and none
-should be added.
+Page-wrapper padding and the `@container` containment rule live in `apps/web/DESIGN_SYSTEM.md`
+→ "Layout".
 
 ## Database
 
