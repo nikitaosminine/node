@@ -413,7 +413,7 @@ function OverviewContent({ portfolioId }: { portfolioId: string }) {
   ];
 
   return (
-    <div className="mx-auto flex w-full max-w-[1500px] flex-col gap-6 px-6 pb-8 pt-4">
+    <div className="@container mx-auto flex w-full max-w-[1500px] flex-col gap-6 px-4 pb-8 pt-4 sm:px-6">
       {/* Portfolio name */}
       <div>
         <h1 className="text-xl font-semibold tracking-tight">{portfolio.name}</h1>

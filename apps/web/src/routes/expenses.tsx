@@ -79,9 +79,9 @@ export default function Expenses() {
   const isCurrentMonth = isSameMonth(viewDate, new Date());
 
   return (
-    <div className="mx-auto flex w-full max-w-[1500px] flex-col gap-6 px-6 pb-8 pt-4">
+    <div className="@container mx-auto flex w-full max-w-[1500px] flex-col gap-6 px-4 pb-8 pt-4 sm:px-6">
       {/* Topbar */}
-      <div className="flex items-center justify-between">
+      <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Expenses</h1>
           <div className="mt-1 flex items-center gap-1">
