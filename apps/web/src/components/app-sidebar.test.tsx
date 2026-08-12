@@ -3,9 +3,10 @@ import { render, screen, within, cleanup } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { AppSidebar } from "@/components/app-sidebar";
 
-const { pathnameRef, searchRef } = vi.hoisted(() => ({
+const { pathnameRef, searchRef, portfolioQueries } = vi.hoisted(() => ({
   pathnameRef: { current: "/portfolios" },
   searchRef: { current: "" },
+  portfolioQueries: { count: 0 },
 }));
 
 vi.mock("next/navigation", () => ({
@@ -25,11 +26,14 @@ vi.mock("next/link", () => ({
 
 vi.mock("@/integrations/supabase/client", () => ({
   supabase: {
-    from: () => ({
-      select: () => ({
-        order: () => Promise.resolve({ data: [{ id: "p1", name: "Core Growth" }], error: null }),
-      }),
-    }),
+    from: (table: string) => {
+      if (table === "portfolios") portfolioQueries.count += 1;
+      return {
+        select: () => ({
+          order: () => Promise.resolve({ data: [{ id: "p1", name: "Core Growth" }], error: null }),
+        }),
+      };
+    },
     auth: { signOut: vi.fn().mockResolvedValue({ error: null }) },
   },
 }));
@@ -71,6 +75,7 @@ describe("AppSidebar shell", () => {
     pathnameRef.current = "/portfolios";
     searchRef.current = "";
     window.localStorage.clear();
+    portfolioQueries.count = 0;
     setViewportWidth(1920);
   });
 
@@ -156,5 +161,28 @@ describe("AppSidebar shell", () => {
 
     expect(await screen.findByRole("heading", { name: "Expenses" })).toBeVisible();
     expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("shares a single portfolio fetch between the rail and the drawer", async () => {
+    const user = userEvent.setup();
+    pathnameRef.current = "/overview";
+    searchRef.current = "portfolioId=p1";
+    setViewportWidth(390);
+    renderShell();
+
+    // The rail is hidden below md by CSS only, so it stays mounted and renders the list.
+    expect(await within(sidebar()).findByRole("link", { name: "Core Growth" })).toBeVisible();
+    expect(portfolioQueries.count).toBe(1);
+
+    await user.click(screen.getByRole("button", { name: "Open navigation" }));
+    const drawer = await screen.findByRole("dialog");
+
+    // Same list in the drawer, from the same fetch, still auto-expanded on the active portfolio.
+    const trigger = within(drawer).getByRole("button", { name: "Core Growth" });
+    expect(within(drawer).getByRole("link", { name: "Overview" })).toBeVisible();
+    expect(portfolioQueries.count).toBe(1);
+
+    await user.click(trigger);
+    expect(within(drawer).queryByRole("link", { name: "Overview" })).toBeNull();
   });
 });

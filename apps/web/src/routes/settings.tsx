@@ -221,7 +221,7 @@ export default function SettingsPage() {
   };
 
   return (
-    <div className="mx-auto flex w-full max-w-4xl flex-col gap-4 px-6 py-6">
+    <div className="@container mx-auto flex w-full max-w-4xl flex-col gap-4 px-4 py-6 sm:px-6">
       <Card>
         <CardHeader>
           <CardTitle>Agent run metrics (last 24h)</CardTitle>

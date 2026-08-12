@@ -101,23 +101,12 @@ const SUB_ITEMS = [
 // Inner sidebar (needs useSearchParams / usePathname)
 // ---------------------------------------------------------------------------
 
-function SidebarInner({ collapsed }: { collapsed: boolean }) {
+function SidebarInner({ collapsed, portfolios }: { collapsed: boolean; portfolios: Portfolio[] }) {
   const pathname = usePathname();
   const searchParams = useSearchParams();
   const activePortfolioId = useActivePortfolioId();
 
-  const [portfolios, setPortfolios] = useState<Portfolio[]>([]);
   const [openId, setOpenId] = useState<string | null>(activePortfolioId);
-
-  useEffect(() => {
-    supabase
-      .from("portfolios")
-      .select("id,name")
-      .order("created_at", { ascending: true })
-      .then(({ data }) => {
-        if (data) setPortfolios(data as Portfolio[]);
-      });
-  }, []);
 
   // Auto-expand when navigation changes active portfolio
   useEffect(() => {
@@ -299,6 +288,20 @@ export function AppSidebar({ children }: { children: ReactNode }) {
   const isMobile = useIsMobile();
   const router = useRouter();
 
+  // Owned here, not in SidebarInner: that renders twice (desktop rail + drawer),
+  // and the drawer copy remounts on every open.
+  const [portfolios, setPortfolios] = useState<Portfolio[]>([]);
+
+  useEffect(() => {
+    supabase
+      .from("portfolios")
+      .select("id,name")
+      .order("created_at", { ascending: true })
+      .then(({ data }) => {
+        if (data) setPortfolios(data as Portfolio[]);
+      });
+  }, []);
+
   useEffect(() => {
     let stored: string | null = null;
     try {
@@ -370,7 +373,7 @@ export function AppSidebar({ children }: { children: ReactNode }) {
   );
 
   return (
-    <div className="flex min-h-screen w-full bg-background text-foreground">
+    <div className="flex min-h-dvh w-full bg-background text-foreground md:min-h-screen">
       <Suspense fallback={null}>
         <LocationEffect onChange={closeDrawer} />
       </Suspense>
@@ -406,7 +409,7 @@ export function AppSidebar({ children }: { children: ReactNode }) {
 
         {/* Nav (needs searchParams — wrapped in Suspense) */}
         <Suspense fallback={<div className="flex-1" />}>
-          <SidebarInner collapsed={collapsed} />
+          <SidebarInner collapsed={collapsed} portfolios={portfolios} />
         </Suspense>
 
         {/* Footer */}
@@ -441,7 +444,7 @@ export function AppSidebar({ children }: { children: ReactNode }) {
           </div>
 
           <Suspense fallback={<div className="flex-1" />}>
-            <SidebarInner collapsed={false} />
+            <SidebarInner collapsed={false} portfolios={portfolios} />
           </Suspense>
 
           <div className="flex flex-col gap-1 border-t border-hairline p-2">
