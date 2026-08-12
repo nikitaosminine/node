@@ -356,7 +356,10 @@ export function AppSidebar({ children }: { children: ReactNode }) {
       onClick={toggleCollapsed}
       aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
       title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
-      className="grid h-8 w-8 shrink-0 place-items-center rounded-md border border-transparent text-foreground-muted transition-colors hover:border-hairline hover:bg-surface-2 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      className={cn(
+        "grid shrink-0 place-items-center rounded-md border border-transparent text-foreground-muted transition-colors hover:border-hairline hover:bg-surface-2 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+        collapsed ? "h-6 w-6" : "h-8 w-8",
+      )}
     >
       {collapsed ? (
         <PanelLeftOpen className="h-4 w-4" aria-hidden />
@@ -380,13 +383,11 @@ export function AppSidebar({ children }: { children: ReactNode }) {
           collapsed ? "w-[60px]" : "w-[220px]",
         )}
       >
-        {/* Logo + collapse toggle. The logo is the only route to /portfolios, so it
-            stays in the collapsed rail too — stacked above the toggle, since the two
-            do not fit side by side in 60px. */}
+        {/* Logo + collapse toggle */}
         <div
           className={cn(
-            "flex items-center border-b border-hairline",
-            collapsed ? "flex-col justify-center gap-1 px-2 py-2" : "h-14 gap-2 pl-4 pr-2",
+            "flex h-14 items-center border-b border-hairline",
+            collapsed ? "justify-center gap-1 px-1" : "gap-2 pl-4 pr-2",
           )}
         >
           <Link
@@ -395,7 +396,7 @@ export function AppSidebar({ children }: { children: ReactNode }) {
             title={collapsed ? "Node home" : undefined}
             className={cn("flex min-w-0 items-center gap-2.5", !collapsed && "flex-1")}
           >
-            <NodeLogo className="h-8 w-8 shrink-0" />
+            <NodeLogo className={cn("shrink-0", collapsed ? "h-6 w-6" : "h-8 w-8")} />
             {!collapsed && (
               <span className="truncate text-[15px] font-semibold tracking-tight">Node</span>
             )}

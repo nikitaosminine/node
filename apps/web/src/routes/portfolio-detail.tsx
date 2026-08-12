@@ -1582,7 +1582,7 @@ export default function PortfolioDetailPage() {
     );
 
   return (
-    <div className="min-h-screen bg-background text-foreground">
+    <div className="bg-background text-foreground">
       <div className="@container mx-auto flex w-full max-w-[1500px] flex-col gap-6 px-4 pb-8 pt-4 sm:px-6">
         {/* Compact header */}
         <div className="flex flex-wrap items-center justify-between gap-3">
