@@ -1,6 +1,13 @@
 "use client";
 
-import { useState, useEffect, useCallback, type ReactNode, Suspense } from "react";
+import {
+  useState,
+  useEffect,
+  useCallback,
+  type MouseEvent as ReactMouseEvent,
+  type ReactNode,
+  Suspense,
+} from "react";
 import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import {
@@ -249,6 +256,23 @@ function SidebarInner({ collapsed }: { collapsed: boolean }) {
 // AppSidebar
 // ---------------------------------------------------------------------------
 
+/**
+ * Fires whenever the full location changes — pathname *or* query string.
+ * `useSearchParams` lives here, in its own Suspense boundary, so AppSidebar
+ * itself stays outside it.
+ */
+function LocationEffect({ onChange }: { onChange: () => void }) {
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
+  const location = `${pathname}?${searchParams.toString()}`;
+
+  useEffect(() => {
+    onChange();
+  }, [location, onChange]);
+
+  return null;
+}
+
 function SignOutButton({ collapsed, onSignOut }: { collapsed: boolean; onSignOut: () => void }) {
   return (
     <button
@@ -272,7 +296,6 @@ export function AppSidebar({ children }: { children: ReactNode }) {
   const [collapsed, setCollapsed] = useState(false);
   const [transitionsEnabled, setTransitionsEnabled] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
-  const pathname = usePathname();
   const isMobile = useIsMobile();
   const router = useRouter();
 
@@ -309,9 +332,13 @@ export function AppSidebar({ children }: { children: ReactNode }) {
   }, [collapsed]);
 
   // Tapping a nav item must not leave the drawer open over the new page.
-  useEffect(() => {
-    setMobileOpen(false);
-  }, [pathname]);
+  const closeDrawer = useCallback(() => setMobileOpen(false), []);
+
+  // Taps that resolve to the URL already showing produce no navigation at all,
+  // so LocationEffect never fires — close on the link tap itself as well.
+  const handleDrawerClick = useCallback((event: ReactMouseEvent<HTMLElement>) => {
+    if ((event.target as HTMLElement).closest("a")) setMobileOpen(false);
+  }, []);
 
   // Resizing up to a desktop width reveals the real sidebar — drop the drawer.
   useEffect(() => {
@@ -341,6 +368,10 @@ export function AppSidebar({ children }: { children: ReactNode }) {
 
   return (
     <div className="flex min-h-screen w-full bg-background text-foreground">
+      <Suspense fallback={null}>
+        <LocationEffect onChange={closeDrawer} />
+      </Suspense>
+
       {/* Desktop sidebar — hidden below md by CSS, never by a JS branch. */}
       <aside
         className={cn(
@@ -349,23 +380,26 @@ export function AppSidebar({ children }: { children: ReactNode }) {
           collapsed ? "w-[60px]" : "w-[220px]",
         )}
       >
-        {/* Logo + collapse toggle */}
+        {/* Logo + collapse toggle. The logo is the only route to /portfolios, so it
+            stays in the collapsed rail too — stacked above the toggle, since the two
+            do not fit side by side in 60px. */}
         <div
           className={cn(
-            "flex h-14 items-center border-b border-hairline",
-            collapsed ? "justify-center px-2" : "gap-2 pl-4 pr-2",
+            "flex items-center border-b border-hairline",
+            collapsed ? "flex-col justify-center gap-1 px-2 py-2" : "h-14 gap-2 pl-4 pr-2",
           )}
         >
-          {!collapsed && (
-            <Link
-              href="/portfolios"
-              aria-label="Node home"
-              className="flex min-w-0 flex-1 items-center gap-2.5"
-            >
-              <NodeLogo className="h-8 w-8 shrink-0" />
+          <Link
+            href="/portfolios"
+            aria-label="Node home"
+            title={collapsed ? "Node home" : undefined}
+            className={cn("flex min-w-0 items-center gap-2.5", !collapsed && "flex-1")}
+          >
+            <NodeLogo className="h-8 w-8 shrink-0" />
+            {!collapsed && (
               <span className="truncate text-[15px] font-semibold tracking-tight">Node</span>
-            </Link>
-          )}
+            )}
+          </Link>
           {collapseToggle}
         </div>
 
@@ -388,7 +422,11 @@ export function AppSidebar({ children }: { children: ReactNode }) {
 
       {/* Mobile drawer */}
       <Sheet open={mobileOpen} onOpenChange={setMobileOpen}>
-        <SheetContent side="left" className="flex flex-col gap-0 border-hairline bg-surface p-0">
+        <SheetContent
+          side="left"
+          className="flex flex-col gap-0 border-hairline bg-surface p-0"
+          onClick={handleDrawerClick}
+        >
           <SheetTitle className="sr-only">Navigation</SheetTitle>
           <div className="flex h-14 shrink-0 items-center border-b border-hairline px-4">
             <Link

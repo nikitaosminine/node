@@ -1,6 +1,7 @@
-# CLAUDE.md
+# AGENTS.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to coding agents (Claude Code and others) when working with code in
+this repository. It is the single source of truth; `CLAUDE.md` points here.
 
 ## Architecture
 
