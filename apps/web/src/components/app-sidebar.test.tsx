@@ -3,10 +3,11 @@ import { render, screen, within, cleanup } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { AppSidebar } from "@/components/app-sidebar";
 
-const { pathnameRef, searchRef, portfolioQueries } = vi.hoisted(() => ({
+const { pathnameRef, searchRef, portfolioQueries, portfolioRows } = vi.hoisted(() => ({
   pathnameRef: { current: "/portfolios" },
   searchRef: { current: "" },
   portfolioQueries: { count: 0 },
+  portfolioRows: { current: [{ id: "p1", name: "Core Growth" }] },
 }));
 
 vi.mock("next/navigation", () => ({
@@ -30,7 +31,8 @@ vi.mock("@/integrations/supabase/client", () => ({
       if (table === "portfolios") portfolioQueries.count += 1;
       return {
         select: () => ({
-          order: () => Promise.resolve({ data: [{ id: "p1", name: "Core Growth" }], error: null }),
+          order: () =>
+            Promise.resolve({ data: portfolioRows.current.map((p) => ({ ...p })), error: null }),
         }),
       };
     },
@@ -76,6 +78,7 @@ describe("AppSidebar shell", () => {
     searchRef.current = "";
     window.localStorage.clear();
     portfolioQueries.count = 0;
+    portfolioRows.current = [{ id: "p1", name: "Core Growth" }];
     setViewportWidth(1920);
   });
 
@@ -163,7 +166,7 @@ describe("AppSidebar shell", () => {
     expect(screen.queryByRole("dialog")).toBeNull();
   });
 
-  it("shares a single portfolio fetch between the rail and the drawer", async () => {
+  it("loads the portfolio list once, not once per mounted copy", async () => {
     const user = userEvent.setup();
     pathnameRef.current = "/overview";
     searchRef.current = "portfolioId=p1";
@@ -177,12 +180,29 @@ describe("AppSidebar shell", () => {
     await user.click(screen.getByRole("button", { name: "Open navigation" }));
     const drawer = await screen.findByRole("dialog");
 
-    // Same list in the drawer, from the same fetch, still auto-expanded on the active portfolio.
+    // Same list in the drawer, still auto-expanded on the active portfolio.
     const trigger = within(drawer).getByRole("button", { name: "Core Growth" });
     expect(within(drawer).getByRole("link", { name: "Overview" })).toBeVisible();
-    expect(portfolioQueries.count).toBe(1);
 
     await user.click(trigger);
     expect(within(drawer).queryByRole("link", { name: "Overview" })).toBeNull();
+  });
+
+  it("picks up portfolios created or deleted elsewhere when the drawer opens", async () => {
+    const user = userEvent.setup();
+    setViewportWidth(390);
+    renderShell();
+
+    expect(await within(sidebar()).findByRole("link", { name: "Core Growth" })).toBeVisible();
+
+    // The shell survives client-side navigation, so a delete + create on /portfolios
+    // leaves its state stale until the drawer refreshes it.
+    portfolioRows.current = [{ id: "p2", name: "Second Fund" }];
+
+    await user.click(screen.getByRole("button", { name: "Open navigation" }));
+    const drawer = await screen.findByRole("dialog");
+
+    expect(await within(drawer).findByRole("button", { name: "Second Fund" })).toBeVisible();
+    expect(within(drawer).queryByRole("button", { name: "Core Growth" })).toBeNull();
   });
 });

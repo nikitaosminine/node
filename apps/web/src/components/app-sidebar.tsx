@@ -289,10 +289,10 @@ export function AppSidebar({ children }: { children: ReactNode }) {
   const router = useRouter();
 
   // Owned here, not in SidebarInner: that renders twice (desktop rail + drawer),
-  // and the drawer copy remounts on every open.
+  // so a fetch per copy would query twice on every load.
   const [portfolios, setPortfolios] = useState<Portfolio[]>([]);
 
-  useEffect(() => {
+  const loadPortfolios = useCallback(() => {
     supabase
       .from("portfolios")
       .select("id,name")
@@ -301,6 +301,16 @@ export function AppSidebar({ children }: { children: ReactNode }) {
         if (data) setPortfolios(data as Portfolio[]);
       });
   }, []);
+
+  useEffect(() => {
+    loadPortfolios();
+  }, [loadPortfolios]);
+
+  // The shell outlives every client-side navigation, so the list would otherwise
+  // go stale against portfolios created or deleted after load.
+  useEffect(() => {
+    if (mobileOpen) loadPortfolios();
+  }, [mobileOpen, loadPortfolios]);
 
   useEffect(() => {
     let stored: string | null = null;
