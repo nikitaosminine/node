@@ -251,13 +251,13 @@ function SidebarInner({ collapsed, portfolios }: { collapsed: boolean; portfolio
  * `useSearchParams` lives here, in its own Suspense boundary, so AppSidebar
  * itself stays outside it.
  */
-function LocationEffect({ onChange }: { onChange: () => void }) {
+function LocationEffect({ onChange }: { onChange: (location: string) => void }) {
   const pathname = usePathname();
   const searchParams = useSearchParams();
   const location = `${pathname}?${searchParams.toString()}`;
 
   useEffect(() => {
-    onChange();
+    onChange(location);
   }, [location, onChange]);
 
   return null;
@@ -354,17 +354,21 @@ export function AppSidebar({ children }: { children: ReactNode }) {
   // One shared boundary for both surfaces: close the drawer and refresh the portfolio list
   // whenever the full location changes, so navigating away from /portfolios after a create
   // or delete brings the desktop rail back in sync too. LocationEffect also fires once on
-  // mount, which the mount effect above already covers — skipping that first call keeps a
-  // page load at exactly one portfolios query.
-  const initialLocationSeen = useRef(false);
-  const handleLocationChange = useCallback(() => {
-    closeDrawer();
-    if (!initialLocationSeen.current) {
-      initialLocationSeen.current = true;
-      return;
-    }
-    loadPortfolios();
-  }, [closeDrawer, loadPortfolios]);
+  // mount, which the mount effect above already covers — skip whenever the location matches
+  // the last one seen (rather than counting invocations) so StrictMode's mount-cleanup-mount
+  // double-invoke, which re-fires with the same location, doesn't issue an extra query.
+  const lastLocationRef = useRef<string | null>(null);
+  const handleLocationChange = useCallback(
+    (location: string) => {
+      closeDrawer();
+      const isInitialOrUnchanged =
+        lastLocationRef.current === null || lastLocationRef.current === location;
+      lastLocationRef.current = location;
+      if (isInitialOrUnchanged) return;
+      loadPortfolios();
+    },
+    [closeDrawer, loadPortfolios],
+  );
 
   // Taps that resolve to the URL already showing produce no navigation at all,
   // so LocationEffect never fires — close on the link tap itself as well.

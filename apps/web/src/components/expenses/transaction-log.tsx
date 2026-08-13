@@ -50,17 +50,27 @@ interface Props {
   embedded?: boolean;
 }
 
-// `narrow: false` drops the column below @sm — Category is the one field the row can lose on a
-// phone without becoming ambiguous, and dropping it buys the merchant name back ~90px.
-const COLUMNS: Array<{ key: LogSortKey; label: string; align?: "right"; narrow?: boolean }> = [
-  { key: "date", label: "Date", narrow: true },
-  { key: "merchant", label: "Merchant", narrow: true },
-  { key: "category", label: "Category", narrow: false },
-  { key: "amount", label: "Amount", align: "right", narrow: true },
+// `hideOnNarrow` drops the column below @sm — Category is the one field the row can lose on a
+// phone without becoming ambiguous, and dropping it buys the merchant name back ~90px. The body
+// row reads the same table via `narrowHiddenClass` so header and cell can only move together.
+const COLUMNS: Array<{
+  key: LogSortKey;
+  label: string;
+  align?: "right";
+  hideOnNarrow?: true;
+}> = [
+  { key: "date", label: "Date" },
+  { key: "merchant", label: "Merchant" },
+  { key: "category", label: "Category", hideOnNarrow: true },
+  { key: "amount", label: "Amount", align: "right" },
 ];
 
 /** Hides a column below @sm while keeping it a real table cell from @sm up. */
 const NARROW_HIDDEN = "hidden @sm:table-cell";
+
+function narrowHiddenClass(key: LogSortKey) {
+  return COLUMNS.find((col) => col.key === key)?.hideOnNarrow ? NARROW_HIDDEN : undefined;
+}
 
 const PAGE_SIZE_OPTIONS = [25, 50, 100] as const;
 
@@ -232,7 +242,7 @@ export function TransactionLog({ rows, categoryNames, embedded = false }: Props)
                     className={cn(
                       "whitespace-nowrap text-xs",
                       col.align === "right" && "text-right",
-                      col.narrow === false && NARROW_HIDDEN,
+                      narrowHiddenClass(col.key),
                     )}
                   >
                     <button
@@ -277,7 +287,9 @@ export function TransactionLog({ rows, categoryNames, embedded = false }: Props)
                       </span>
                     )}
                   </TableCell>
-                  <TableCell className={cn("text-xs text-foreground-muted", NARROW_HIDDEN)}>
+                  <TableCell
+                    className={cn("text-xs text-foreground-muted", narrowHiddenClass("category"))}
+                  >
                     {t.category_id && categoryNames[t.category_id]
                       ? categoryNames[t.category_id]
                       : "—"}

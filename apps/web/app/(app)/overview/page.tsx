@@ -6,7 +6,12 @@ import { useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { BarChart3, Briefcase } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
-import { OverviewSkeleton } from "@/components/skeletons/overview-skeleton";
+import {
+  FEED_GRID_CLASS,
+  KPI_GRID_CLASS,
+  kpiDividerClass,
+  OverviewSkeleton,
+} from "@/components/skeletons/overview-skeleton";
 import { RecapInsightsRow } from "@/components/recaps/recap-insights-row";
 import {
   convertCurrency,
@@ -426,22 +431,14 @@ function OverviewContent({ portfolioId }: { portfolioId: string }) {
       {/* KPI strip — matches portfolio-detail style */}
       <div className="rounded-2xl border border-hairline bg-surface px-4 py-3">
         {/* Container queries, not viewport ones: `xl:` fires at 1280px of WINDOW, but with the
-            sidebar expanded the content column is only ~1060px there, so seven tracks collapsed
+            sidebar expanded the content column is only ~1012px there, so seven tracks collapsed
             to 129px against the ~152px a bordered cell needs. Named container steps only —
             mixing an arbitrary `@min-[…]` with a named one lets the named rule win at widths
-            where both match, which silently reinstates the crush. */}
-        <dl className="grid grid-cols-2 gap-x-3 gap-y-3 @3xl:grid-cols-4 @6xl:grid-cols-7">
+            where both match, which silently reinstates the crush. Grid/divider classes are
+            shared with overview-skeleton.tsx so the loading state can never drift from this. */}
+        <dl className={KPI_GRID_CLASS}>
           {KPIS.map((kpi, i) => (
-            <div
-              key={kpi.label}
-              /* Dividers ride the same step as the 7-column layout, and the nth-child guard
-                 keeps them off any row's leading cell even if that pairing ever drifts. */
-              className={cn(
-                "min-w-0",
-                i > 0 &&
-                  "@6xl:[&:not(:nth-child(7n+1))]:border-l @6xl:[&:not(:nth-child(7n+1))]:border-hairline @6xl:[&:not(:nth-child(7n+1))]:pl-4",
-              )}
-            >
+            <div key={kpi.label} className={cn("min-w-0", kpiDividerClass(i))}>
               <dt className="truncate text-[13px] font-medium uppercase tracking-[0.12em] text-muted-foreground">
                 {kpi.label}
               </dt>
@@ -496,8 +493,9 @@ function OverviewContent({ portfolioId }: { portfolioId: string }) {
       <RecapInsightsRow portfolioId={portfolioId} />
 
       {/* Feed 2-column grid — @3xl (768px of column), because `md:` splits at 768px of WINDOW,
-          which is exactly where the sidebar appears and leaves only ~500px to split in two. */}
-      <div className="grid grid-cols-1 items-start gap-6 @3xl:grid-cols-2">
+          which is exactly where the sidebar appears and leaves only ~500px to split in two.
+          Shared with overview-skeleton.tsx's feed row so skeleton and page never disagree. */}
+      <div className={cn(FEED_GRID_CLASS, "items-start")}>
         <NewsFeed portfolioId={portfolioId} />
         <PolymarketFeed portfolioId={portfolioId} />
       </div>
