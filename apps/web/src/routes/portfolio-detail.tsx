@@ -1056,7 +1056,10 @@ export default function PortfolioDetailPage() {
     };
   }, [holdings, portfolioCurrency]);
 
-  const visibleCols = colOrder.filter((k) => !hiddenCols.has(k));
+  const visibleCols = useMemo(
+    () => colOrder.filter((k) => !hiddenCols.has(k)),
+    [colOrder, hiddenCols],
+  );
   const holdingsTableMinWidth = useMemo(
     () =>
       visibleCols.reduce((total, key) => total + (COLUMN_WIDTHS[key] ?? 0), ACTIONS_COLUMN_WIDTH),
