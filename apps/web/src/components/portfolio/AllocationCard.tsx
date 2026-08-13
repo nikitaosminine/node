@@ -211,7 +211,7 @@ function ClassicAllocation({
           equal halves and no inner scrollers, so the page is the only scroller. */}
       <div className="flex flex-col @4xl:grid @4xl:h-full @4xl:min-h-0 @4xl:grid-rows-2">
         <section className="min-h-0 pb-5 pr-1 @4xl:overflow-y-auto">
-          <div className="sticky top-0 z-10 mb-2 flex items-baseline justify-between gap-2 bg-surface pb-1">
+          <div className="static z-10 mb-2 flex items-baseline justify-between gap-2 bg-surface pb-1 @4xl:sticky @4xl:top-0">
             <div className="text-[10px] uppercase tracking-[0.12em] text-foreground-muted">
               By sector
             </div>
@@ -221,7 +221,7 @@ function ClassicAllocation({
         </section>
 
         <section className="min-h-0 pt-5 pr-1 @4xl:overflow-y-auto">
-          <div className="sticky top-0 z-10 mb-3 flex items-baseline justify-between gap-2 bg-surface pb-1">
+          <div className="static z-10 mb-3 flex items-baseline justify-between gap-2 bg-surface pb-1 @4xl:sticky @4xl:top-0">
             <div className="text-[10px] uppercase tracking-[0.12em] text-foreground-muted">
               By asset type
             </div>

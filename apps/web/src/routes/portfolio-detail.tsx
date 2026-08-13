@@ -220,11 +220,10 @@ type ColKey = (typeof ALL_COLUMNS)[number]["key"];
 // without an explicit min-width the columns crush instead of scrolling whenever
 // the cell text is short. Deriving the minimum from the VISIBLE columns means
 // hiding columns removes the horizontal scroll rather than leaving dead space.
-const COLUMN_WIDTHS: Record<string, number> = {
+const COLUMN_WIDTHS: Partial<Record<ColKey, number>> = {
   name: 340,
   assetType: 96,
   qty: 64,
-  currency: 96,
   cur: 104,
   buy: 104,
   total: 104,

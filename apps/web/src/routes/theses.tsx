@@ -190,7 +190,7 @@ export default function ThesesPage() {
           rather than the window, which overstates it by the sidebar. */}
       <div className="@container flex min-h-0 w-full flex-1 flex-col px-4 pt-4 sm:px-6">
         <div className="flex min-h-0 flex-1 flex-col gap-4">
-          <div className="grid shrink-0 grid-cols-1 items-end border-b border-hairline pb-3 @5xl:grid-cols-[minmax(0,1fr)_minmax(0,2fr)]">
+          <div className="grid shrink-0 grid-cols-1 items-end border-b border-hairline pb-3 @4xl:grid-cols-[minmax(0,1fr)_minmax(0,2fr)]">
             <div className="space-y-4">
               <TakePageHeader />
               <div className="flex justify-end">
@@ -200,10 +200,10 @@ export default function ThesesPage() {
                 </Button>
               </div>
             </div>
-            <div className="hidden @5xl:block" />
+            <div className="hidden @4xl:block" />
           </div>
 
-          <div className="grid min-h-0 flex-1 grid-cols-1 gap-4 pb-4 @5xl:grid-cols-[minmax(0,1fr)_minmax(0,2fr)]">
+          <div className="grid min-h-0 flex-1 grid-cols-1 gap-4 pb-4 @4xl:grid-cols-[minmax(0,1fr)_minmax(0,2fr)]">
             <section className="overflow-y-auto rounded-xl border border-border/50 bg-card p-4">
               <TakeKpiSummary
                 theses={theses}
