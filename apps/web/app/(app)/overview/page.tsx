@@ -25,6 +25,7 @@ import {
 } from "@/lib/market-cache";
 import { type TransactionApiRow, computeRealizedSellPnL } from "@/lib/portfolio-math";
 import { API_BASE_URL } from "@/lib/api";
+import { cn } from "@/lib/utils";
 
 // Lazy-load the chart: it pulls in recharts + framer-motion, which we keep out
 // of the initial /overview bundle. The parent card reserves a fixed 480px, so
@@ -424,11 +425,22 @@ function OverviewContent({ portfolioId }: { portfolioId: string }) {
 
       {/* KPI strip — matches portfolio-detail style */}
       <div className="rounded-2xl border border-hairline bg-surface px-4 py-3">
-        <dl className="grid grid-cols-2 gap-x-3 gap-y-3 sm:grid-cols-4 xl:grid-cols-7">
+        {/* Container queries, not viewport ones: `xl:` fires at 1280px of WINDOW, but with the
+            sidebar expanded the content column is only ~1060px there, so seven tracks collapsed
+            to 129px against the ~152px a bordered cell needs. Named container steps only —
+            mixing an arbitrary `@min-[…]` with a named one lets the named rule win at widths
+            where both match, which silently reinstates the crush. */}
+        <dl className="grid grid-cols-2 gap-x-3 gap-y-3 @3xl:grid-cols-4 @6xl:grid-cols-7">
           {KPIS.map((kpi, i) => (
             <div
               key={kpi.label}
-              className={`min-w-0 ${i > 0 ? "xl:border-l xl:border-hairline xl:pl-4" : ""}`}
+              /* Dividers ride the same step as the 7-column layout, and the nth-child guard
+                 keeps them off any row's leading cell even if that pairing ever drifts. */
+              className={cn(
+                "min-w-0",
+                i > 0 &&
+                  "@6xl:[&:not(:nth-child(7n+1))]:border-l @6xl:[&:not(:nth-child(7n+1))]:border-hairline @6xl:[&:not(:nth-child(7n+1))]:pl-4",
+              )}
             >
               <dt className="truncate text-[13px] font-medium uppercase tracking-[0.12em] text-muted-foreground">
                 {kpi.label}
@@ -483,8 +495,9 @@ function OverviewContent({ portfolioId }: { portfolioId: string }) {
       {/* Daily & weekly recap + insights placeholder */}
       <RecapInsightsRow portfolioId={portfolioId} />
 
-      {/* Feed 2-column grid */}
-      <div className="grid grid-cols-1 items-start gap-6 md:grid-cols-2">
+      {/* Feed 2-column grid — @3xl (768px of column), because `md:` splits at 768px of WINDOW,
+          which is exactly where the sidebar appears and leaves only ~500px to split in two. */}
+      <div className="grid grid-cols-1 items-start gap-6 @3xl:grid-cols-2">
         <NewsFeed portfolioId={portfolioId} />
         <PolymarketFeed portfolioId={portfolioId} />
       </div>

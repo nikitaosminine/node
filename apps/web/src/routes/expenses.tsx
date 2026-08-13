@@ -80,8 +80,9 @@ export default function Expenses() {
 
   return (
     <div className="@container mx-auto flex w-full max-w-[1500px] flex-col gap-6 px-4 pb-8 pt-4 sm:px-6">
-      {/* Topbar */}
-      <div className="flex flex-wrap items-center justify-between gap-3">
+      {/* Topbar — stacked on a phone: title + month navigator, then a full-width action row. The
+          navigator's chevrons grow to 36px there so they are comfortably tappable. */}
+      <div className="flex flex-col gap-3 @lg:flex-row @lg:flex-wrap @lg:items-center @lg:justify-between">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Expenses</h1>
           <div className="mt-1 flex items-center gap-1">
@@ -89,7 +90,7 @@ export default function Expenses() {
               type="button"
               onClick={() => setViewDate((d) => startOfMonth(addMonths(d, -1)))}
               aria-label="Previous month"
-              className="grid h-6 w-6 place-items-center rounded-md text-foreground-muted transition-colors hover:bg-surface-2 hover:text-foreground"
+              className="grid h-9 w-9 place-items-center rounded-md text-foreground-muted transition-colors hover:bg-surface-2 hover:text-foreground @lg:h-6 @lg:w-6"
             >
               <ChevronLeft className="h-4 w-4" />
             </button>
@@ -101,18 +102,27 @@ export default function Expenses() {
               onClick={() => setViewDate((d) => startOfMonth(addMonths(d, 1)))}
               disabled={isCurrentMonth}
               aria-label="Next month"
-              className="grid h-6 w-6 place-items-center rounded-md text-foreground-muted transition-colors hover:bg-surface-2 hover:text-foreground disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-foreground-muted"
+              className="grid h-9 w-9 place-items-center rounded-md text-foreground-muted transition-colors hover:bg-surface-2 hover:text-foreground disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-foreground-muted @lg:h-6 @lg:w-6"
             >
               <ChevronRight className="h-4 w-4" />
             </button>
           </div>
         </div>
         <div className="flex items-center gap-2">
-          <Button variant="outline" onClick={() => setImportOpen(true)} disabled={!user}>
+          <Button
+            variant="outline"
+            className="flex-1 @lg:flex-none"
+            onClick={() => setImportOpen(true)}
+            disabled={!user}
+          >
             <Upload className="h-4 w-4" />
             Import
           </Button>
-          <Button onClick={() => setAddOpen(true)} disabled={!user}>
+          <Button
+            className="flex-1 @lg:flex-none"
+            onClick={() => setAddOpen(true)}
+            disabled={!user}
+          >
             <Plus className="h-4 w-4" />
             Add expense
           </Button>

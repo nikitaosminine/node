@@ -208,4 +208,31 @@ describe("AppSidebar shell", () => {
     expect(await within(drawer).findByRole("button", { name: "Second Fund" })).toBeVisible();
     expect(within(drawer).queryByRole("button", { name: "Core Growth" })).toBeNull();
   });
+
+  it("refreshes the desktop rail on navigation, where the drawer never opens", async () => {
+    // At md and up the drawer is unreachable, so the drawer-open refresh above cannot help:
+    // creating or deleting a portfolio on /portfolios left the rail stale until a hard reload.
+    setViewportWidth(1920);
+    const { rerender } = render(
+      <AppSidebar>
+        <h1>Overview</h1>
+      </AppSidebar>,
+    );
+
+    expect(await within(sidebar()).findByRole("button", { name: "Core Growth" })).toBeVisible();
+    expect(portfolioQueries.count).toBe(1);
+
+    // A delete + create on /portfolios, then a client-side navigation away from it.
+    portfolioRows.current = [{ id: "p2", name: "Second Fund" }];
+    pathnameRef.current = "/overview";
+    searchRef.current = "portfolioId=p2";
+    rerender(
+      <AppSidebar>
+        <h1>Overview</h1>
+      </AppSidebar>,
+    );
+
+    expect(await within(sidebar()).findByRole("button", { name: "Second Fund" })).toBeVisible();
+    expect(within(sidebar()).queryByRole("button", { name: "Core Growth" })).toBeNull();
+  });
 });

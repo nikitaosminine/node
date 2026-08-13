@@ -332,6 +332,11 @@ export function SpendingRhythm({ categoryNames, monthDate, refreshKey = 0 }: Pro
             </div>
           ) : (
             <>
+              {/* Seven tracks stay seven tracks at every width — a calendar that scrolls
+                  sideways stops reading as a month. Below @md a cell is only ~40px, which
+                  fits the day number but not a mono amount without breaking the square, so
+                  the amount drops out there; intensity still encodes it and tapping a day
+                  opens the exact figures. */}
               <div className="mb-1.5 grid grid-cols-7 gap-1.5">
                 {WEEKDAYS.map((w) => (
                   <div key={w} className="text-center text-[11px] text-foreground-muted">
@@ -357,7 +362,9 @@ export function SpendingRhythm({ categoryNames, monthDate, refreshKey = 0 }: Pro
                     <>
                       <span className="text-[11px] font-medium">{cell.day}</span>
                       {cell.amount > 0 && (
-                        <span className="text-right font-mono text-[10px]">{eur(cell.amount)}</span>
+                        <span className="hidden text-right font-mono text-[10px] @md:block">
+                          {eur(cell.amount)}
+                        </span>
                       )}
                     </>
                   );

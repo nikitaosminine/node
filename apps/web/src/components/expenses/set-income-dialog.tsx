@@ -94,7 +94,8 @@ export function SetIncomeDialog({ open, onOpenChange, userId, defaultMonth, onSa
         </DialogHeader>
 
         <div className="space-y-4">
-          <div className="grid grid-cols-2 gap-3">
+          {/* Viewport breakpoint: the dialog portals to <body>, outside the page @container. */}
+          <div className="grid gap-3 sm:grid-cols-2">
             <div className="space-y-1.5">
               <Label htmlFor="income-month" className="text-xs">
                 Month

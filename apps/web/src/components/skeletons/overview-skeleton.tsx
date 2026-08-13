@@ -13,11 +13,11 @@ export function OverviewSkeleton() {
       {/* KPI strip — same container + grid as the real strip so its height
           matches exactly at every breakpoint */}
       <div className="rounded-2xl border border-hairline bg-surface px-4 py-3">
-        <dl className="grid grid-cols-2 gap-x-3 gap-y-3 sm:grid-cols-4 xl:grid-cols-7">
+        <dl className="grid grid-cols-2 gap-x-3 gap-y-3 @3xl:grid-cols-4 @6xl:grid-cols-7">
           {Array.from({ length: 7 }).map((_, i) => (
             <div
               key={i}
-              className={`min-w-0 ${i > 0 ? "xl:border-l xl:border-hairline xl:pl-4" : ""}`}
+              className={`min-w-0 ${i > 0 ? "@6xl:[&:not(:nth-child(7n+1))]:border-l @6xl:[&:not(:nth-child(7n+1))]:border-hairline @6xl:[&:not(:nth-child(7n+1))]:pl-4" : ""}`}
             >
               <div className="h-[14px] w-20 animate-pulse rounded bg-surface-2" />
               <div className="mt-1 h-[42px] w-28 animate-pulse rounded bg-surface-2" />

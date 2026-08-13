@@ -4,6 +4,7 @@ import {
   useState,
   useEffect,
   useCallback,
+  useRef,
   type MouseEvent as ReactMouseEvent,
   type ReactNode,
   Suspense,
@@ -306,8 +307,11 @@ export function AppSidebar({ children }: { children: ReactNode }) {
     loadPortfolios();
   }, [loadPortfolios]);
 
-  // The shell outlives every client-side navigation, so the list would otherwise
-  // go stale against portfolios created or deleted after load.
+  // The shell outlives every client-side navigation, so the list would otherwise go stale
+  // against portfolios created or deleted after load. Opening the drawer is only half the
+  // story: at md and up the drawer never opens, so the desktop rail stayed stale until a
+  // hard reload. `handleLocationChange` below refreshes both surfaces at the one shared
+  // boundary — every full-location change.
   useEffect(() => {
     if (mobileOpen) loadPortfolios();
   }, [mobileOpen, loadPortfolios]);
@@ -346,6 +350,21 @@ export function AppSidebar({ children }: { children: ReactNode }) {
 
   // Tapping a nav item must not leave the drawer open over the new page.
   const closeDrawer = useCallback(() => setMobileOpen(false), []);
+
+  // One shared boundary for both surfaces: close the drawer and refresh the portfolio list
+  // whenever the full location changes, so navigating away from /portfolios after a create
+  // or delete brings the desktop rail back in sync too. LocationEffect also fires once on
+  // mount, which the mount effect above already covers — skipping that first call keeps a
+  // page load at exactly one portfolios query.
+  const initialLocationSeen = useRef(false);
+  const handleLocationChange = useCallback(() => {
+    closeDrawer();
+    if (!initialLocationSeen.current) {
+      initialLocationSeen.current = true;
+      return;
+    }
+    loadPortfolios();
+  }, [closeDrawer, loadPortfolios]);
 
   // Taps that resolve to the URL already showing produce no navigation at all,
   // so LocationEffect never fires — close on the link tap itself as well.
@@ -388,7 +407,7 @@ export function AppSidebar({ children }: { children: ReactNode }) {
   return (
     <div className="flex min-h-dvh w-full bg-background text-foreground md:min-h-screen">
       <Suspense fallback={null}>
-        <LocationEffect onChange={closeDrawer} />
+        <LocationEffect onChange={handleLocationChange} />
       </Suspense>
 
       {/* Desktop sidebar — hidden below md by CSS, never by a JS branch. */}

@@ -186,7 +186,10 @@ export function AddExpenseModal({
             />
           </div>
 
-          <div className="grid grid-cols-2 gap-3">
+          {/* Viewport breakpoint, not a container one: the dialog is portaled to <body>, so it
+              sits outside the page's @container. A native date input needs ~151px and only got
+              146px when this was two columns at 390. */}
+          <div className="grid gap-3 sm:grid-cols-2">
             <div className="space-y-1.5">
               <Label htmlFor="expense-date" className="text-xs">
                 Date *
