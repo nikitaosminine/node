@@ -6,7 +6,7 @@ on:
 
 jobs:
   check-web:
-    name: Web — lint & typecheck
+    name: Web — lint, typecheck & test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -20,6 +20,8 @@ jobs:
       - run: npm run lint
         working-directory: apps/web
       - run: npx tsc --noEmit
+        working-directory: apps/web
+      - run: npm test
         working-directory: apps/web
 
   check-api:

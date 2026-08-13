@@ -28,14 +28,26 @@ Work captured during engineering reviews. Each item is deferred — not in scope
 
 ---
 
-## Test framework setup
+## Worker-runtime test setup for `apps/api`
+
 **Branch context:** tracing-and-evals
 
-**What:** Add Vitest to `apps/api` (using `@cloudflare/vitest-pool-workers` for CF Workers compatibility) and Jest or Vitest to `apps/web`.
+**Web app is done — do not re-propose it.** `apps/web` has had Vitest (jsdom + React Testing
+Library) since `c5271ff`, run with `npm test` from `apps/web`, and CI runs that suite in the
+`check-web` job on every PR.
 
-**Why:** No test framework exists in either app. The new feedback endpoint, traceable wrappers, and upsert logic are the natural first test targets. Without tests, regressions in the auth model or upsert semantics are invisible until production.
+**What:** Give `apps/api` a Worker-compatible test setup — `@cloudflare/vitest-pool-workers` plus a
+`vitest.config.ts` — and cover the request handlers. Vitest itself is already a devDependency with
+a `npm test` script, but there is no config and the only test (`src/llm/gemini.test.ts`) is a pure
+helper that needs no Workers runtime. Once tests exist that are worth gating on, add a `npm test`
+step to the `check-api` CI job, which today runs only `npm run typecheck`.
 
-**Where to start:** `apps/api` — `@cloudflare/vitest-pool-workers` docs. First tests: `POST /api/recaps/:id/feedback` auth checks (401, 403, 404) and upsert behavior (insert + re-vote).
+**Why:** The feedback endpoint, traceable wrappers, and upsert logic are the natural first targets.
+Without a Workers-runtime harness, regressions in the auth model or upsert semantics are invisible
+until production.
+
+**Where to start:** `@cloudflare/vitest-pool-workers` docs. First tests:
+`POST /api/recaps/:id/feedback` auth checks (401, 403, 404) and upsert behavior (insert + re-vote).
 
 ---
 
