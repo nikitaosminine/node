@@ -293,13 +293,19 @@ export function AppSidebar({ children }: { children: ReactNode }) {
   // so a fetch per copy would query twice on every load.
   const [portfolios, setPortfolios] = useState<Portfolio[]>([]);
 
+  // Mount, drawer-open, and every location change can each independently call
+  // loadPortfolios, so two overlapping requests can resolve in either order. A
+  // monotonic sequence number guards against an older response overwriting a
+  // newer one: only the response matching the most recently issued request is applied.
+  const loadPortfoliosSeqRef = useRef(0);
   const loadPortfolios = useCallback(() => {
+    const seq = ++loadPortfoliosSeqRef.current;
     supabase
       .from("portfolios")
       .select("id,name")
       .order("created_at", { ascending: true })
       .then(({ data }) => {
-        if (data) setPortfolios(data as Portfolio[]);
+        if (data && seq === loadPortfoliosSeqRef.current) setPortfolios(data as Portfolio[]);
       });
   }, []);
 
