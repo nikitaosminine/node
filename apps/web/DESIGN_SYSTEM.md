@@ -223,6 +223,25 @@ viewport. Tailwind v4 ships container queries natively (no plugin, no config).
 longer be sized by its own contents. On a shrink-to-fit wrapper (`mx-auto` with no `w-full`,
 inside a flex column) that collapses it to zero content width.
 
+**Pick container-query steps from the CONTENT box.** `container-type: inline-size` queries the
+content box, but `getBoundingClientRect()` returns the border box — on a `px-6` wrapper that
+reads 48px high, which is enough to pick a step that makes laptops *worse*. Measure with
+`el.clientWidth - paddingLeft - paddingRight`, and remember the desktop rail costs a further
+220px: at a 1280px window with the sidebar expanded the content box is 1012px, not 1280px.
+That gap is the whole reason a `xl:` rule misfires here.
+
+**Use named container steps, not arbitrary `@min-[…]`, when several could match.** Tailwind
+sorts an arbitrary container variant *before* the named ones, so a wide `@min-[1180px]:grid-cols-7`
+loses to a narrower `@3xl:grid-cols-4` at widths where both apply — silently reinstating the
+cramped layout, and orphaning any divider tied to the wide step. Keep a divider on the same
+step as the column count it belongs to, plus an `:nth-child(Nn+1)` guard.
+
+**Dialogs are outside the page container.** Radix portals `DialogContent` to `<body>`, so
+`@`-prefixed variants never match inside one — use viewport breakpoints (`sm:`) there.
+`DialogContent` is also a `grid`, and grid items default to `min-width: auto`: a wide table
+inside one will size its track past the dialog and paint off-screen instead of scrolling, so
+give the wrapper `min-w-0` and the table a `min-w-*`.
+
 **Full-height wrappers must subtract the mobile top bar.** Below `md` the shell puts a sticky
 `h-14` (3.5rem) bar inside the viewport, so a bare `min-h-screen` / `h-screen` overflows the
 document by exactly that bar and short pages scroll for nothing. Write the height mobile-first
