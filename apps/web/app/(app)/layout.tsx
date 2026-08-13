@@ -37,7 +37,9 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
       value={{ theses, addThesis, updateThesis, deleteThesis, openDrawer, openModal }}
     >
       <AppSidebar>
-        <div className="flex min-h-screen flex-col">{children}</div>
+        {/* Below md the sticky top bar already occupies 3.5rem of the viewport,
+            so a full-height wrapper here would push every short page into scroll. */}
+        <div className="flex min-h-[calc(100dvh-3.5rem)] flex-col md:min-h-screen">{children}</div>
       </AppSidebar>
       <ThesisCenteredModal
         open={!!selectedThesisId || createOpen}

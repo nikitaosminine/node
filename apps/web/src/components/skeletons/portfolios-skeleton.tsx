@@ -4,9 +4,9 @@
 
 export function PortfoliosSkeleton() {
   return (
-    <div className="mx-auto max-w-5xl space-y-6 px-6 py-6">
+    <div className="@container mx-auto w-full max-w-5xl space-y-6 px-4 py-6 sm:px-6">
       {/* Header: title + actions */}
-      <div className="flex items-end justify-between gap-4">
+      <div className="flex flex-wrap items-end justify-between gap-4">
         <div className="space-y-2">
           <div className="h-6 w-32 animate-pulse rounded bg-surface-2" />
           <div className="h-3 w-64 animate-pulse rounded bg-surface-2" />

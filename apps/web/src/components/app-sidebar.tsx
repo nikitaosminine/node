@@ -1,6 +1,13 @@
 "use client";
 
-import { useState, useEffect, type ReactNode, Suspense } from "react";
+import {
+  useState,
+  useEffect,
+  useCallback,
+  type MouseEvent as ReactMouseEvent,
+  type ReactNode,
+  Suspense,
+} from "react";
 import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import {
@@ -8,6 +15,7 @@ import {
   ChevronDown,
   LayoutDashboard,
   BarChart3,
+  Menu,
   TrendingUp,
   LogOut,
   PanelLeftClose,
@@ -19,6 +27,22 @@ import { NodeLogo } from "@/components/node-logo";
 import { ThemeSwitcher } from "@/components/ThemeSwitcher";
 import { supabase } from "@/integrations/supabase/client";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
+import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet";
+import { useIsMobile } from "@/hooks/use-mobile";
+import { cn } from "@/lib/utils";
+
+// ---------------------------------------------------------------------------
+// Collapse preference
+// ---------------------------------------------------------------------------
+
+/** Matches the `binturong.` key convention already used for `last-portfolio-id`. */
+const COLLAPSED_STORAGE_KEY = "binturong.sidebar-collapsed";
+
+/**
+ * Width at or above which a first-time visitor gets the expanded sidebar.
+ * Below it (laptops) we start collapsed to hand ~160px back to the content column.
+ */
+const EXPANDED_MIN_WIDTH = 1536;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -77,23 +101,12 @@ const SUB_ITEMS = [
 // Inner sidebar (needs useSearchParams / usePathname)
 // ---------------------------------------------------------------------------
 
-function SidebarInner({ collapsed }: { collapsed: boolean }) {
+function SidebarInner({ collapsed, portfolios }: { collapsed: boolean; portfolios: Portfolio[] }) {
   const pathname = usePathname();
   const searchParams = useSearchParams();
   const activePortfolioId = useActivePortfolioId();
 
-  const [portfolios, setPortfolios] = useState<Portfolio[]>([]);
   const [openId, setOpenId] = useState<string | null>(activePortfolioId);
-
-  useEffect(() => {
-    supabase
-      .from("portfolios")
-      .select("id,name")
-      .order("created_at", { ascending: true })
-      .then(({ data }) => {
-        if (data) setPortfolios(data as Portfolio[]);
-      });
-  }, []);
 
   // Auto-expand when navigation changes active portfolio
   useEffect(() => {
@@ -232,31 +245,172 @@ function SidebarInner({ collapsed }: { collapsed: boolean }) {
 // AppSidebar
 // ---------------------------------------------------------------------------
 
+/**
+ * Fires whenever the full location changes — pathname *or* query string.
+ * `useSearchParams` lives here, in its own Suspense boundary, so AppSidebar
+ * itself stays outside it.
+ */
+function LocationEffect({ onChange }: { onChange: () => void }) {
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
+  const location = `${pathname}?${searchParams.toString()}`;
+
+  useEffect(() => {
+    onChange();
+  }, [location, onChange]);
+
+  return null;
+}
+
+function SignOutButton({ collapsed, onSignOut }: { collapsed: boolean; onSignOut: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onSignOut}
+      className={cn(
+        "flex items-center gap-2.5 rounded-md px-2 py-1.5 text-sm font-medium text-foreground-muted transition-colors hover:bg-surface-2 hover:text-foreground",
+        collapsed && "justify-center",
+      )}
+      title={collapsed ? "Sign out" : undefined}
+    >
+      <LogOut className="h-4 w-4 shrink-0" />
+      {!collapsed && <span>Sign out</span>}
+    </button>
+  );
+}
+
 export function AppSidebar({ children }: { children: ReactNode }) {
+  // SSR renders the expanded sidebar; the stored preference is applied in an
+  // effect so the server and first client render agree.
   const [collapsed, setCollapsed] = useState(false);
+  const [transitionsEnabled, setTransitionsEnabled] = useState(false);
+  const [mobileOpen, setMobileOpen] = useState(false);
+  const isMobile = useIsMobile();
   const router = useRouter();
+
+  // Owned here, not in SidebarInner: that renders twice (desktop rail + drawer),
+  // so a fetch per copy would query twice on every load.
+  const [portfolios, setPortfolios] = useState<Portfolio[]>([]);
+
+  const loadPortfolios = useCallback(() => {
+    supabase
+      .from("portfolios")
+      .select("id,name")
+      .order("created_at", { ascending: true })
+      .then(({ data }) => {
+        if (data) setPortfolios(data as Portfolio[]);
+      });
+  }, []);
+
+  useEffect(() => {
+    loadPortfolios();
+  }, [loadPortfolios]);
+
+  // The shell outlives every client-side navigation, so the list would otherwise
+  // go stale against portfolios created or deleted after load.
+  useEffect(() => {
+    if (mobileOpen) loadPortfolios();
+  }, [mobileOpen, loadPortfolios]);
+
+  useEffect(() => {
+    let stored: string | null = null;
+    try {
+      stored = window.localStorage.getItem(COLLAPSED_STORAGE_KEY);
+    } catch {
+      // Storage can be unavailable (private mode / blocked cookies) — fall back to width.
+    }
+    setCollapsed(stored === null ? window.innerWidth < EXPANDED_MIN_WIDTH : stored === "true");
+
+    // Enable the width transition only after the restored state has been painted,
+    // otherwise the restore itself animates as a visible sweep on first load.
+    let inner = 0;
+    const outer = requestAnimationFrame(() => {
+      inner = requestAnimationFrame(() => setTransitionsEnabled(true));
+    });
+    return () => {
+      cancelAnimationFrame(outer);
+      cancelAnimationFrame(inner);
+    };
+  }, []);
+
+  // A manual choice always wins over the width default from here on.
+  const toggleCollapsed = useCallback(() => {
+    const next = !collapsed;
+    setCollapsed(next);
+    try {
+      window.localStorage.setItem(COLLAPSED_STORAGE_KEY, String(next));
+    } catch {
+      // Non-fatal: the sidebar just won't remember across reloads.
+    }
+  }, [collapsed]);
+
+  // Tapping a nav item must not leave the drawer open over the new page.
+  const closeDrawer = useCallback(() => setMobileOpen(false), []);
+
+  // Taps that resolve to the URL already showing produce no navigation at all,
+  // so LocationEffect never fires — close on the link tap itself as well.
+  const handleDrawerClick = useCallback((event: ReactMouseEvent<HTMLElement>) => {
+    if ((event.target as HTMLElement).closest("a")) setMobileOpen(false);
+  }, []);
+
+  // Resizing up to a desktop width reveals the real sidebar — drop the drawer.
+  useEffect(() => {
+    if (!isMobile) setMobileOpen(false);
+  }, [isMobile]);
 
   const handleSignOut = async () => {
     await supabase.auth.signOut();
     router.push("/login");
   };
 
+  // Sits in the footer between Settings and the theme switcher, styled to match
+  // the other footer rows. Desktop-only for free: the whole aside is `hidden md:flex`.
+  const collapseToggle = (
+    <button
+      type="button"
+      onClick={toggleCollapsed}
+      aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+      title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+      className={cn(
+        "flex items-center gap-2.5 rounded-md px-2 py-1.5 text-sm font-medium text-foreground-muted transition-colors hover:bg-surface-2 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+        collapsed && "h-9 w-9 justify-center px-0",
+      )}
+    >
+      {collapsed ? (
+        <PanelLeftOpen className="h-4 w-4 shrink-0" aria-hidden />
+      ) : (
+        <PanelLeftClose className="h-4 w-4 shrink-0" aria-hidden />
+      )}
+      {!collapsed && <span>Collapse</span>}
+    </button>
+  );
+
   return (
-    <div className="flex min-h-screen w-full bg-background text-foreground">
+    <div className="flex min-h-dvh w-full bg-background text-foreground md:min-h-screen">
+      <Suspense fallback={null}>
+        <LocationEffect onChange={closeDrawer} />
+      </Suspense>
+
+      {/* Desktop sidebar — hidden below md by CSS, never by a JS branch. */}
       <aside
-        className={`sticky top-0 flex h-screen shrink-0 flex-col border-r border-hairline bg-surface transition-all duration-200 ${
-          collapsed ? "w-[60px]" : "w-[220px]"
-        }`}
+        className={cn(
+          "sticky top-0 hidden h-screen shrink-0 flex-col border-r border-hairline bg-surface md:flex",
+          transitionsEnabled && "transition-all duration-200",
+          collapsed ? "w-[60px]" : "w-[220px]",
+        )}
       >
-        {/* Logo */}
+        {/* Logo only — the collapse toggle lives in the footer so the logo keeps
+            its full size and stays centred in the collapsed rail. */}
         <div
-          className={`flex h-14 items-center border-b border-hairline ${
-            collapsed ? "justify-center px-2" : "px-4"
-          }`}
+          className={cn(
+            "flex h-14 items-center border-b border-hairline",
+            collapsed ? "justify-center px-2" : "px-4",
+          )}
         >
           <Link
             href="/portfolios"
             aria-label="Node home"
+            title={collapsed ? "Node home" : undefined}
             className="flex min-w-0 items-center gap-2.5"
           >
             <NodeLogo className="h-8 w-8 shrink-0" />
@@ -268,45 +422,75 @@ export function AppSidebar({ children }: { children: ReactNode }) {
 
         {/* Nav (needs searchParams — wrapped in Suspense) */}
         <Suspense fallback={<div className="flex-1" />}>
-          <SidebarInner collapsed={collapsed} />
+          <SidebarInner collapsed={collapsed} portfolios={portfolios} />
         </Suspense>
 
-        {/* Footer */}
+        {/* Footer — Settings (end of SidebarInner), then collapse, theme, sign out. */}
         <div
-          className={`flex flex-col gap-1 border-t border-hairline p-2 ${
-            collapsed ? "items-center" : ""
-          }`}
+          className={cn(
+            "flex flex-col gap-1 border-t border-hairline p-2",
+            collapsed && "items-center",
+          )}
         >
+          {collapseToggle}
           <ThemeSwitcher compact={collapsed} />
-          <button
-            type="button"
-            onClick={handleSignOut}
-            className={`flex items-center gap-2.5 rounded-md px-2 py-1.5 text-sm font-medium text-foreground-muted transition-colors hover:bg-surface-2 hover:text-foreground ${
-              collapsed ? "justify-center" : ""
-            }`}
-            title={collapsed ? "Sign out" : undefined}
-          >
-            <LogOut className="h-4 w-4 shrink-0" />
-            {!collapsed && <span>Sign out</span>}
-          </button>
+          <SignOutButton collapsed={collapsed} onSignOut={handleSignOut} />
         </div>
       </aside>
 
+      {/* Mobile drawer */}
+      <Sheet open={mobileOpen} onOpenChange={setMobileOpen}>
+        <SheetContent
+          side="left"
+          className="flex flex-col gap-0 border-hairline bg-surface p-0"
+          onClick={handleDrawerClick}
+        >
+          <SheetTitle className="sr-only">Navigation</SheetTitle>
+          <div className="flex h-14 shrink-0 items-center border-b border-hairline px-4">
+            <Link
+              href="/portfolios"
+              aria-label="Node home"
+              className="flex min-w-0 items-center gap-2.5"
+            >
+              <NodeLogo className="h-8 w-8 shrink-0" />
+              <span className="truncate text-[15px] font-semibold tracking-tight">Node</span>
+            </Link>
+          </div>
+
+          <Suspense fallback={<div className="flex-1" />}>
+            <SidebarInner collapsed={false} portfolios={portfolios} />
+          </Suspense>
+
+          <div className="flex flex-col gap-1 border-t border-hairline p-2">
+            <SignOutButton collapsed={false} onSignOut={handleSignOut} />
+          </div>
+        </SheetContent>
+      </Sheet>
+
       {/* Main content */}
       <main className="relative min-w-0 flex-1">
-        <button
-          type="button"
-          onClick={() => setCollapsed((c) => !c)}
-          aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
-          title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
-          className="absolute left-3 top-3 z-30 grid h-8 w-8 place-items-center rounded-md border border-transparent text-foreground-muted transition-colors hover:border-hairline hover:bg-surface hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-        >
-          {collapsed ? (
-            <PanelLeftOpen className="h-4 w-4" aria-hidden />
-          ) : (
-            <PanelLeftClose className="h-4 w-4" aria-hidden />
-          )}
-        </button>
+        {/* Mobile top bar */}
+        <header className="sticky top-0 z-20 flex h-14 items-center gap-1 border-b border-hairline bg-surface px-2 md:hidden">
+          <button
+            type="button"
+            onClick={() => setMobileOpen(true)}
+            aria-label="Open navigation"
+            className="grid h-9 w-9 shrink-0 place-items-center rounded-md text-foreground-muted transition-colors hover:bg-surface-2 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          >
+            <Menu className="h-5 w-5" aria-hidden />
+          </button>
+          <Link
+            href="/portfolios"
+            aria-label="Node home"
+            className="flex min-w-0 items-center gap-2"
+          >
+            <NodeLogo className="h-7 w-7 shrink-0" />
+            <span className="truncate text-[15px] font-semibold tracking-tight">Node</span>
+          </Link>
+          <div className="ml-auto shrink-0">
+            <ThemeSwitcher compact />
+          </div>
+        </header>
         {children}
       </main>
     </div>

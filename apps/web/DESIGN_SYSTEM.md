@@ -207,6 +207,29 @@ Base `--radius: 0.75rem`. Scale (utilities `rounded-sm` … `rounded-4xl`):
 | `--radius-3xl` | `calc(var(--radius) + 12px)` |
 | `--radius-4xl` | `calc(var(--radius) + 16px)` |
 
+## Layout
+
+Mobile-first: the small-screen value is the base class and larger sizes are `sm:` / `md:` /
+`lg:` overrides. The app shell swaps the desktop sidebar for the mobile drawer at `md`
+(768px) — see `AGENTS.md` → "Frontend architecture" for the shell itself.
+
+**Page wrappers.** A top-level page wrapper is a centered column (`mx-auto w-full max-w-*`)
+with fluid padding `px-4 sm:px-6` and an `@container` context, so layouts inside a page can
+use `@`-prefixed variants (`@lg:`, `@3xl:`) that track the real content width instead of the
+viewport. Tailwind v4 ships container queries natively (no plugin, no config).
+
+**Always pair `@container` with an explicit `w-full`.** `@container` sets
+`container-type: inline-size`, which applies inline-size containment: the element can no
+longer be sized by its own contents. On a shrink-to-fit wrapper (`mx-auto` with no `w-full`,
+inside a flex column) that collapses it to zero content width.
+
+**Full-height wrappers must subtract the mobile top bar.** Below `md` the shell puts a sticky
+`h-14` (3.5rem) bar inside the viewport, so a bare `min-h-screen` / `h-screen` overflows the
+document by exactly that bar and short pages scroll for nothing. Write the height mobile-first
+as `min-h-[calc(100dvh-3.5rem)] md:min-h-screen` — `dvh` so mobile browser chrome is accounted
+for — and use `h-` instead of `min-h-` only where the page needs a fixed height for its own
+`overflow-hidden` scroll panes.
+
 ## Icons
 
 **`lucide-react` is the sole icon library.** Browse the full set at

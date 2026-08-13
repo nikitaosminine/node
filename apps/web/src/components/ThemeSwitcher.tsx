@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useSyncExternalStore } from "react";
 import { Moon, Sun } from "lucide-react";
 import { runThemeFadeTransition } from "@/components/lightswind/theme-transition";
 import { Switch } from "@/components/ui/switch";
@@ -22,10 +22,36 @@ function getStoredMode(): ThemeMode {
   return saved === "dark" || saved === "light" ? saved : "light";
 }
 
+// The applied theme is global (a class on <html>), so it cannot live in per-instance
+// state: several switchers are mounted at once — the sidebar footer and the mobile
+// top bar — and each must reflect the theme the others set.
+let currentMode: ThemeMode = "light";
+const modeListeners = new Set<() => void>();
+
+function subscribeMode(listener: () => void) {
+  modeListeners.add(listener);
+  return () => {
+    modeListeners.delete(listener);
+  };
+}
+
+function getModeSnapshot(): ThemeMode {
+  return currentMode;
+}
+
+function getServerModeSnapshot(): ThemeMode {
+  return "light";
+}
+
 function applyTheme(mode: ThemeMode) {
   const root = document.documentElement;
   LEGACY_THEME_CLASSES.forEach((c) => root.classList.remove(c));
   root.classList.toggle("dark", mode === "dark");
+
+  if (currentMode !== mode) {
+    currentMode = mode;
+    modeListeners.forEach((listener) => listener());
+  }
 }
 
 export function ThemeInitializer() {
@@ -37,19 +63,16 @@ export function ThemeInitializer() {
 }
 
 export function ThemeSwitcher({ compact = false }: { compact?: boolean }) {
-  const [mode, setMode] = useState<ThemeMode>("light");
+  const mode = useSyncExternalStore(subscribeMode, getModeSnapshot, getServerModeSnapshot);
 
   useEffect(() => {
     localStorage.removeItem(LEGACY_STORAGE_KEY);
-    const saved = getStoredMode();
-    setMode(saved);
-    applyTheme(saved);
+    applyTheme(getStoredMode());
   }, []);
 
   const handleToggle = () => {
     const next = mode === "dark" ? "light" : "dark";
     runThemeFadeTransition(() => {
-      setMode(next);
       applyTheme(next);
       localStorage.setItem(STORAGE_KEY, next);
     });
