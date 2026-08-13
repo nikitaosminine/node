@@ -173,8 +173,10 @@ describe("AppSidebar shell", () => {
     setViewportWidth(390);
     renderShell();
 
-    // The rail is hidden below md by CSS only, so it stays mounted and renders the list.
-    expect(await within(sidebar()).findByRole("link", { name: "Core Growth" })).toBeVisible();
+    // The rail is hidden below md by CSS only, so it stays mounted and renders the
+    // list. jsdom loads no Tailwind, so this asserts mounting, not hiding — only the
+    // browser checks can prove the rail is actually hidden on a phone.
+    expect(await within(sidebar()).findByRole("link", { name: "Core Growth" })).toBeInTheDocument();
     expect(portfolioQueries.count).toBe(1);
 
     await user.click(screen.getByRole("button", { name: "Open navigation" }));
@@ -193,7 +195,8 @@ describe("AppSidebar shell", () => {
     setViewportWidth(390);
     renderShell();
 
-    expect(await within(sidebar()).findByRole("link", { name: "Core Growth" })).toBeVisible();
+    // Mounted, not proven visible — see the note in the previous test.
+    expect(await within(sidebar()).findByRole("link", { name: "Core Growth" })).toBeInTheDocument();
 
     // The shell survives client-side navigation, so a delete + create on /portfolios
     // leaves its state stale until the drawer refreshes it.

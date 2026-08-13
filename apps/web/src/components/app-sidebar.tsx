@@ -363,6 +363,8 @@ export function AppSidebar({ children }: { children: ReactNode }) {
     router.push("/login");
   };
 
+  // Sits in the footer between Settings and the theme switcher, styled to match
+  // the other footer rows. Desktop-only for free: the whole aside is `hidden md:flex`.
   const collapseToggle = (
     <button
       type="button"
@@ -370,15 +372,16 @@ export function AppSidebar({ children }: { children: ReactNode }) {
       aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
       title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
       className={cn(
-        "grid shrink-0 place-items-center rounded-md border border-transparent text-foreground-muted transition-colors hover:border-hairline hover:bg-surface-2 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-        collapsed ? "h-6 w-6" : "h-8 w-8",
+        "flex items-center gap-2.5 rounded-md px-2 py-1.5 text-sm font-medium text-foreground-muted transition-colors hover:bg-surface-2 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+        collapsed && "h-9 w-9 justify-center px-0",
       )}
     >
       {collapsed ? (
-        <PanelLeftOpen className="h-4 w-4" aria-hidden />
+        <PanelLeftOpen className="h-4 w-4 shrink-0" aria-hidden />
       ) : (
-        <PanelLeftClose className="h-4 w-4" aria-hidden />
+        <PanelLeftClose className="h-4 w-4 shrink-0" aria-hidden />
       )}
+      {!collapsed && <span>Collapse</span>}
     </button>
   );
 
@@ -396,25 +399,25 @@ export function AppSidebar({ children }: { children: ReactNode }) {
           collapsed ? "w-[60px]" : "w-[220px]",
         )}
       >
-        {/* Logo + collapse toggle */}
+        {/* Logo only — the collapse toggle lives in the footer so the logo keeps
+            its full size and stays centred in the collapsed rail. */}
         <div
           className={cn(
             "flex h-14 items-center border-b border-hairline",
-            collapsed ? "justify-center gap-1 px-1" : "gap-2 pl-4 pr-2",
+            collapsed ? "justify-center px-2" : "px-4",
           )}
         >
           <Link
             href="/portfolios"
             aria-label="Node home"
             title={collapsed ? "Node home" : undefined}
-            className={cn("flex min-w-0 items-center gap-2.5", !collapsed && "flex-1")}
+            className="flex min-w-0 items-center gap-2.5"
           >
-            <NodeLogo className={cn("shrink-0", collapsed ? "h-6 w-6" : "h-8 w-8")} />
+            <NodeLogo className="h-8 w-8 shrink-0" />
             {!collapsed && (
               <span className="truncate text-[15px] font-semibold tracking-tight">Node</span>
             )}
           </Link>
-          {collapseToggle}
         </div>
 
         {/* Nav (needs searchParams — wrapped in Suspense) */}
@@ -422,13 +425,14 @@ export function AppSidebar({ children }: { children: ReactNode }) {
           <SidebarInner collapsed={collapsed} portfolios={portfolios} />
         </Suspense>
 
-        {/* Footer */}
+        {/* Footer — Settings (end of SidebarInner), then collapse, theme, sign out. */}
         <div
           className={cn(
             "flex flex-col gap-1 border-t border-hairline p-2",
             collapsed && "items-center",
           )}
         >
+          {collapseToggle}
           <ThemeSwitcher compact={collapsed} />
           <SignOutButton collapsed={collapsed} onSignOut={handleSignOut} />
         </div>
