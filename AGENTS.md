@@ -25,6 +25,8 @@ cd apps/web
 npm run dev      # → localhost:3000
 npm run build
 npm run lint
+npm test         # Vitest, single run (also runs in CI on every PR)
+npm run test:watch
 
 # API (Cloudflare Worker)
 cd apps/api
@@ -34,7 +36,10 @@ npx wrangler secret put NAME   # add/update a secret
 npm run cf-typegen             # regenerate Cloudflare bindings types
 ```
 
-No monorepo-level build or test command exists; lint/build per-app.
+No monorepo-level build or test command exists; lint/build/test per-app.
+
+CI (`.github/workflows/ci.yml`) runs on every PR to `main`: `check-web` does lint + `tsc --noEmit`
++ `npm test` in `apps/web`; `check-api` does `npm run typecheck` in `apps/api` only.
 
 ## Deployment rules
 

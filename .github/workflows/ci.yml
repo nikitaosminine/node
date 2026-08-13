@@ -4,9 +4,14 @@ on:
   pull_request:
     branches: [main]
 
+# Top-level so every job inherits it — a job-level block on check-web would
+# leave check-api on the repo default.
+permissions:
+  contents: read
+
 jobs:
   check-web:
-    name: Web — lint & typecheck
+    name: Web — lint, typecheck & test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -20,6 +25,8 @@ jobs:
       - run: npm run lint
         working-directory: apps/web
       - run: npx tsc --noEmit
+        working-directory: apps/web
+      - run: npm test
         working-directory: apps/web
 
   check-api:
