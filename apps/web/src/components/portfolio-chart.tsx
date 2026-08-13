@@ -571,7 +571,7 @@ function ExpandableBenchmarkSearch({
                     {suggestions.map((suggestion) => (
                       <div
                         key={`suggestion-${suggestion.ticker}`}
-                        className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-3 rounded-md px-1 py-1.5 hover:bg-surface-2"
+                        className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-3 rounded-md px-1 py-2.5 hover:bg-surface-2 md:py-1.5"
                       >
                         <button
                           type="button"

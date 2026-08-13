@@ -204,9 +204,13 @@ function ClassicAllocation({
 }) {
   return (
     <div className="relative min-h-0 flex-1">
-      <div className="pointer-events-none absolute left-0 right-0 top-[calc(50%-1.5rem)] z-20 border-t border-hairline" />
-      <div className="grid h-full min-h-0 grid-rows-2">
-        <section className="min-h-0 overflow-y-auto pb-5 pr-1">
+      {/* The hairline splits the two halves, so it only belongs to the fixed
+          50/50 layout that exists once the card is height-constrained. */}
+      <div className="pointer-events-none absolute left-0 right-0 top-[calc(50%-1.5rem)] z-20 hidden border-t border-hairline @4xl:block" />
+      {/* Below the two-column split the card grows with its content: no forced
+          equal halves and no inner scrollers, so the page is the only scroller. */}
+      <div className="flex flex-col @4xl:grid @4xl:h-full @4xl:min-h-0 @4xl:grid-rows-2">
+        <section className="min-h-0 pb-5 pr-1 @4xl:overflow-y-auto">
           <div className="sticky top-0 z-10 mb-2 flex items-baseline justify-between gap-2 bg-surface pb-1">
             <div className="text-[10px] uppercase tracking-[0.12em] text-foreground-muted">
               By sector
@@ -216,7 +220,7 @@ function ClassicAllocation({
           <AllocationRows data={sectorData} compact />
         </section>
 
-        <section className="min-h-0 overflow-y-auto pt-5 pr-1">
+        <section className="min-h-0 pt-5 pr-1 @4xl:overflow-y-auto">
           <div className="sticky top-0 z-10 mb-3 flex items-baseline justify-between gap-2 bg-surface pb-1">
             <div className="text-[10px] uppercase tracking-[0.12em] text-foreground-muted">
               By asset type
@@ -275,7 +279,7 @@ function WorldMap({ countries }: { countries: CountryAllocation[] }) {
   }, []);
 
   return (
-    <div className="relative h-[176px] shrink-0 overflow-hidden rounded-lg border border-hairline bg-background/20">
+    <div className="relative h-[140px] shrink-0 overflow-hidden rounded-lg border border-hairline bg-background/20 sm:h-[176px]">
       <svg
         viewBox="0 0 640 220"
         role="img"
@@ -463,7 +467,7 @@ function GeographyAllocation({
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-3">
       <WorldMap countries={countries} />
-      <div className="min-h-0 flex-1 overflow-y-auto pr-1">
+      <div className="min-h-0 flex-1 pr-1 @4xl:overflow-y-auto">
         <div className="mb-3 flex items-center justify-between gap-3 text-[10px] text-foreground-muted">
           <span className="uppercase tracking-[0.12em]">Countries</span>
           {data && (
@@ -528,7 +532,7 @@ function GeographyAllocation({
                       <PopoverContent
                         side="right"
                         sideOffset={24}
-                        className="w-72 max-h-96 overflow-y-auto rounded-xl border border-hairline bg-surface p-3 shadow-lg text-xs"
+                        className="max-h-96 w-[min(18rem,calc(100vw-2rem))] overflow-y-auto rounded-xl border border-hairline bg-surface p-3 text-xs shadow-lg"
                       >
                         <p className="mb-2 text-[10px] font-semibold uppercase tracking-widest text-foreground-muted">
                           Other · {minorCountries.length} countries
@@ -684,7 +688,7 @@ export function AllocationCard({
   }, [view, geography, loadGeography]);
 
   return (
-    <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-2xl border border-hairline bg-surface p-4">
+    <div className="flex min-h-0 flex-col rounded-2xl border border-hairline bg-surface p-4 @4xl:h-full @4xl:overflow-hidden">
       <div className="mb-3 flex shrink-0 items-center gap-3">
         <div className="min-w-0">
           <div className="text-[10px] uppercase tracking-[0.12em] text-foreground-muted">

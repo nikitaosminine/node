@@ -185,7 +185,7 @@ export function RecapSlide({
 
         {/* Two charts side-by-side (mover: gainer + loser sparklines) */}
         {hasCharts && (
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             {slide.charts!.map((c, i) => (
               <div key={i} className="h-[120px] w-full shrink-0">
                 <RecapChart chart={c} />

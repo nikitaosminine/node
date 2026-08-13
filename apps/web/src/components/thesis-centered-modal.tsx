@@ -318,7 +318,7 @@ export function ThesisCenteredModal({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
         hideCloseButton
-        className="sm:max-w-3xl max-h-[88vh] flex flex-col p-0 gap-0 overflow-hidden"
+        className="sm:max-w-3xl max-h-[88dvh] flex flex-col p-0 gap-0 overflow-hidden"
       >
         {/* ── VIEW mode ── */}
         {mode === "view" && thesis && (
@@ -628,7 +628,7 @@ export function ThesisCenteredModal({
                           setTickerSearch("");
                           setShowTickerDropdown(false);
                         }}
-                        className="w-full text-left px-2.5 py-1.5 rounded text-xs hover:bg-muted/50 flex items-center justify-between"
+                        className="w-full text-left px-2.5 py-2.5 md:py-1.5 rounded text-xs hover:bg-muted/50 flex items-center justify-between"
                       >
                         <span className="font-mono text-[11px] font-medium tabular-nums">
                           {s.ticker}
@@ -640,7 +640,7 @@ export function ThesisCenteredModal({
                 )}
               </div>
 
-              <div className="grid grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                 <div className="space-y-1.5">
                   <Label className="text-xs text-muted-foreground">Conviction</Label>
                   <div className="flex gap-1">
@@ -676,7 +676,7 @@ export function ThesisCenteredModal({
                 </div>
               </div>
 
-              <div className="grid grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                 <div className="space-y-1.5">
                   <Label className="text-xs text-muted-foreground">Horizon</Label>
                   <Input
@@ -838,11 +838,11 @@ export function ThesisCenteredModal({
       {/* Spreadsheet preview overlay */}
       {sheetPreview && (
         <div
-          className="fixed inset-0 z-[60] bg-black/80 flex items-center justify-center p-6"
+          className="fixed inset-0 z-[60] bg-black/80 flex items-center justify-center p-4 sm:p-6"
           onClick={() => setSheetPreview(null)}
         >
           <div
-            className="bg-card rounded-xl border border-border shadow-2xl flex flex-col max-h-[85vh] max-w-[90vw] w-full overflow-hidden"
+            className="bg-card rounded-xl border border-border shadow-2xl flex flex-col max-h-[85dvh] max-w-[90vw] w-full overflow-hidden"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-center justify-between px-4 py-3 border-b border-border shrink-0">

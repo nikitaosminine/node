@@ -104,20 +104,26 @@ const SIDE_COLOURS: Record<Side, string> = {
   FEE: "bg-yellow-500/10 text-yellow-400 border-yellow-500/20",
 };
 
+// `hideBelowSm` drops the identifier/fee columns on a phone, where date, symbol,
+// side and amount carry the meaning. The class must be applied to the header cell
+// and its matching body cell together or the columns fall out of alignment.
 const COLUMNS: Array<{
   key: SortKey;
   label: string;
   align?: "left" | "right";
+  hideBelowSm?: boolean;
 }> = [
   { key: "date", label: "Date" },
   { key: "symbol", label: "Symbol" },
-  { key: "isin", label: "ISIN" },
-  { key: "yahoo_ticker", label: "Ticker" },
+  { key: "isin", label: "ISIN", hideBelowSm: true },
+  { key: "yahoo_ticker", label: "Ticker", hideBelowSm: true },
   { key: "side", label: "Side" },
   { key: "quantity", label: "Qty", align: "right" },
   { key: "net_amount", label: "Net Amount", align: "right" },
-  { key: "commission", label: "Commission", align: "right" },
+  { key: "commission", label: "Commission", align: "right", hideBelowSm: true },
 ];
+
+const HIDDEN_BELOW_SM = "hidden sm:table-cell";
 
 function formatAmount(value: number | null, currency: string): string {
   if (value == null) return "-";
@@ -279,8 +285,10 @@ export function TransactionHistoryTab({
 
   return (
     <>
-      <div className="overflow-auto rounded-md border border-border">
-        <Table>
+      {/* min-w keeps the eight columns legible; the Table primitive's own wrapper
+          provides the horizontal scroll, so the page itself never scrolls. */}
+      <div className="rounded-md border border-border">
+        <Table className="min-w-[640px] sm:min-w-[860px]">
           <TableHeader>
             <TableRow>
               {COLUMNS.map((column) => {
@@ -292,7 +300,9 @@ export function TransactionHistoryTab({
                     onClick={() => handleSort(column.key)}
                     className={`cursor-pointer select-none whitespace-nowrap text-xs ${
                       column.align === "right" ? "text-right" : ""
-                    } ${active ? "text-foreground" : ""}`}
+                    } ${active ? "text-foreground" : ""} ${
+                      column.hideBelowSm ? HIDDEN_BELOW_SM : ""
+                    }`}
                   >
                     <span
                       className={`inline-flex items-center gap-1 ${
@@ -329,10 +339,14 @@ export function TransactionHistoryTab({
                   <TableCell className="max-w-[180px] truncate text-xs" title={transaction.symbol}>
                     {transaction.symbol}
                   </TableCell>
-                  <TableCell className="font-mono text-xs text-muted-foreground">
+                  <TableCell
+                    className={`font-mono text-xs text-muted-foreground ${HIDDEN_BELOW_SM}`}
+                  >
                     {transaction.isin ?? "-"}
                   </TableCell>
-                  <TableCell className="font-mono text-xs text-muted-foreground">
+                  <TableCell
+                    className={`font-mono text-xs text-muted-foreground ${HIDDEN_BELOW_SM}`}
+                  >
                     {transaction.yahoo_ticker ?? "-"}
                   </TableCell>
                   <TableCell>
@@ -352,7 +366,9 @@ export function TransactionHistoryTab({
                   >
                     {formatAmount(transaction.net_amount, displayCurrency)}
                   </TableCell>
-                  <TableCell className="text-right font-mono text-xs text-muted-foreground">
+                  <TableCell
+                    className={`text-right font-mono text-xs text-muted-foreground ${HIDDEN_BELOW_SM}`}
+                  >
                     {transaction.commission !== 0
                       ? formatAmount(transaction.commission, displayCurrency)
                       : "-"}
