@@ -41,6 +41,7 @@ import {
   type SortDir,
 } from "@/lib/transaction-log";
 import { DEFAULT_PORTFOLIO_CURRENCY, formatCurrency } from "@/lib/currency";
+import { cn } from "@/lib/utils";
 
 interface Props {
   rows: LogTxn[];
@@ -49,12 +50,27 @@ interface Props {
   embedded?: boolean;
 }
 
-const COLUMNS: Array<{ key: LogSortKey; label: string; align?: "right" }> = [
+// `hideOnNarrow` drops the column below @sm — Category is the one field the row can lose on a
+// phone without becoming ambiguous, and dropping it buys the merchant name back ~90px. The body
+// row reads the same table via `narrowHiddenClass` so header and cell can only move together.
+const COLUMNS: Array<{
+  key: LogSortKey;
+  label: string;
+  align?: "right";
+  hideOnNarrow?: true;
+}> = [
   { key: "date", label: "Date" },
   { key: "merchant", label: "Merchant" },
-  { key: "category", label: "Category" },
+  { key: "category", label: "Category", hideOnNarrow: true },
   { key: "amount", label: "Amount", align: "right" },
 ];
+
+/** Hides a column below @sm while keeping it a real table cell from @sm up. */
+const NARROW_HIDDEN = "hidden @sm:table-cell";
+
+function narrowHiddenClass(key: LogSortKey) {
+  return COLUMNS.find((col) => col.key === key)?.hideOnNarrow ? NARROW_HIDDEN : undefined;
+}
 
 const PAGE_SIZE_OPTIONS = [25, 50, 100] as const;
 
@@ -209,9 +225,11 @@ export function TransactionLog({ rows, categoryNames, embedded = false }: Props)
         </div>
       </div>
 
-      {/* Paginated rows — the page scrolls, not the table (matches the portfolio log). */}
+      {/* Paginated rows — the table scrolls inside this box, never the page. The min-width is
+          what stops the columns crushing: without it "Restaurants & bars" wrapped into a 92px
+          Category track at 390. */}
       <div className="overflow-x-auto">
-        <Table>
+        <Table className="min-w-[340px] @sm:min-w-[520px]">
           <TableHeader className="sticky top-0 z-10 bg-surface">
             <TableRow>
               {COLUMNS.map((col) => {
@@ -221,7 +239,11 @@ export function TransactionLog({ rows, categoryNames, embedded = false }: Props)
                   <TableHead
                     key={col.key}
                     aria-sort={active ? (sortDir === "asc" ? "ascending" : "descending") : "none"}
-                    className={`whitespace-nowrap text-xs ${col.align === "right" ? "text-right" : ""}`}
+                    className={cn(
+                      "whitespace-nowrap text-xs",
+                      col.align === "right" && "text-right",
+                      narrowHiddenClass(col.key),
+                    )}
                   >
                     <button
                       type="button"
@@ -265,7 +287,9 @@ export function TransactionLog({ rows, categoryNames, embedded = false }: Props)
                       </span>
                     )}
                   </TableCell>
-                  <TableCell className="text-xs text-foreground-muted">
+                  <TableCell
+                    className={cn("text-xs text-foreground-muted", narrowHiddenClass("category"))}
+                  >
                     {t.category_id && categoryNames[t.category_id]
                       ? categoryNames[t.category_id]
                       : "—"}

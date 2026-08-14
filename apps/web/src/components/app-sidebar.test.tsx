@@ -1,14 +1,21 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { render, screen, within, cleanup } from "@testing-library/react";
+import { render, screen, within, cleanup, act } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { AppSidebar } from "@/components/app-sidebar";
 
-const { pathnameRef, searchRef, portfolioQueries, portfolioRows } = vi.hoisted(() => ({
-  pathnameRef: { current: "/portfolios" },
-  searchRef: { current: "" },
-  portfolioQueries: { count: 0 },
-  portfolioRows: { current: [{ id: "p1", name: "Core Growth" }] },
-}));
+const { pathnameRef, searchRef, portfolioQueries, portfolioRows, manualResolve, pendingLoads } =
+  vi.hoisted(() => ({
+    pathnameRef: { current: "/portfolios" },
+    searchRef: { current: "" },
+    portfolioQueries: { count: 0 },
+    portfolioRows: { current: [{ id: "p1", name: "Core Growth" }] },
+    // Opt-in per test: when true, `.order()` parks its resolver in `pendingLoads` instead of
+    // resolving immediately, so a test can control the arrival order of overlapping requests.
+    manualResolve: { current: false },
+    pendingLoads: {
+      current: [] as Array<(rows: { id: string; name: string }[] | null) => void>,
+    },
+  }));
 
 vi.mock("next/navigation", () => ({
   usePathname: () => pathnameRef.current,
@@ -31,8 +38,17 @@ vi.mock("@/integrations/supabase/client", () => ({
       if (table === "portfolios") portfolioQueries.count += 1;
       return {
         select: () => ({
-          order: () =>
-            Promise.resolve({ data: portfolioRows.current.map((p) => ({ ...p })), error: null }),
+          order: () => {
+            if (manualResolve.current) {
+              return new Promise((resolve) => {
+                pendingLoads.current.push((rows) => resolve({ data: rows, error: null }));
+              });
+            }
+            return Promise.resolve({
+              data: portfolioRows.current.map((p) => ({ ...p })),
+              error: null,
+            });
+          },
         }),
       };
     },
@@ -79,6 +95,8 @@ describe("AppSidebar shell", () => {
     window.localStorage.clear();
     portfolioQueries.count = 0;
     portfolioRows.current = [{ id: "p1", name: "Core Growth" }];
+    manualResolve.current = false;
+    pendingLoads.current = [];
     setViewportWidth(1920);
   });
 
@@ -207,5 +225,110 @@ describe("AppSidebar shell", () => {
 
     expect(await within(drawer).findByRole("button", { name: "Second Fund" })).toBeVisible();
     expect(within(drawer).queryByRole("button", { name: "Core Growth" })).toBeNull();
+  });
+
+  it("refreshes the desktop rail on navigation, where the drawer never opens", async () => {
+    // At md and up the drawer is unreachable, so the drawer-open refresh above cannot help:
+    // creating or deleting a portfolio on /portfolios left the rail stale until a hard reload.
+    setViewportWidth(1920);
+    const { rerender } = render(
+      <AppSidebar>
+        <h1>Overview</h1>
+      </AppSidebar>,
+    );
+
+    expect(await within(sidebar()).findByRole("button", { name: "Core Growth" })).toBeVisible();
+    expect(portfolioQueries.count).toBe(1);
+
+    // A delete + create on /portfolios, then a client-side navigation away from it.
+    portfolioRows.current = [{ id: "p2", name: "Second Fund" }];
+    pathnameRef.current = "/overview";
+    searchRef.current = "portfolioId=p2";
+    rerender(
+      <AppSidebar>
+        <h1>Overview</h1>
+      </AppSidebar>,
+    );
+
+    expect(await within(sidebar()).findByRole("button", { name: "Second Fund" })).toBeVisible();
+    expect(within(sidebar()).queryByRole("button", { name: "Core Growth" })).toBeNull();
+  });
+
+  it("ignores an older loadPortfolios response that resolves after a newer one", async () => {
+    // Mount, drawer-open, and navigation can each independently call loadPortfolios, so two
+    // requests can be in flight at once and resolve in either order. An older response
+    // arriving late must not clobber a newer one already applied.
+    setViewportWidth(1920);
+    manualResolve.current = true;
+
+    const { rerender } = render(
+      <AppSidebar>
+        <h1>Overview</h1>
+      </AppSidebar>,
+    );
+
+    // Mount issues the first request; it stays pending (manualResolve is on).
+    expect(pendingLoads.current).toHaveLength(1);
+
+    // A location change issues a second, overlapping request before the first resolves.
+    pathnameRef.current = "/overview";
+    searchRef.current = "portfolioId=p2";
+    rerender(
+      <AppSidebar>
+        <h1>Overview</h1>
+      </AppSidebar>,
+    );
+    expect(pendingLoads.current).toHaveLength(2);
+
+    // The newer (second) request resolves first.
+    await act(async () => {
+      pendingLoads.current[1]([{ id: "p2", name: "Second Fund" }]);
+    });
+    expect(await within(sidebar()).findByRole("button", { name: "Second Fund" })).toBeVisible();
+
+    // The older (first) request resolves late, with stale data — it must not overwrite
+    // the newer result already applied above.
+    await act(async () => {
+      pendingLoads.current[0]([{ id: "p1", name: "Core Growth" }]);
+    });
+    expect(within(sidebar()).getByRole("button", { name: "Second Fund" })).toBeVisible();
+    expect(within(sidebar()).queryByRole("button", { name: "Core Growth" })).toBeNull();
+  });
+
+  it("still applies an older response's data when a newer overlapping request fails", async () => {
+    // If the newer of two overlapping requests resolves with no data (error), nothing
+    // newer ever gets applied — the older request's valid data must not be discarded
+    // while waiting for a replacement that never comes.
+    setViewportWidth(1920);
+    manualResolve.current = true;
+
+    const { rerender } = render(
+      <AppSidebar>
+        <h1>Overview</h1>
+      </AppSidebar>,
+    );
+
+    expect(pendingLoads.current).toHaveLength(1);
+
+    pathnameRef.current = "/overview";
+    searchRef.current = "portfolioId=p2";
+    rerender(
+      <AppSidebar>
+        <h1>Overview</h1>
+      </AppSidebar>,
+    );
+    expect(pendingLoads.current).toHaveLength(2);
+
+    // The older (first) request resolves successfully first.
+    await act(async () => {
+      pendingLoads.current[0]([{ id: "p1", name: "Core Growth" }]);
+    });
+    expect(await within(sidebar()).findByRole("button", { name: "Core Growth" })).toBeVisible();
+
+    // The newer (second) request then fails — no data, so nothing replaces it.
+    await act(async () => {
+      pendingLoads.current[1](null);
+    });
+    expect(within(sidebar()).getByRole("button", { name: "Core Growth" })).toBeVisible();
   });
 });

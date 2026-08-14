@@ -1,9 +1,9 @@
 "use client";
 
 import { useState } from "react";
-import { Newspaper, ExternalLink, X } from "lucide-react";
+import { Newspaper, ExternalLink } from "lucide-react";
 import { formatDistanceToNow, format } from "date-fns";
-import * as Dialog from "@radix-ui/react-dialog";
+import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -122,22 +122,16 @@ function NewsModal({
   const segments: string[] = article.snippet ? summaryParagraphs(article.snippet) : [];
 
   return (
-    <Dialog.Root open={open} onOpenChange={(o) => !o && onClose()}>
-      <Dialog.Portal>
-        <Dialog.Overlay className="fixed inset-0 z-50 bg-black/50 backdrop-blur-sm data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0" />
-        <Dialog.Content className="fixed left-1/2 top-1/2 z-50 max-h-[90vh] w-full max-w-lg overflow-y-auto -translate-x-1/2 -translate-y-1/2 rounded-2xl border border-hairline bg-surface p-6 shadow-2xl data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95">
-          {/* Close */}
-          <Dialog.Close asChild>
-            <button
-              className="absolute right-4 top-4 grid h-7 w-7 place-items-center rounded-md text-foreground-muted hover:bg-surface-2 hover:text-foreground"
-              aria-label="Close"
-            >
-              <X className="h-4 w-4" />
-            </button>
-          </Dialog.Close>
-
-          {/* Source meta */}
-          <div className="mb-4 flex items-center gap-2 text-[11px] text-foreground-muted">
+    // Routed through ui/dialog.tsx rather than raw Radix so it inherits the shared phone
+    // gutter — hand-rolled `w-full` rendered this edge-to-edge at 390. `block` undoes the
+    // shared `grid gap-4` so the original margin-based rhythm is unchanged, and the surface
+    // classes reproduce the previous chrome exactly. `dvh`, not `vh`: on a real phone the
+    // large viewport is taller than the visible one.
+    <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className="block max-h-[90dvh] overflow-y-auto rounded-2xl border-hairline bg-surface shadow-2xl sm:rounded-2xl">
+        {/* Source meta — doubles as the dialog's accessible description. */}
+        <DialogDescription asChild>
+          <div className="mb-4 flex flex-wrap items-center gap-x-2 gap-y-1 pr-8 text-[11px] text-foreground-muted">
             {/* eslint-disable-next-line @next/next/no-img-element */}
             <img
               src={getFaviconUrl(article.source, 16)}
@@ -153,48 +147,48 @@ function NewsModal({
             <span className="text-foreground-muted/40">·</span>
             <span>{relativeTime(article.published_at)}</span>
           </div>
+        </DialogDescription>
 
-          {/* Title — links to article */}
-          <Dialog.Title asChild>
-            <a
-              href={article.url}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="mb-4 block break-words text-base font-semibold leading-snug text-foreground hover:underline"
-            >
-              {article.title}
-            </a>
-          </Dialog.Title>
-
-          {/* Summary */}
-          {segments.length > 0 && (
-            <div className="mb-5">
-              <p className="mb-2 text-[10px] font-semibold uppercase tracking-widest text-foreground-muted/60">
-                Summary
-              </p>
-              <div className="flex flex-col gap-2">
-                {segments.map((seg, i) => (
-                  <p key={i} className="break-words text-sm leading-relaxed text-foreground-muted">
-                    {seg}
-                  </p>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {/* CTA */}
+        {/* Title — links to article */}
+        <DialogTitle asChild>
           <a
             href={article.url}
             target="_blank"
             rel="noopener noreferrer"
-            className="inline-flex items-center gap-1.5 rounded-lg bg-foreground px-4 py-2 text-sm font-medium text-background transition-opacity hover:opacity-80"
+            className="mb-4 block break-words pr-8 text-base font-semibold leading-snug text-foreground hover:underline"
           >
-            Read article
-            <ExternalLink className="h-3.5 w-3.5" />
+            {article.title}
           </a>
-        </Dialog.Content>
-      </Dialog.Portal>
-    </Dialog.Root>
+        </DialogTitle>
+
+        {/* Summary */}
+        {segments.length > 0 && (
+          <div className="mb-5">
+            <p className="mb-2 text-[10px] font-semibold uppercase tracking-widest text-foreground-muted/60">
+              Summary
+            </p>
+            <div className="flex flex-col gap-2">
+              {segments.map((seg, i) => (
+                <p key={i} className="break-words text-sm leading-relaxed text-foreground-muted">
+                  {seg}
+                </p>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* CTA */}
+        <a
+          href={article.url}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="inline-flex items-center gap-1.5 rounded-lg bg-foreground px-4 py-2 text-sm font-medium text-background transition-opacity hover:opacity-80"
+        >
+          Read article
+          <ExternalLink className="h-3.5 w-3.5" />
+        </a>
+      </DialogContent>
+    </Dialog>
   );
 }
 

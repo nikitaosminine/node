@@ -4,6 +4,7 @@ import {
   useState,
   useEffect,
   useCallback,
+  useRef,
   type MouseEvent as ReactMouseEvent,
   type ReactNode,
   Suspense,
@@ -250,13 +251,13 @@ function SidebarInner({ collapsed, portfolios }: { collapsed: boolean; portfolio
  * `useSearchParams` lives here, in its own Suspense boundary, so AppSidebar
  * itself stays outside it.
  */
-function LocationEffect({ onChange }: { onChange: () => void }) {
+function LocationEffect({ onChange }: { onChange: (location: string) => void }) {
   const pathname = usePathname();
   const searchParams = useSearchParams();
   const location = `${pathname}?${searchParams.toString()}`;
 
   useEffect(() => {
-    onChange();
+    onChange(location);
   }, [location, onChange]);
 
   return null;
@@ -292,13 +293,25 @@ export function AppSidebar({ children }: { children: ReactNode }) {
   // so a fetch per copy would query twice on every load.
   const [portfolios, setPortfolios] = useState<Portfolio[]>([]);
 
+  // Mount, drawer-open, and every location change can each independently call
+  // loadPortfolios, so two overlapping requests can resolve in either order. Track
+  // the highest issued sequence separately from the highest applied one: a response
+  // is only applied once, when its sequence exceeds whatever was last applied. An
+  // exact-match-to-latest-issued check would drop a still-valid earlier response
+  // whenever a later request fails or hangs, leaving the sidebar stuck stale.
+  const loadPortfoliosSeqRef = useRef(0);
+  const appliedPortfoliosSeqRef = useRef(0);
   const loadPortfolios = useCallback(() => {
+    const seq = ++loadPortfoliosSeqRef.current;
     supabase
       .from("portfolios")
       .select("id,name")
       .order("created_at", { ascending: true })
       .then(({ data }) => {
-        if (data) setPortfolios(data as Portfolio[]);
+        if (data && seq > appliedPortfoliosSeqRef.current) {
+          appliedPortfoliosSeqRef.current = seq;
+          setPortfolios(data as Portfolio[]);
+        }
       });
   }, []);
 
@@ -306,8 +319,11 @@ export function AppSidebar({ children }: { children: ReactNode }) {
     loadPortfolios();
   }, [loadPortfolios]);
 
-  // The shell outlives every client-side navigation, so the list would otherwise
-  // go stale against portfolios created or deleted after load.
+  // The shell outlives every client-side navigation, so the list would otherwise go stale
+  // against portfolios created or deleted after load. Opening the drawer is only half the
+  // story: at md and up the drawer never opens, so the desktop rail stayed stale until a
+  // hard reload. `handleLocationChange` below refreshes both surfaces at the one shared
+  // boundary — every full-location change.
   useEffect(() => {
     if (mobileOpen) loadPortfolios();
   }, [mobileOpen, loadPortfolios]);
@@ -346,6 +362,25 @@ export function AppSidebar({ children }: { children: ReactNode }) {
 
   // Tapping a nav item must not leave the drawer open over the new page.
   const closeDrawer = useCallback(() => setMobileOpen(false), []);
+
+  // One shared boundary for both surfaces: close the drawer and refresh the portfolio list
+  // whenever the full location changes, so navigating away from /portfolios after a create
+  // or delete brings the desktop rail back in sync too. LocationEffect also fires once on
+  // mount, which the mount effect above already covers — skip whenever the location matches
+  // the last one seen (rather than counting invocations) so StrictMode's mount-cleanup-mount
+  // double-invoke, which re-fires with the same location, doesn't issue an extra query.
+  const lastLocationRef = useRef<string | null>(null);
+  const handleLocationChange = useCallback(
+    (location: string) => {
+      closeDrawer();
+      const isInitialOrUnchanged =
+        lastLocationRef.current === null || lastLocationRef.current === location;
+      lastLocationRef.current = location;
+      if (isInitialOrUnchanged) return;
+      loadPortfolios();
+    },
+    [closeDrawer, loadPortfolios],
+  );
 
   // Taps that resolve to the URL already showing produce no navigation at all,
   // so LocationEffect never fires — close on the link tap itself as well.
@@ -388,7 +423,7 @@ export function AppSidebar({ children }: { children: ReactNode }) {
   return (
     <div className="flex min-h-dvh w-full bg-background text-foreground md:min-h-screen">
       <Suspense fallback={null}>
-        <LocationEffect onChange={closeDrawer} />
+        <LocationEffect onChange={handleLocationChange} />
       </Suspense>
 
       {/* Desktop sidebar — hidden below md by CSS, never by a JS branch. */}
