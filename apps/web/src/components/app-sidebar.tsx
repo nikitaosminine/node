@@ -294,10 +294,13 @@ export function AppSidebar({ children }: { children: ReactNode }) {
   const [portfolios, setPortfolios] = useState<Portfolio[]>([]);
 
   // Mount, drawer-open, and every location change can each independently call
-  // loadPortfolios, so two overlapping requests can resolve in either order. A
-  // monotonic sequence number guards against an older response overwriting a
-  // newer one: only the response matching the most recently issued request is applied.
+  // loadPortfolios, so two overlapping requests can resolve in either order. Track
+  // the highest issued sequence separately from the highest applied one: a response
+  // is only applied once, when its sequence exceeds whatever was last applied. An
+  // exact-match-to-latest-issued check would drop a still-valid earlier response
+  // whenever a later request fails or hangs, leaving the sidebar stuck stale.
   const loadPortfoliosSeqRef = useRef(0);
+  const appliedPortfoliosSeqRef = useRef(0);
   const loadPortfolios = useCallback(() => {
     const seq = ++loadPortfoliosSeqRef.current;
     supabase
@@ -305,7 +308,10 @@ export function AppSidebar({ children }: { children: ReactNode }) {
       .select("id,name")
       .order("created_at", { ascending: true })
       .then(({ data }) => {
-        if (data && seq === loadPortfoliosSeqRef.current) setPortfolios(data as Portfolio[]);
+        if (data && seq > appliedPortfoliosSeqRef.current) {
+          appliedPortfoliosSeqRef.current = seq;
+          setPortfolios(data as Portfolio[]);
+        }
       });
   }, []);
 

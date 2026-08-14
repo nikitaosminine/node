@@ -12,7 +12,9 @@ const { pathnameRef, searchRef, portfolioQueries, portfolioRows, manualResolve, 
     // Opt-in per test: when true, `.order()` parks its resolver in `pendingLoads` instead of
     // resolving immediately, so a test can control the arrival order of overlapping requests.
     manualResolve: { current: false },
-    pendingLoads: { current: [] as Array<(rows: { id: string; name: string }[]) => void> },
+    pendingLoads: {
+      current: [] as Array<(rows: { id: string; name: string }[] | null) => void>,
+    },
   }));
 
 vi.mock("next/navigation", () => ({
@@ -291,5 +293,42 @@ describe("AppSidebar shell", () => {
     });
     expect(within(sidebar()).getByRole("button", { name: "Second Fund" })).toBeVisible();
     expect(within(sidebar()).queryByRole("button", { name: "Core Growth" })).toBeNull();
+  });
+
+  it("still applies an older response's data when a newer overlapping request fails", async () => {
+    // If the newer of two overlapping requests resolves with no data (error), nothing
+    // newer ever gets applied — the older request's valid data must not be discarded
+    // while waiting for a replacement that never comes.
+    setViewportWidth(1920);
+    manualResolve.current = true;
+
+    const { rerender } = render(
+      <AppSidebar>
+        <h1>Overview</h1>
+      </AppSidebar>,
+    );
+
+    expect(pendingLoads.current).toHaveLength(1);
+
+    pathnameRef.current = "/overview";
+    searchRef.current = "portfolioId=p2";
+    rerender(
+      <AppSidebar>
+        <h1>Overview</h1>
+      </AppSidebar>,
+    );
+    expect(pendingLoads.current).toHaveLength(2);
+
+    // The older (first) request resolves successfully first.
+    await act(async () => {
+      pendingLoads.current[0]([{ id: "p1", name: "Core Growth" }]);
+    });
+    expect(await within(sidebar()).findByRole("button", { name: "Core Growth" })).toBeVisible();
+
+    // The newer (second) request then fails — no data, so nothing replaces it.
+    await act(async () => {
+      pendingLoads.current[1](null);
+    });
+    expect(within(sidebar()).getByRole("button", { name: "Core Growth" })).toBeVisible();
   });
 });
