@@ -310,7 +310,7 @@ export function ManualTransactionModal({
         </DialogHeader>
 
         <div className="space-y-4">
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <div className="space-y-1.5">
               <Label htmlFor="manual-transaction-date" className="text-xs">
                 Date *
@@ -419,7 +419,7 @@ export function ManualTransactionModal({
             </div>
           )}
 
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             {showsQuantity && (
               <div className="space-y-1.5">
                 <Label htmlFor="manual-transaction-quantity" className="text-xs">
