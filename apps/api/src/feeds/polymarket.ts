@@ -129,10 +129,10 @@ export const TAG_IDS = {
 // Slugs of Polymarket events to always pin (highest volume_24hr market from
 // each event gets is_pinned=true across all portfolios).
 export const PINNED_MARKET_SLUGS: string[] = [
-  "will-the-fed-cut-rates-in-2026",
-  "will-there-be-a-us-recession-in-2026",
-  "us-midterm-elections-2026",
-  "will-bitcoin-reach-200k-in-2026",
+  "how-many-fed-rate-cuts-in-2026",
+  "us-recession-by-end-of-2026",
+  "which-party-will-win-the-house-in-2026",
+  "what-price-will-bitcoin-hit-before-2027",
 ];
 
 const ROTATING_BATCH_SIZE = 60; // max candidate markets sent to Grok per portfolio (event-deduped by highest-Yes bucket)
@@ -350,15 +350,18 @@ function flattenEvent(event: GammaEvent): FlatMarket[] {
 // Candidate pool fetch (tag-filtered only — no broad pool)
 // ---------------------------------------------------------------------------
 
-async function fetchCandidateMarkets(env: Env): Promise<Map<string, FlatMarket>> {
+export async function fetchCandidateMarkets(env: Env): Promise<Map<string, FlatMarket>> {
   const base = gammaBase(env);
   const marketMap = new Map<string, FlatMarket>();
+  const failures: string[] = [];
+  let successfulTags = 0;
 
   for (const [tagName, tagId] of Object.entries(TAG_IDS)) {
     try {
       const events = await fetchGammaJson<GammaEvent[]>(
-        `${base}/events?tag_id=${tagId}&active=true&closed=false&order=volume_24hr&ascending=false&limit=30`,
+        `${base}/events?tag_id=${tagId}&active=true&closed=false&order=volume24hr&ascending=false&limit=30`,
       );
+      successfulTags++;
       let added = 0;
       for (const event of events) {
         for (const market of flattenEvent(event)) {
@@ -371,8 +374,23 @@ async function fetchCandidateMarkets(env: Env): Promise<Map<string, FlatMarket>>
       }
       console.log(`[polymarket] tag ${tagName} (${tagId}): +${added} new markets`);
     } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      failures.push(`${tagName} (${tagId}): ${message}`);
       console.error(`[polymarket] tag ${tagName} fetch failed:`, err);
     }
+  }
+
+  if (marketMap.size === 0) {
+    const failureDetail = failures.length > 0 ? ` Failures: ${failures.join(" | ")}` : "";
+    throw new Error(
+      `[polymarket] Gamma candidate pool is empty (${successfulTags}/${Object.keys(TAG_IDS).length} tag requests succeeded). Preserving existing feed rows.${failureDetail}`,
+    );
+  }
+
+  if (failures.length > 0) {
+    console.warn(
+      `[polymarket] candidate pool is partial (${successfulTags}/${Object.keys(TAG_IDS).length} tags succeeded): ${failures.join(" | ")}`,
+    );
   }
 
   console.log(`[polymarket] total candidate pool: ${marketMap.size} markets`);
@@ -462,8 +480,82 @@ async function upsertMarkets(
       .from("polymarket_markets")
       .upsert(chunk, { onConflict: "condition_id" })) as { error: { message: string } | null };
     if (error) {
-      console.error(`[polymarket] market upsert batch failed (${i}–${i + chunk.length}):`, error.message);
+      throw new Error(
+        `[polymarket] market upsert batch failed (${i}–${i + chunk.length}): ${error.message}`,
+      );
     }
+  }
+}
+
+interface PortfolioMarketSelection {
+  condition_id: string;
+  score: number | null;
+  reason: string | null;
+  is_pinned: boolean;
+}
+
+function postgrestInList(values: string[]): string {
+  return `(${values.map((value) => `"${value.replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`).join(",")})`;
+}
+
+/**
+ * Writes the replacement selection before pruning stale rows. An empty
+ * selection is rejected so an upstream/API failure can never turn into a
+ * destructive "replace with nothing" operation.
+ */
+export async function upsertThenPrunePortfolioMatches(
+  client: AnySupabaseClient,
+  portfolioId: string,
+  selections: PortfolioMarketSelection[],
+): Promise<void> {
+  if (selections.length === 0) {
+    throw new Error(
+      `[polymarket] refusing to replace portfolio ${portfolioId} matches with an empty set`,
+    );
+  }
+
+  const isPinned = selections[0].is_pinned;
+  if (selections.some((selection) => selection.is_pinned !== isPinned)) {
+    throw new Error("[polymarket] replacement selection mixes pinned and rotating rows");
+  }
+
+  const rows = selections.map((selection) => ({
+    portfolio_id: portfolioId,
+    ...selection,
+  }));
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const { error: upsertError } = (await (client as any)
+    .from("portfolio_polymarket_matches")
+    .upsert(rows, { onConflict: "portfolio_id,condition_id" })) as {
+    error: { message: string } | null;
+  };
+  if (upsertError) {
+    throw new Error(
+      `[polymarket] ${isPinned ? "pinned" : "rotating"} match upsert failed for portfolio ${portfolioId}: ${upsertError.message}`,
+    );
+  }
+
+  // Prune only after the replacement rows are safely present. If pruning
+  // fails, the feed may temporarily contain stale rows, but it never goes
+  // empty because of a failed refresh.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const { error: pruneError } = (await (client as any)
+    .from("portfolio_polymarket_matches")
+    .delete()
+    .eq("portfolio_id", portfolioId)
+    .eq("is_pinned", isPinned)
+    .not(
+      "condition_id",
+      "in",
+      postgrestInList(selections.map((selection) => selection.condition_id)),
+    )) as {
+    error: { message: string } | null;
+  };
+  if (pruneError) {
+    throw new Error(
+      `[polymarket] ${isPinned ? "pinned" : "rotating"} stale-match prune failed for portfolio ${portfolioId}: ${pruneError.message}`,
+    );
   }
 }
 
@@ -742,15 +834,10 @@ export async function runPolymarketFanout(env: Env): Promise<{
   let portfoliosProcessed = 0;
   let portfoliosSkipped = 0;
 
-  // 1. Fetch and flatten candidate markets
-  let candidateMap: Map<string, FlatMarket>;
-  try {
-    candidateMap = await fetchCandidateMarkets(env);
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    errors.push(`candidate fetch: ${msg}`);
-    candidateMap = new Map();
-  }
+  // 1. Fetch and flatten candidate markets. A completely empty candidate pool
+  // is fatal: continuing would eventually replace every portfolio feed with
+  // an empty set. Let the scheduled/debug caller surface the failure instead.
+  const candidateMap = await fetchCandidateMarkets(env);
 
   // 2. Fetch pinned events
   let pinnedBySlug: Map<string, string>;
@@ -764,13 +851,8 @@ export async function runPolymarketFanout(env: Env): Promise<{
 
   // 3. Upsert all markets (prices + probabilities refresh every run)
   const allMarkets = Array.from(candidateMap.values());
-  try {
-    await upsertMarkets(client, allMarkets);
-    console.log(`[polymarket] upserted ${allMarkets.length} markets`);
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    errors.push(`market upsert: ${msg}`);
-  }
+  await upsertMarkets(client, allMarkets);
+  console.log(`[polymarket] upserted ${allMarkets.length} markets`);
 
   // 4. Collect pinned condition_ids
   const pinnedConditionIds = new Set(pinnedBySlug.values());
@@ -819,6 +901,11 @@ export async function runPolymarketFanout(env: Env): Promise<{
   const rotatingCandidates = Array.from(consensusByEvent.values()).sort(
     (a, b) => (b.volume_24hr ?? 0) - (a.volume_24hr ?? 0),
   );
+  if (rotatingCandidates.length === 0) {
+    throw new Error(
+      "[polymarket] no eligible rotating candidates remained after filtering; preserving existing portfolio matches",
+    );
+  }
 
   const hasGrokKey = !!(
     env.GROK_MAIN_API_KEY ||
@@ -833,28 +920,15 @@ export async function runPolymarketFanout(env: Env): Promise<{
     try {
       // 6a. Upsert pinned matches
       if (pinnedConditionIds.size > 0) {
-        const pinnedRows = Array.from(pinnedConditionIds).map((conditionId) => ({
-          portfolio_id: portfolioId,
-          condition_id: conditionId,
-          score: null,
-          reason: null,
-          is_pinned: true,
-        }));
-
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const { error: pinnedError } = (await (client as any)
-          .from("portfolio_polymarket_matches")
-          .upsert(pinnedRows, { onConflict: "portfolio_id,condition_id" })) as {
-          error: { message: string } | null;
-        };
-
-        if (pinnedError) {
-          console.error(
-            `[polymarket] pinned upsert failed for portfolio ${portfolioId}:`,
-            pinnedError.message,
-          );
-          errors.push(`portfolio ${portfolioId} pinned: ${pinnedError.message}`);
-        }
+        const pinnedRows: PortfolioMarketSelection[] = Array.from(pinnedConditionIds).map(
+          (conditionId) => ({
+            condition_id: conditionId,
+            score: null,
+            reason: null,
+            is_pinned: true,
+          }),
+        );
+        await upsertThenPrunePortfolioMatches(client, portfolioId, pinnedRows);
       }
 
       // 6b. Holdings-hash cache check — skip Grok if holdings unchanged AND cache is fresh
@@ -906,6 +980,7 @@ export async function runPolymarketFanout(env: Env): Promise<{
       );
 
       let scored: Array<{ condition_id: string; score: number; reason: string | null }>;
+      let profileSummaryForCache: string | null = null;
 
       if (!hasGrokKey) {
         scored = rotatingCandidates.slice(0, 10).map((m) => ({
@@ -915,6 +990,7 @@ export async function runPolymarketFanout(env: Env): Promise<{
         }));
       } else {
         const { profileSummary } = await buildPortfolioProfile(client, portfolioId, holdings);
+        profileSummaryForCache = profileSummary;
 
         // --- LangSmith tracing (additive, attributed to this portfolio/user) ---
         // One run per portfolio per fanout. portfolio_id + user_id in the inputs
@@ -978,7 +1054,9 @@ export async function runPolymarketFanout(env: Env): Promise<{
         }
 
         if (rawScored.length === 0) {
-          errors.push(`portfolio ${portfolioId}: Grok scoring returned 0 results — using volume fallback`);
+          errors.push(
+            `portfolio ${portfolioId}: Grok scoring returned 0 results — using volume fallback`,
+          );
           scored = rotatingCandidates.slice(0, 10).map((m) => ({
             condition_id: m.condition_id,
             score: 0,
@@ -992,50 +1070,44 @@ export async function runPolymarketFanout(env: Env): Promise<{
           );
           scored = deduped;
         }
+      }
 
-        // Update cache — reuse profileSummary already computed above
+      // 6d. Upsert the replacement first, then prune stale rows. Never advance
+      // the cache until this succeeds, otherwise a failed write would suppress
+      // retries for six hours.
+      if (scored.length === 0) {
+        throw new Error(
+          "[polymarket] scoring produced no replacement rows; preserving existing matches",
+        );
+      }
+
+      const rotatingRows: PortfolioMarketSelection[] = scored.map((item) => ({
+        condition_id: item.condition_id,
+        score: item.score,
+        reason: item.reason || null,
+        is_pinned: false,
+      }));
+      await upsertThenPrunePortfolioMatches(client, portfolioId, rotatingRows);
+
+      if (profileSummaryForCache !== null) {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        await (client as any)
+        const { error: cacheError } = (await (client as any)
           .from("portfolio_holdings_cache")
           .upsert(
             {
               portfolio_id: portfolioId,
               holdings_hash: currentHash,
-              profile_text: profileSummary,
+              profile_text: profileSummaryForCache,
               last_scored_at: new Date().toISOString(),
             },
             { onConflict: "portfolio_id" },
-          );
-      }
-
-      // 6d. Replace rotating matches entirely — delete stale rows, insert fresh
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      await (client as any)
-        .from("portfolio_polymarket_matches")
-        .delete()
-        .eq("portfolio_id", portfolioId)
-        .eq("is_pinned", false);
-
-      if (scored.length > 0) {
-        const rotatingRows = scored.map((item) => ({
-          portfolio_id: portfolioId,
-          condition_id: item.condition_id,
-          score: item.score,
-          reason: item.reason || null,
-          is_pinned: false,
-        }));
-
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const { error: rotatingError } = (await (client as any)
-          .from("portfolio_polymarket_matches")
-          .insert(rotatingRows)) as { error: { message: string } | null };
-
-        if (rotatingError) {
+          )) as { error: { message: string } | null };
+        if (cacheError) {
+          errors.push(`portfolio ${portfolioId} cache: ${cacheError.message}`);
           console.error(
-            `[polymarket] rotating insert failed for portfolio ${portfolioId}:`,
-            rotatingError.message,
+            `[polymarket] cache update failed for portfolio ${portfolioId}:`,
+            cacheError.message,
           );
-          errors.push(`portfolio ${portfolioId} rotating: ${rotatingError.message}`);
         }
       }
 
