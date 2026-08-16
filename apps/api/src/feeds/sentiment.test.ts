@@ -6,6 +6,7 @@ import {
   computeEwma,
   invokeSentimentGrok,
   mergeEvidenceClusterIds,
+  mergeScoredClusterIds,
   parseSentimentResponse,
   scoreClusterSentiments,
   type SentimentTarget,
@@ -228,5 +229,30 @@ describe("mergeEvidenceClusterIds", () => {
   it("de-duplicates ids already present in existing evidence", () => {
     const merged = mergeEvidenceClusterIds(["a", "b"], ["b", "c"]);
     expect(merged).toEqual(["b", "c", "a"]);
+  });
+});
+
+describe("mergeScoredClusterIds", () => {
+  it("puts fresh ids first and caps the total at 200", () => {
+    const existing = Array.from({ length: 199 }, (_, i) => `old-${i}`);
+    const merged = mergeScoredClusterIds(existing, ["new-1", "new-2"]);
+    expect(merged).toHaveLength(200);
+    expect(merged.slice(0, 2)).toEqual(["new-1", "new-2"]);
+    expect(merged).toContain("old-197");
+    expect(merged).not.toContain("old-198");
+  });
+
+  it("retains dedupe coverage for clusters evicted from the 10-id display list", () => {
+    const run1Clusters = Array.from({ length: 15 }, (_, i) => `c-${i}`);
+    const evidence = mergeEvidenceClusterIds([], run1Clusters);
+    const scored = mergeScoredClusterIds([], run1Clusters);
+    expect(evidence).not.toContain("c-14");
+    expect(scored).toContain("c-14");
+
+    const rerun = aggregateObservationsByCompany(
+      [{ clusterKey: "c-14", companyKey: "ticker:ACME", score: 0.9, rationale: "" }],
+      new Map([["ticker:ACME", new Set(scored)]]),
+    );
+    expect(rerun.has("ticker:ACME")).toBe(false);
   });
 });

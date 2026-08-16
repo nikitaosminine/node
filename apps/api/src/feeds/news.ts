@@ -3,6 +3,7 @@ import {
   aggregateObservationsByCompany,
   computeEwma,
   mergeEvidenceClusterIds,
+  mergeScoredClusterIds,
   scoreClusterSentiments,
   type ClusterSentiment,
   type SentimentCompanyRef,
@@ -453,6 +454,90 @@ export function buildClusterRow(
 }
 
 // ---------------------------------------------------------------------------
+// Rolling per-company sentiment (EWMA) — up to 2 subrequests, 0 when there is
+// nothing to update. A cluster already present in the company's stored
+// scored_cluster_ids is the same article re-surfacing across fanout runs
+// within the 7-day window and must not move the EWMA again; scored_cluster_ids
+// (cap 200) is the dedupe source of truth, while evidence_cluster_ids stays a
+// 10-id display list. Companies with nothing new this run are skipped and
+// their rows left untouched. Never throws.
+// ---------------------------------------------------------------------------
+
+export async function updateRollingCompanySentiment(
+  client: AnySupabaseClient,
+  idBackedSentiments: ClusterSentiment[],
+  companiesByKey: Map<string, SentimentCompanyRef>,
+): Promise<{ companiesRescored: number; error: string | null }> {
+  if (idBackedSentiments.length === 0) return { companiesRescored: 0, error: null };
+  const companyKeys = [...new Set(idBackedSentiments.map((s) => s.companyKey))];
+
+  try {
+    const { data: priorRows, error: priorError } = await client
+      .from("company_sentiment")
+      .select("company_key, score, evidence_cluster_ids, scored_cluster_ids")
+      .in("company_key", companyKeys);
+
+    if (priorError) throw new Error(priorError.message);
+
+    const priorByKey = new Map<
+      string,
+      { score: number; evidence_cluster_ids: string[]; scored_cluster_ids: string[] }
+    >(
+      (priorRows ?? []).map(
+        (r: {
+          company_key: string;
+          score: number;
+          evidence_cluster_ids: string[] | null;
+          scored_cluster_ids: string[] | null;
+        }) => [
+          r.company_key,
+          {
+            score: r.score,
+            evidence_cluster_ids: r.evidence_cluster_ids ?? [],
+            scored_cluster_ids: r.scored_cluster_ids ?? [],
+          },
+        ],
+      ),
+    );
+
+    const priorScoredByCompany = new Map<string, Set<string>>(
+      [...priorByKey].map(([companyKey, prior]) => [companyKey, new Set(prior.scored_cluster_ids)]),
+    );
+    const observationsByCompany = aggregateObservationsByCompany(idBackedSentiments, priorScoredByCompany);
+
+    const companySentimentRows = [...observationsByCompany].map(([companyKey, obs]) => {
+      const prior = priorByKey.get(companyKey) ?? null;
+      const { score, trend } = computeEwma(prior?.score ?? null, obs.observedScore);
+      const ref = companiesByKey.get(companyKey);
+      return {
+        company_key: companyKey,
+        company_name: ref?.name ?? companyKey,
+        ticker: ref?.tickers[0] ?? null,
+        isin: ref?.isins[0] ?? null,
+        score,
+        trend,
+        evidence_cluster_ids: mergeEvidenceClusterIds(prior?.evidence_cluster_ids ?? [], obs.clusterKeys),
+        scored_cluster_ids: mergeScoredClusterIds(prior?.scored_cluster_ids ?? [], obs.clusterKeys),
+        updated_at: new Date().toISOString(),
+      };
+    });
+
+    if (companySentimentRows.length === 0) return { companiesRescored: 0, error: null };
+
+    const { error: companyUpsertError } = await client
+      .from("company_sentiment")
+      .upsert(companySentimentRows, { onConflict: "company_key" });
+
+    if (companyUpsertError) throw new Error(companyUpsertError.message);
+    return { companiesRescored: companySentimentRows.length, error: null };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error("[news] rolling company sentiment update failed:", msg);
+    return { companiesRescored: 0, error: msg };
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Score: exaScore × recencyDecay × holdingsBooster (hybrid; each signal once)
 // ---------------------------------------------------------------------------
 
@@ -855,9 +940,8 @@ export async function runNewsFanout(env: Env): Promise<{
   // --- Rolling per-company sentiment (EWMA) — up to 2 subrequests ------------
   // Skipped entirely (0 subrequests) when nothing was scored, e.g. sentiment
   // scoring failed above; the feed above is already fully populated by now.
-  let companiesRescored = 0;
   // Swap the survivor-scoped clusterKey for the durable DB cluster id so
-  // company_sentiment.evidence_cluster_ids reference real, queryable rows.
+  // company_sentiment cluster-id lists reference real, queryable rows.
   const idBackedSentiments: ClusterSentiment[] = clusterSentiments
     .map((s) => {
       const clusterId = clusterKeyToId.get(s.clusterKey);
@@ -865,63 +949,12 @@ export async function runNewsFanout(env: Env): Promise<{
     })
     .filter((s): s is ClusterSentiment => s !== null);
 
-  if (idBackedSentiments.length > 0) {
-    const companyKeys = [...new Set(idBackedSentiments.map((s) => s.companyKey))];
-
-    try {
-      const { data: priorRows, error: priorError } = await client
-        .from("company_sentiment")
-        .select("company_key, score, evidence_cluster_ids")
-        .in("company_key", companyKeys);
-
-      if (priorError) throw new Error(priorError.message);
-
-      const priorByKey = new Map<string, { score: number; evidence_cluster_ids: string[] }>(
-        (priorRows ?? []).map((r: { company_key: string; score: number; evidence_cluster_ids: string[] | null }) => [
-          r.company_key,
-          { score: r.score, evidence_cluster_ids: r.evidence_cluster_ids ?? [] },
-        ]),
-      );
-
-      // A cluster already recorded as evidence for a company is the same
-      // article re-surfacing across fanout runs within the 7-day window — it
-      // must not move that company's EWMA again. Companies with nothing new
-      // this run are dropped here and their rows left untouched.
-      const priorEvidenceByCompany = new Map<string, Set<string>>(
-        [...priorByKey].map(([companyKey, prior]) => [companyKey, new Set(prior.evidence_cluster_ids)]),
-      );
-      const observationsByCompany = aggregateObservationsByCompany(idBackedSentiments, priorEvidenceByCompany);
-
-      const companySentimentRows = [...observationsByCompany].map(([companyKey, obs]) => {
-        const prior = priorByKey.get(companyKey) ?? null;
-        const { score, trend } = computeEwma(prior?.score ?? null, obs.observedScore);
-        const ref = companiesByKey.get(companyKey);
-        return {
-          company_key: companyKey,
-          company_name: ref?.name ?? companyKey,
-          ticker: ref?.tickers[0] ?? null,
-          isin: ref?.isins[0] ?? null,
-          score,
-          trend,
-          evidence_cluster_ids: mergeEvidenceClusterIds(prior?.evidence_cluster_ids ?? [], obs.clusterKeys),
-          updated_at: new Date().toISOString(),
-        };
-      });
-
-      if (companySentimentRows.length > 0) {
-        const { error: companyUpsertError } = await client
-          .from("company_sentiment")
-          .upsert(companySentimentRows, { onConflict: "company_key" });
-
-        if (companyUpsertError) throw new Error(companyUpsertError.message);
-        companiesRescored = companySentimentRows.length;
-      }
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.error("[news] rolling company sentiment update failed:", msg);
-      errors.push(`company sentiment: ${msg}`);
-    }
-  }
+  const { companiesRescored, error: companySentimentError } = await updateRollingCompanySentiment(
+    client,
+    idBackedSentiments,
+    companiesByKey,
+  );
+  if (companySentimentError) errors.push(`company sentiment: ${companySentimentError}`);
 
   // --- Phase 2: SCORE + MATCH — build matchAccum (pure JS, 0 subrequests) ---
   const matchAccum = new Map<string, Map<string, { keys: Set<string>; tickers: Set<string> }>>();
