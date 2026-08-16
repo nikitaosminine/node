@@ -1,0 +1,5 @@
+# Snapshots of real LangSmith runs contain portfolio/user ids and holdings
+# profiles — keep them local. Fixtures and baselines (aggregate numbers only)
+# are committed.
+datasets/
+judgments/

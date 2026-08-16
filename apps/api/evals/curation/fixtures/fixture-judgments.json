@@ -1,0 +1,95 @@
+{
+  "rubric_version": "v1",
+  "verdicts": {
+    "7fb1910a797449f4210fa4ec1e11b071238dee15f0cee963d2952d6ef5f4b4ec": {
+      "relevant": true,
+      "mechanism": "Rate path reprices NASDAQ-100 growth stocks held via PUST.PA.",
+      "question": "Will the Fed make 0 rate cuts in 2026?",
+      "model": "fixture-ground-truth"
+    },
+    "150ab3bd3ca6372c3047e6823f2f61dc8359c006923b5db6070773dc347288f4": {
+      "relevant": true,
+      "mechanism": "China chip tariffs hit NVDA revenue directly.",
+      "question": "Will the US impose new semiconductor tariffs on China in 2026?",
+      "model": "fixture-ground-truth"
+    },
+    "f9913b31f6c55bbcead559271434c957600cf777bee4854e700df19bb6ae4076": {
+      "relevant": true,
+      "mechanism": "EUV servicing export controls directly affect ASML, a direct holding.",
+      "question": "Will the US expand chip export controls to cover ASML EUV servicing in 2026?",
+      "model": "fixture-ground-truth"
+    },
+    "8280523c903303696735e62fb156a9a71d38059979b701fd02ddc2241e68210f": {
+      "relevant": true,
+      "mechanism": "TSMC earnings move NVDA and the held semiconductor chain.",
+      "question": "Will TSMC beat Q3 2026 earnings estimates?",
+      "model": "fixture-ground-truth"
+    },
+    "6a74e93f69b7f10d4ea0908f96ce25310f196ddf5e54427a5c7c70c2670680bc": {
+      "relevant": true,
+      "mechanism": "EU AI fines would hit MSFT and PUST.PA AI names.",
+      "question": "Will the EU pass binding AI regulation with fines in 2026?",
+      "model": "fixture-ground-truth"
+    },
+    "3c1feed41fe99f0e2171ad3409543d1db666d1eb07e29ec029dd3d74ba63f3eb": {
+      "relevant": true,
+      "mechanism": "US recession compresses NASDAQ-100 earnings held via PUST.PA.",
+      "question": "Will the US enter a recession by end of 2026?",
+      "model": "fixture-ground-truth"
+    },
+    "fd21f02c794fd16c1a05037d7c3f04c84453f959894c3f3a40e692cbff180978": {
+      "relevant": true,
+      "mechanism": "US growth drives earnings of US tech holdings NVDA/MSFT.",
+      "question": "Will US GDP growth exceed 3% in 2026?",
+      "model": "fixture-ground-truth"
+    },
+    "41a2ce032ad74dc91af86e2ff3cbd258f13a4ec70270e082ecc8ed578f971c3d": {
+      "relevant": false,
+      "mechanism": "No named mechanism to the tech holdings — generic input-cost/demand hand-wave.",
+      "question": "Will Brent crude close above $110 in 2026?",
+      "model": "fixture-ground-truth"
+    },
+    "3ba96342d742aedfcbcd2dcae9425c292b287aedfc938dcece8969fcd99c3ac0": {
+      "relevant": true,
+      "mechanism": "US rates drive USD/JPY, repricing PTPXH.PA exporters.",
+      "question": "Will the Fed make 0 rate cuts in 2026?",
+      "model": "fixture-ground-truth"
+    },
+    "4e5d44086d5ed95eb08f937f82d4b7b858ad68b87389e1b6010b3d4e91ea7399": {
+      "relevant": true,
+      "mechanism": "Cuts weaken USD/JPY, hitting Toyota/Sony export earnings.",
+      "question": "Will the Fed make 2 rate cuts in 2026?",
+      "model": "fixture-ground-truth"
+    },
+    "0aaa5d1b4b37f5e9654a7c059b51a4622fb5e5d0ab5bb42b6a9d5dd0b541b983": {
+      "relevant": true,
+      "mechanism": "Aggressive cuts weaken the dollar vs yen, hitting Topix exporters.",
+      "question": "Will the Fed make 4 or more rate cuts in 2026?",
+      "model": "fixture-ground-truth"
+    },
+    "8c529a9b65fbe79855355cc5a8faf802b6e91800f5e020235820ad240b4c9551": {
+      "relevant": false,
+      "mechanism": "Geographic overlap only — a football result moves no held asset.",
+      "question": "Will Real Madrid win the Champions League?",
+      "model": "fixture-ground-truth"
+    },
+    "0419848b1d83423bb2b8e2144697366d60589da49688912eeef6c98dd9b92c88": {
+      "relevant": false,
+      "mechanism": "No reason given and no direct link to Japan/EM Asia industrials stated.",
+      "question": "Will Brent crude close above $110 in 2026?",
+      "model": "fixture-ground-truth"
+    },
+    "a2d58ac68b36a6b8e46765d507d837d885e285ac34ccb1062f4413059ad88640": {
+      "relevant": false,
+      "mechanism": "Generic macro uncertainty with no named mechanism.",
+      "question": "Will the US enter a recession by end of 2026?",
+      "model": "fixture-ground-truth"
+    },
+    "b5d38112625f357a348bfbe0ae35bc40472d40c27686063f9eedbe6eb3f6d4d1": {
+      "relevant": false,
+      "mechanism": "Market not in the candidate pool — hallucinated pick.",
+      "question": null,
+      "model": "fixture-ground-truth"
+    }
+  }
+}
