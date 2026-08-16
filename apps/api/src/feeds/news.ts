@@ -503,7 +503,10 @@ export async function updateRollingCompanySentiment(
     const priorScoredByCompany = new Map<string, Set<string>>(
       [...priorByKey].map(([companyKey, prior]) => [companyKey, new Set(prior.scored_cluster_ids)]),
     );
-    const observationsByCompany = aggregateObservationsByCompany(idBackedSentiments, priorScoredByCompany);
+    const observationsByCompany = aggregateObservationsByCompany(
+      idBackedSentiments,
+      priorScoredByCompany,
+    );
 
     const companySentimentRows = [...observationsByCompany].map(([companyKey, obs]) => {
       const prior = priorByKey.get(companyKey) ?? null;
@@ -516,7 +519,10 @@ export async function updateRollingCompanySentiment(
         isin: ref?.isins[0] ?? null,
         score,
         trend,
-        evidence_cluster_ids: mergeEvidenceClusterIds(prior?.evidence_cluster_ids ?? [], obs.clusterKeys),
+        evidence_cluster_ids: mergeEvidenceClusterIds(
+          prior?.evidence_cluster_ids ?? [],
+          obs.clusterKeys,
+        ),
         scored_cluster_ids: mergeScoredClusterIds(prior?.scored_cluster_ids ?? [], obs.clusterKeys),
         updated_at: new Date().toISOString(),
       };

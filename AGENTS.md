@@ -102,7 +102,7 @@ Migration files: `supabase/migrations/` — timestamped SQL, applied in order.
 
 **Backend:** Cloudflare Workers, Supabase (PostgreSQL + Auth), Cloudflare Queues.
 
-**AI models (xAI Grok):** `grok-4.20-0309-reasoning` for thesis agent and benchmarks; `grok-4-1-fast-non-reasoning` for sub-agent and broker-CSV normalization; `grok-4.3` for expense-CSV normalization (`GROK_NORMALIZATION_MODEL`; `reasoning_effort` via `GROK_NORMALIZATION_EFFORT`, default `none` — reasoning over a whole CSV in one call exceeds the 90s timeout); `grok-4.6` with medium reasoning for Polymarket curation (`POLYMARKET_GROK_MODEL`, `POLYMARKET_GROK_REASONING_EFFORT`); Gemini for recaps.
+**AI models (xAI Grok):** `grok-4.20-0309-reasoning` for thesis agent and benchmarks; `grok-4-1-fast-non-reasoning` for sub-agent, broker-CSV normalization, and news sentiment scoring (`SENTIMENT_GROK_MODEL`); `grok-4.3` for expense-CSV normalization (`GROK_NORMALIZATION_MODEL`; `reasoning_effort` via `GROK_NORMALIZATION_EFFORT`, default `none` — reasoning over a whole CSV in one call exceeds the 90s timeout); `grok-4.6` with medium reasoning for Polymarket curation (`POLYMARKET_GROK_MODEL`, `POLYMARKET_GROK_REASONING_EFFORT`); Gemini for recaps.
 
 **Market data:** Yahoo Finance (quotes/search), FRED (economic indicators), Exa Search (web), Polymarket Gamma (prediction markets).
 
