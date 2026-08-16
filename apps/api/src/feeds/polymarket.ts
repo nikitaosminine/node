@@ -558,6 +558,28 @@ function postgrestInList(values: string[]): string {
 }
 
 /**
+ * Remove rows written by the pre-1A-131 global pinned-market fanout. This runs
+ * before any holdings/profile/scoring work so a portfolio cannot retain those
+ * rows when curation fails partway through.
+ */
+async function sweepLegacyPinnedMatches(
+  client: AnySupabaseClient,
+  portfolioId: string,
+): Promise<void> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const { error } = (await (client as any)
+    .from("portfolio_polymarket_matches")
+    .delete()
+    .eq("portfolio_id", portfolioId)
+    .eq("is_pinned", true)) as { error: { message: string } | null };
+  if (error) {
+    throw new Error(
+      `[polymarket] legacy pinned-match sweep failed for portfolio ${portfolioId}: ${error.message}`,
+    );
+  }
+}
+
+/**
  * Writes the replacement selection before pruning stale rows. An empty
  * selection is rejected so an upstream/API failure can never turn into a
  * destructive "replace with nothing" operation.
@@ -996,6 +1018,10 @@ export async function runPolymarketFanout(
     const portfolioId = portfolio.id;
 
     try {
+      // Sweep legacy global pins before any holdings/profile/scoring work. If
+      // curation fails, the old pinned rows must not survive in the feed.
+      await sweepLegacyPinnedMatches(client, portfolioId);
+
       // 4a. Holdings-hash cache check — skip Grok if holdings unchanged AND cache is fresh
       const { data: holdingsData } = await client
         .from("holdings")
@@ -1006,18 +1032,7 @@ export async function runPolymarketFanout(
       const holdings: HoldingRow[] = (holdingsData as HoldingRow[] | null) ?? [];
 
       if (holdings.length === 0) {
-        // Portfolio has no holdings — sweep legacy pinned rows, skip scoring
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const { error: legacySweepError } = (await (client as any)
-          .from("portfolio_polymarket_matches")
-          .delete()
-          .eq("portfolio_id", portfolioId)
-          .eq("is_pinned", true)) as { error: { message: string } | null };
-        if (legacySweepError) {
-          throw new Error(
-            `[polymarket] legacy pinned-match sweep failed for portfolio ${portfolioId}: ${legacySweepError.message}`,
-          );
-        }
+        // Portfolio has no holdings — skip scoring after the legacy sweep.
         curation.portfoliosWithoutHoldings++;
         portfoliosProcessed++;
         continue;
