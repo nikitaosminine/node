@@ -954,6 +954,95 @@ describe("ETF constituents in portfolio profiles", () => {
   });
 });
 
+describe("polymarket price history failure independence", () => {
+  // Minimal fanout mocks: Gamma returns one rotating event per tag plus the
+  // pinned-slug lookups; an empty portfolios list stops the run right after
+  // the price-history steps, which is all these tests care about.
+  function stubGammaFetch() {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/events/slug/")) {
+          const slug = url.split("/events/slug/")[1];
+          return new Response(
+            JSON.stringify(gammaEvent(`0xpinned-${slug}`, `event-${slug}`, slug)),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+        return new Response(JSON.stringify([gammaEvent("0xrotating")]), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }),
+    );
+  }
+
+  function mockTables(priceHistory: Record<string, unknown>) {
+    dbFrom.mockImplementation((table: string) => {
+      if (table === "polymarket_markets") {
+        return {
+          upsert: vi.fn().mockResolvedValue({ error: null }),
+          update: vi.fn(() => ({
+            eq: vi.fn(() => ({
+              or: vi.fn(() => ({
+                select: vi.fn().mockResolvedValue({ data: [], error: null }),
+              })),
+            })),
+          })),
+        };
+      }
+      if (table === "polymarket_price_history") {
+        return priceHistory;
+      }
+      if (table === "portfolios") {
+        return { select: vi.fn().mockResolvedValue({ data: [], error: null }) };
+      }
+      throw new Error(`Unexpected table: ${table}`);
+    });
+  }
+
+  it("still runs the retention sweep when the snapshot insert fails", async () => {
+    stubGammaFetch();
+    const lt = vi.fn().mockResolvedValue({ count: 2, error: null });
+    mockTables({
+      insert: vi.fn().mockResolvedValue({ error: { message: "insert blew up" } }),
+      delete: vi.fn(() => ({ lt })),
+    });
+
+    const result = await runPolymarketFanout(env);
+
+    expect(lt).toHaveBeenCalledTimes(1);
+    expect(result.priceSnapshotsWritten).toBe(0);
+    expect(result.priceHistorySwept).toBe(2);
+    expect(result.errors).toEqual([
+      expect.stringMatching(/^price history insert: .*insert blew up/),
+    ]);
+    expect(result.marketsUpserted).toBe(5);
+  });
+
+  it("records a distinct sweep error without losing the snapshot insert", async () => {
+    stubGammaFetch();
+    const inserted: unknown[][] = [];
+    mockTables({
+      insert: vi.fn(async (rows: unknown[]) => {
+        inserted.push(rows);
+        return { error: null };
+      }),
+      delete: vi.fn(() => ({
+        lt: vi.fn().mockResolvedValue({ count: null, error: { message: "sweep blew up" } }),
+      })),
+    });
+
+    const result = await runPolymarketFanout(env);
+
+    expect(inserted).toHaveLength(1);
+    expect(result.priceSnapshotsWritten).toBe(5);
+    expect(result.priceHistorySwept).toBe(0);
+    expect(result.errors).toEqual([expect.stringMatching(/^price history sweep: .*sweep blew up/)]);
+  });
+});
+
 describe("polymarket price history", () => {
   function flatMarket(overrides: Partial<Record<string, unknown>> = {}) {
     return {
@@ -1007,9 +1096,7 @@ describe("polymarket price history", () => {
   it("returns 0 and skips the insert call when there are no active markets", async () => {
     const client = { from: vi.fn() };
 
-    const written = await insertPriceSnapshots(client as never, [
-      flatMarket({ active: false }),
-    ]);
+    const written = await insertPriceSnapshots(client as never, [flatMarket({ active: false })]);
 
     expect(written).toBe(0);
     expect(client.from).not.toHaveBeenCalled();
@@ -1022,9 +1109,9 @@ describe("polymarket price history", () => {
       })),
     };
 
-    await expect(
-      insertPriceSnapshots(client as never, [flatMarket()]),
-    ).rejects.toThrow("insert failed");
+    await expect(insertPriceSnapshots(client as never, [flatMarket()])).rejects.toThrow(
+      "insert failed",
+    );
   });
 
   it("sweeps rows older than the retention window", async () => {

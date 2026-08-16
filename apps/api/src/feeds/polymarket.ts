@@ -578,9 +578,9 @@ export async function insertPriceSnapshots(
   for (let i = 0; i < rows.length; i += CHUNK) {
     const chunk = rows.slice(i, i + CHUNK);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const { error } = (await (client as any)
-      .from("polymarket_price_history")
-      .insert(chunk)) as { error: { message: string } | null };
+    const { error } = (await (client as any).from("polymarket_price_history").insert(chunk)) as {
+      error: { message: string } | null;
+    };
     if (error) {
       throw new Error(
         `[polymarket] price history insert batch failed (${i}–${i + chunk.length}): ${error.message}`,
