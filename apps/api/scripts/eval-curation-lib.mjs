@@ -33,6 +33,12 @@ export const SCORE_THRESHOLD = 0.35;
 // Grok is instructed to pick at most 2 markets per Polymarket event.
 export const MAX_PICKS_PER_EVENT = 2;
 
+// Max candidates sent to Grok per portfolio — copy of ROTATING_BATCH_SIZE in
+// apps/api/src/feeds/polymarket.ts (KEEP IN SYNC). The parent run's
+// candidate_count input is the pre-slice pool size, so the prompt contains
+// min(candidate_count, this) lines — used to detect partially parsed prompts.
+export const ROTATING_BATCH_SIZE = 60;
+
 // Copy of NON_FINANCIAL_RE from apps/api/src/feeds/polymarket.ts (the .mjs
 // script cannot import the Worker's TS module). KEEP IN SYNC — it is the
 // pre-Grok sports/entertainment/candidacy filter, reused here to count picks
@@ -139,6 +145,17 @@ export function isFallbackRun(run) {
   return Boolean(run.error) || (run.picks ?? []).length === 0;
 }
 
+// Full context = profile present AND the candidate list parsed back complete.
+// The prompt contains min(candidate_count, ROTATING_BATCH_SIZE) candidate
+// lines; recovering fewer means some lines failed to parse, so picks from the
+// omitted candidates would be falsely counted invalid and their questions are
+// unknown — the run must not enter context-dependent denominators.
+function hasFullContext(run, candidates) {
+  if (!run.profile_summary || candidates.length === 0) return false;
+  if (typeof run.candidate_count !== "number") return true; // nothing to check against
+  return candidates.length >= Math.min(run.candidate_count, ROTATING_BATCH_SIZE);
+}
+
 export function computeRunMetrics(run) {
   const candidates = run.candidates ?? [];
   const picks = run.picks ?? [];
@@ -192,9 +209,11 @@ export function computeRunMetrics(run) {
     portfolio_id: run.portfolio_id,
     fallback: isFallbackRun(run),
     // Picks exist but the grok.score child (profile + candidate pool) was
-    // missing/unparseable — invalid-id, non-financial, and anchored-reason
-    // checks could not run, so this run's clean numbers mean "unknown".
-    missing_context: picks.length > 0 && (candidates.length === 0 || !run.profile_summary),
+    // missing, unparseable, or only PARTIALLY parsed (fewer candidate lines
+    // recovered than the prompt must have contained) — invalid-id,
+    // non-financial, and anchored-reason checks would be wrong for this run,
+    // so it is excluded from the context-dependent aggregate rates.
+    missing_context: picks.length > 0 && !hasFullContext(run, candidates),
     error: run.error ?? null,
     candidate_count: run.candidate_count ?? candidates.length,
     pick_count: picks.length,

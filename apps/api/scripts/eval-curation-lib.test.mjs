@@ -143,6 +143,26 @@ describe("computeRunMetrics", () => {
     expect(computeRunMetrics(fixtureDataset.runs[0]).missing_context).toBe(false);
   });
 
+  it("flags partially parsed candidate lists as missing context", () => {
+    const runA = fixtureDataset.runs.find((r) => r.run_id.endsWith("a"));
+    // Same run, but only 5 of the prompt's 12 candidate lines parsed back:
+    // picks from omitted candidates would be miscounted as invalid ids.
+    const partial = { ...runA, candidates: runA.candidates.slice(0, 5) };
+    expect(computeRunMetrics(partial).missing_context).toBe(true);
+    // candidate_count above the 60-candidate batch cap is fine as long as
+    // the prompt's 60 lines all parsed.
+    const bigPool = {
+      ...runA,
+      candidate_count: 200,
+      candidates: Array.from({ length: 60 }, (_, i) => ({
+        condition_id: `0xc${i}`,
+        question: `Q${i}?`,
+      })),
+      picks: [{ condition_id: "0xc1", score: 0.5, reason: "r" }],
+    };
+    expect(computeRunMetrics(bigPool).missing_context).toBe(false);
+  });
+
   it("marks empty-pick and errored runs as fallback", () => {
     const runC = fixtureDataset.runs.find((r) => r.run_id.endsWith("c"));
     const runD = fixtureDataset.runs.find((r) => r.run_id.endsWith("d"));
