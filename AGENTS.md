@@ -34,6 +34,7 @@ npm run dev      # → localhost:8787
 npm run deploy   # manual deploy to Cloudflare
 npx wrangler secret put NAME   # add/update a secret
 npm run cf-typegen             # regenerate Cloudflare bindings types
+npm run eval:curation          # Polymarket curation quality eval — docs: apps/api/evals/curation/README.md
 ```
 
 No monorepo-level build or test command exists; lint/build/test per-app.
