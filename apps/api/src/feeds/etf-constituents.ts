@@ -1,5 +1,7 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
+import { MARKET_SECTOR_LABELS } from "./market-topics";
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -45,7 +47,7 @@ export function etfConstituentsPromptExtension(): string {
   return [
     "",
     "Additionally, find the Top-10 holdings (constituents) of this ETF by weight.",
-    "Include each constituent's ticker, full name, weight_pct (%), country of domicile (ISO-3166 alpha-2), and GICS sector (e.g. Technology, Financials, Energy).",
+    `Include each constituent's ticker, full name, weight_pct (%), country of domicile (ISO-3166 alpha-2), and sector chosen from exactly this list: ${MARKET_SECTOR_LABELS.join(", ")} (map canonical GICS names like "Health Care" or "Information Technology" to the closest listed label).`,
     "Add a key `top_constituents` to the JSON response (array of up to 10 objects):",
     '  "top_constituents": [{ "ticker": "AAPL", "name": "Apple Inc.", "weight_pct": 8.2, "country_code": "US", "sector": "Technology" }]',
     "If you cannot find constituent data, return an empty array for `top_constituents`.",
