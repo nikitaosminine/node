@@ -149,7 +149,6 @@ export interface PolymarketFanoutResult {
   errors: string[];
 }
 
-
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
@@ -480,10 +479,7 @@ export async function fetchCandidateMarkets(env: Env): Promise<Map<string, FlatM
 // Upsert markets into polymarket_markets
 // ---------------------------------------------------------------------------
 
-async function upsertMarkets(
-  client: AnySupabaseClient,
-  markets: FlatMarket[],
-): Promise<void> {
+async function upsertMarkets(client: AnySupabaseClient, markets: FlatMarket[]): Promise<void> {
   if (markets.length === 0) return;
 
   const rows = markets.map((m) => ({
@@ -536,9 +532,7 @@ const STALE_FANOUT_WINDOW_HOURS = 48;
  */
 async function deactivateStaleMarkets(client: AnySupabaseClient): Promise<number> {
   const nowIso = new Date().toISOString();
-  const staleCutoffIso = new Date(
-    Date.now() - STALE_FANOUT_WINDOW_HOURS * 3_600_000,
-  ).toISOString();
+  const staleCutoffIso = new Date(Date.now() - STALE_FANOUT_WINDOW_HOURS * 3_600_000).toISOString();
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const { data, error } = (await (client as any)
@@ -546,7 +540,10 @@ async function deactivateStaleMarkets(client: AnySupabaseClient): Promise<number
     .update({ active: false })
     .eq("active", true)
     .or(`end_date.lt.${nowIso},fetched_at.lt.${staleCutoffIso}`)
-    .select("condition_id")) as { data: { condition_id: string }[] | null; error: { message: string } | null };
+    .select("condition_id")) as {
+    data: { condition_id: string }[] | null;
+    error: { message: string } | null;
+  };
 
   if (error) {
     throw new Error(`[polymarket] failed to deactivate stale markets: ${error.message}`);
@@ -760,9 +757,7 @@ export async function enqueueEtfConstituentsEnrichment(
       error: { message: string } | null;
     };
     if (updateError) {
-      throw new Error(
-        `[polymarket] constituents enrichment claim failed: ${updateError.message}`,
-      );
+      throw new Error(`[polymarket] constituents enrichment claim failed: ${updateError.message}`);
     }
     if (updatedRows && updatedRows.length > 0) {
       claimed.push(gap);
