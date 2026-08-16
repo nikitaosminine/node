@@ -17,6 +17,8 @@ interface Env {
   GROK_SUB_API_KEY?: string;
   GROK_NORMALIZATION_API_KEY?: string;
   GROK_API_BASE_URL?: string;
+  POLYMARKET_GROK_MODEL?: string;
+  POLYMARKET_GROK_REASONING_EFFORT?: string;
   POLYMARKET_GAMMA_BASE_URL?: string;
   // Optional LangSmith tracing — when unset, curation runs identically untraced.
   LANGSMITH_API_KEY?: string;
@@ -103,6 +105,37 @@ interface GrokScoreItem {
   reason: string;
 }
 
+type PolymarketGrokReasoningEffort = "low" | "medium" | "high" | "xhigh";
+
+interface HoldingsCacheRow {
+  holdings_hash: string;
+  last_scored_at: string;
+  profile_text: string | null;
+}
+
+export interface PolymarketFanoutOptions {
+  forceRescore?: boolean;
+}
+
+export interface PolymarketFanoutResult {
+  marketsUpserted: number;
+  pinnedSlugsFound: number;
+  portfoliosProcessed: number;
+  portfoliosSkipped: number;
+  curation: {
+    model: string;
+    reasoningEffort: PolymarketGrokReasoningEffort;
+    forceRescore: boolean;
+    grokRuns: number;
+    cacheHits: number;
+    fallbacks: number;
+    portfoliosWithoutHoldings: number;
+    pinnedMatchesWritten: number;
+    rotatingMatchesWritten: number;
+  };
+  errors: string[];
+}
+
 interface PortfolioProfile {
   tickers: string[];
   /** ETF holdings expanded with underlying stocks, e.g. "PUST.PA (Amundi NASDAQ-100: NVDA, AAPL, MSFT, AMZN, META)" */
@@ -137,6 +170,14 @@ export const PINNED_MARKET_SLUGS: string[] = [
 
 const ROTATING_BATCH_SIZE = 60; // max candidate markets sent to Grok per portfolio (event-deduped by highest-Yes bucket)
 const ROTATING_TOP_K = 16; // Grok picks top-K; server-side event-dedup then reduces to ~8 unique events
+const DEFAULT_POLYMARKET_GROK_MODEL = "grok-4.6";
+const DEFAULT_POLYMARKET_GROK_REASONING_EFFORT: PolymarketGrokReasoningEffort = "medium";
+const POLYMARKET_GROK_REASONING_EFFORTS = new Set<PolymarketGrokReasoningEffort>([
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+]);
 
 // Cache TTL: skip Grok re-scoring if holdings haven't changed AND last scored < 6h ago.
 // Market prices still refresh on every fanout run — only the per-portfolio LLM call is cached.
@@ -201,9 +242,31 @@ function getGrokBaseUrl(env: Env): string {
   return (env.GROK_API_BASE_URL || "https://api.x.ai/v1").replace(/\/$/, "");
 }
 
-async function invokeGrokImpl(env: Env, systemPrompt: string, userPrompt: string): Promise<string> {
+function getPolymarketGrokConfig(env: Env): {
+  model: string;
+  reasoningEffort: PolymarketGrokReasoningEffort;
+} {
+  const model = env.POLYMARKET_GROK_MODEL?.trim() || DEFAULT_POLYMARKET_GROK_MODEL;
+  const configuredEffort =
+    env.POLYMARKET_GROK_REASONING_EFFORT?.trim().toLowerCase() ||
+    DEFAULT_POLYMARKET_GROK_REASONING_EFFORT;
+  if (!POLYMARKET_GROK_REASONING_EFFORTS.has(configuredEffort as PolymarketGrokReasoningEffort)) {
+    throw new Error(`[polymarket] Invalid POLYMARKET_GROK_REASONING_EFFORT: ${configuredEffort}`);
+  }
+  return {
+    model,
+    reasoningEffort: configuredEffort as PolymarketGrokReasoningEffort,
+  };
+}
+
+export async function invokePolymarketGrok(
+  env: Env,
+  systemPrompt: string,
+  userPrompt: string,
+): Promise<string> {
   const apiKey = env.GROK_MAIN_API_KEY ?? env.GROK_SUB_API_KEY ?? env.GROK_NORMALIZATION_API_KEY;
   if (!apiKey) throw new Error("[polymarket] No Grok API key available");
+  const { model, reasoningEffort } = getPolymarketGrokConfig(env);
 
   const res = await fetch(`${getGrokBaseUrl(env)}/chat/completions`, {
     method: "POST",
@@ -212,7 +275,8 @@ async function invokeGrokImpl(env: Env, systemPrompt: string, userPrompt: string
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      model: "grok-4.20-0309-non-reasoning",
+      model,
+      reasoning_effort: reasoningEffort,
       temperature: 0.2,
       messages: [
         { role: "system", content: systemPrompt },
@@ -235,7 +299,7 @@ async function invokeGrokImpl(env: Env, systemPrompt: string, userPrompt: string
 // Traceable wrapper. Logs the prompts + raw model output (NOT `env`, which holds
 // the API key). A no-op passthrough outside a run-tree context, so untraced
 // callers are unaffected; nests as a child span when run inside withRunTree.
-const invokeGrok = traceable(invokeGrokImpl, {
+const invokeGrok = traceable(invokePolymarketGrok, {
   name: "grok.score",
   run_type: "llm",
   processInputs: (inputs) => {
@@ -244,6 +308,23 @@ const invokeGrok = traceable(invokeGrokImpl, {
   },
   processOutputs: (outputs) => ({ text: outputs }),
 });
+
+export function shouldUsePolymarketCurationCache(params: {
+  cacheRow: HoldingsCacheRow | null;
+  currentHash: string;
+  forceRescore: boolean;
+  nowMs?: number;
+}): boolean {
+  if (params.forceRescore || params.cacheRow === null) return false;
+  const cacheAgeHours =
+    ((params.nowMs ?? Date.now()) - new Date(params.cacheRow.last_scored_at).getTime()) / 3_600_000;
+  return (
+    params.cacheRow.holdings_hash === params.currentHash &&
+    Number.isFinite(cacheAgeHours) &&
+    cacheAgeHours >= 0 &&
+    cacheAgeHours < CACHE_TTL_HOURS
+  );
+}
 
 function extractJsonArray(raw: string): unknown[] {
   const trimmed = raw.trim();
@@ -821,18 +902,28 @@ function dedupeByEvent(
 // Main: runPolymarketFanout
 // ---------------------------------------------------------------------------
 
-export async function runPolymarketFanout(env: Env): Promise<{
-  marketsUpserted: number;
-  pinnedSlugsFound: number;
-  portfoliosProcessed: number;
-  portfoliosSkipped: number;
-  errors: string[];
-}> {
+export async function runPolymarketFanout(
+  env: Env,
+  options: PolymarketFanoutOptions = {},
+): Promise<PolymarketFanoutResult> {
   const client: AnySupabaseClient = createClient(env.SUPABASE_URL, env.SUPABASE_SERVICE_KEY);
+  const forceRescore = options.forceRescore === true;
+  const { model, reasoningEffort } = getPolymarketGrokConfig(env);
 
   const errors: string[] = [];
   let portfoliosProcessed = 0;
   let portfoliosSkipped = 0;
+  const curation: PolymarketFanoutResult["curation"] = {
+    model,
+    reasoningEffort,
+    forceRescore,
+    grokRuns: 0,
+    cacheHits: 0,
+    fallbacks: 0,
+    portfoliosWithoutHoldings: 0,
+    pinnedMatchesWritten: 0,
+    rotatingMatchesWritten: 0,
+  };
 
   // 1. Fetch and flatten candidate markets. A completely empty candidate pool
   // is fatal: continuing would eventually replace every portfolio feed with
@@ -869,6 +960,7 @@ export async function runPolymarketFanout(env: Env): Promise<{
       pinnedSlugsFound: pinnedBySlug.size,
       portfoliosProcessed,
       portfoliosSkipped,
+      curation,
       errors,
     };
   }
@@ -929,6 +1021,7 @@ export async function runPolymarketFanout(env: Env): Promise<{
           }),
         );
         await upsertThenPrunePortfolioMatches(client, portfolioId, pinnedRows);
+        curation.pinnedMatchesWritten += pinnedRows.length;
       }
 
       // 6b. Holdings-hash cache check — skip Grok if holdings unchanged AND cache is fresh
@@ -942,6 +1035,7 @@ export async function runPolymarketFanout(env: Env): Promise<{
 
       if (holdings.length === 0) {
         // Portfolio has no holdings — skip scoring entirely
+        curation.portfoliosWithoutHoldings++;
         portfoliosProcessed++;
         continue;
       }
@@ -954,35 +1048,39 @@ export async function runPolymarketFanout(env: Env): Promise<{
         .select("holdings_hash,last_scored_at,profile_text")
         .eq("portfolio_id", portfolioId)
         .maybeSingle()) as {
-        data: { holdings_hash: string; last_scored_at: string; profile_text: string | null } | null;
+        data: HoldingsCacheRow | null;
         error: unknown;
       };
 
       const cacheAgeHours = cacheRow
         ? (Date.now() - new Date(cacheRow.last_scored_at).getTime()) / 3_600_000
         : Infinity;
-      const cacheHit =
-        cacheRow !== null &&
-        cacheRow.holdings_hash === currentHash &&
-        cacheAgeHours < CACHE_TTL_HOURS;
+      const cacheHit = shouldUsePolymarketCurationCache({
+        cacheRow,
+        currentHash,
+        forceRescore,
+      });
 
       if (cacheHit) {
         console.log(
           `[polymarket] cache hit for portfolio ${portfolioId} (holdings unchanged, age=${cacheAgeHours.toFixed(1)}h) — skipping Grok`,
         );
+        curation.cacheHits++;
         portfoliosProcessed++;
         continue;
       }
 
       // 6c. Cache miss or stale — run full profile build + Grok scoring
       console.log(
-        `[polymarket] cache miss for portfolio ${portfolioId} (hashChanged=${cacheRow?.holdings_hash !== currentHash}, age=${cacheAgeHours.toFixed(1)}h) — scoring`,
+        `[polymarket] ${forceRescore ? "forced rescore" : "cache miss"} for portfolio ${portfolioId} (hashChanged=${cacheRow?.holdings_hash !== currentHash}, age=${cacheAgeHours.toFixed(1)}h) — scoring`,
       );
 
       let scored: Array<{ condition_id: string; score: number; reason: string | null }>;
       let profileSummaryForCache: string | null = null;
 
       if (!hasGrokKey) {
+        curation.fallbacks++;
+        errors.push(`portfolio ${portfolioId}: no Grok key available — using volume fallback`);
         scored = rotatingCandidates.slice(0, 10).map((m) => ({
           condition_id: m.condition_id,
           score: 0,
@@ -1009,7 +1107,8 @@ export async function runPolymarketFanout(env: Env): Promise<{
             inputs: {
               portfolio_id: portfolioId,
               user_id: portfolio.user_id,
-              model: "grok-4.20-0309-non-reasoning",
+              model,
+              reasoning_effort: reasoningEffort,
               candidate_count: rotatingCandidates.length,
             },
           });
@@ -1054,6 +1153,7 @@ export async function runPolymarketFanout(env: Env): Promise<{
         }
 
         if (rawScored.length === 0) {
+          curation.fallbacks++;
           errors.push(
             `portfolio ${portfolioId}: Grok scoring returned 0 results — using volume fallback`,
           );
@@ -1063,6 +1163,7 @@ export async function runPolymarketFanout(env: Env): Promise<{
             reason: null,
           }));
         } else {
+          curation.grokRuns++;
           // Server-side event deduplication before storing
           const deduped = dedupeByEvent(rawScored, candidateMap);
           console.log(
@@ -1088,6 +1189,7 @@ export async function runPolymarketFanout(env: Env): Promise<{
         is_pinned: false,
       }));
       await upsertThenPrunePortfolioMatches(client, portfolioId, rotatingRows);
+      curation.rotatingMatchesWritten += rotatingRows.length;
 
       if (profileSummaryForCache !== null) {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -1125,6 +1227,7 @@ export async function runPolymarketFanout(env: Env): Promise<{
     pinnedSlugsFound: pinnedBySlug.size,
     portfoliosProcessed,
     portfoliosSkipped,
+    curation,
     errors,
   };
 
