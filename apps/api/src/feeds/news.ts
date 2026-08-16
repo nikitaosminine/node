@@ -587,10 +587,16 @@ export function buildClusterRow(
 // below against a lost update when two fanout runs overlap for the same
 // company (e.g. the admin-only /_debug/run-news-fanout endpoint fired while
 // a scheduled run is still in flight). PostgREST gives no transaction that
-// spans two HTTP calls, so a plain SELECT-then-UPSERT can't be made atomic
-// from the client; the compare-and-swap has to happen in one statement on
-// the server, hence the RPC (see try_acquire_company_sentiment_lock in the
-// news-sentiment migration) instead of a second table read.
+// spans multiple HTTP calls, so the compare-and-swap has to happen
+// server-side: try_acquire_company_sentiment_lock (in the news-sentiment
+// migration) is checked before the prior-state read, and
+// apply_company_sentiment_batch re-validates the same lease — atomically,
+// in the same transaction as the write via `select ... for update` — right
+// before writing. The second check is what closes the gap a TTL check alone
+// leaves open: acquiring the lease and writing are still two separate round
+// trips, so a caller whose read-modify work stalls past the TTL could
+// otherwise resume and overwrite a row a second caller already wrote after
+// stealing the expired lease.
 // ---------------------------------------------------------------------------
 
 const COMPANY_SENTIMENT_LOCK_TTL_SECONDS = 60;
@@ -624,8 +630,8 @@ async function releaseCompanySentimentLock(
 
 // ---------------------------------------------------------------------------
 // Rolling per-company sentiment (EWMA) — up to 4 subrequests (lock acquire,
-// prior-score lookup, batch upsert, lock release), 0 when there is nothing to
-// update. A cluster already present in the company's stored scored_cluster_ids
+// prior-score lookup, batch write RPC, lock release), 0 when there is
+// nothing to update. A cluster already present in the company's stored scored_cluster_ids
 // is the same article re-surfacing across fanout runs within the 7-day window
 // and must not move the EWMA again; scored_cluster_ids (pruned by age, not
 // count — see MAX_SCORED_CLUSTER_IDS in feeds/sentiment.ts) is the dedupe
@@ -718,11 +724,18 @@ export async function updateRollingCompanySentiment(
 
     if (companySentimentRows.length === 0) return { companiesRescored: 0, error: null };
 
-    const { error: companyUpsertError } = await client
-      .from("company_sentiment")
-      .upsert(companySentimentRows, { onConflict: "company_key" });
+    const { data: applied, error: applyError } = await client.rpc("apply_company_sentiment_batch", {
+      p_holder: holder,
+      p_rows: companySentimentRows,
+    });
 
-    if (companyUpsertError) throw new Error(companyUpsertError.message);
+    if (applyError) throw new Error(applyError.message);
+    if (applied !== true) {
+      return {
+        companiesRescored: 0,
+        error: "company sentiment update skipped: lease was lost before the write completed",
+      };
+    }
     return { companiesRescored: companySentimentRows.length, error: null };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -859,7 +872,7 @@ function dedupeByStory(
 //   1  Grok sentiment scoring call (skipped if no survivors)
 //   1  company sentiment lock acquire (skipped if nothing scored)
 //   1  company_sentiment prior-score lookup (skipped if nothing scored)
-//   1  company_sentiment batch upsert (skipped if nothing scored)
+//   1  company_sentiment batch write RPC, lock-checked (skipped if nothing scored)
 //   1  company sentiment lock release (skipped if nothing scored)
 //   ─────────────────
 //   N+9  total worst case (13 today, well under 50)

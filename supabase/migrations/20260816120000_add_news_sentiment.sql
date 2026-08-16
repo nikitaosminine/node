@@ -126,3 +126,70 @@ $$;
 
 revoke all on function public.try_acquire_company_sentiment_lock(text, int) from public;
 grant execute on function public.try_acquire_company_sentiment_lock(text, int) to service_role;
+
+-- Writes the rolling company_sentiment rows only if p_holder still holds a
+-- live lease at write time, closing the gap a lease-TTL check alone can't:
+-- acquiring the lock before the read and checking it again right before the
+-- write are still two separate round trips, so a caller whose read-modify
+-- work stalls past the TTL could otherwise resume and overwrite a row a
+-- second caller already updated after stealing the expired lease. `select
+-- ... for update` takes a row lock on the lease for the rest of this
+-- transaction, so the ownership check and the write happen atomically: any
+-- concurrent try_acquire_company_sentiment_lock call blocks until this
+-- transaction commits, and by then the lease this call is holding is either
+-- still valid (safe to write) or it isn't (write rejected, no torn state).
+create or replace function public.apply_company_sentiment_batch(
+  p_holder text,
+  p_rows jsonb
+) returns boolean
+language plpgsql
+set search_path = ''
+as $$
+declare
+  v_holder text;
+  v_expires_at timestamptz;
+begin
+  select holder, expires_at
+    into v_holder, v_expires_at
+    from public.company_sentiment_lock
+    where id = 'singleton'
+    for update;
+
+  if v_holder is distinct from p_holder or v_expires_at is null or v_expires_at <= now() then
+    return false;
+  end if;
+
+  insert into public.company_sentiment (
+    company_key, company_name, ticker, isin, score, trend,
+    evidence_cluster_ids, scored_cluster_ids, updated_at
+  )
+  select
+    r.company_key, r.company_name, r.ticker, r.isin, r.score, r.trend,
+    r.evidence_cluster_ids, r.scored_cluster_ids, r.updated_at
+  from jsonb_to_recordset(p_rows) as r(
+    company_key text,
+    company_name text,
+    ticker text,
+    isin text,
+    score numeric,
+    trend text,
+    evidence_cluster_ids jsonb,
+    scored_cluster_ids jsonb,
+    updated_at timestamptz
+  )
+  on conflict (company_key) do update
+    set company_name = excluded.company_name,
+        ticker = excluded.ticker,
+        isin = excluded.isin,
+        score = excluded.score,
+        trend = excluded.trend,
+        evidence_cluster_ids = excluded.evidence_cluster_ids,
+        scored_cluster_ids = excluded.scored_cluster_ids,
+        updated_at = excluded.updated_at;
+
+  return true;
+end;
+$$;
+
+revoke all on function public.apply_company_sentiment_batch(text, jsonb) from public;
+grant execute on function public.apply_company_sentiment_batch(text, jsonb) to service_role;

@@ -82,15 +82,30 @@ interface PriorRow {
   scored_cluster_ids: ScoredClusterRecord[] | null;
 }
 
-function mockSentimentClient(priorRows: PriorRow[], opts: { lockAcquired?: boolean } = {}) {
-  const upserts: Array<{ rows: Array<Record<string, unknown>>; options: unknown }> = [];
+function mockSentimentClient(
+  priorRows: PriorRow[],
+  opts: { lockAcquired?: boolean; applyAccepted?: boolean } = {},
+) {
+  const applies: Array<{ rows: Array<Record<string, unknown>>; holder: unknown }> = [];
   const rpcCalls: Array<{ fn: string; args: unknown }> = [];
   const lockReleases: Array<{ holder: unknown }> = [];
   const lockAcquired = opts.lockAcquired ?? true;
+  const applyAccepted = opts.applyAccepted ?? true;
   const client = {
     rpc: async (fn: string, args: unknown) => {
       rpcCalls.push({ fn, args });
-      return { data: lockAcquired, error: null };
+      if (fn === "try_acquire_company_sentiment_lock") {
+        return { data: lockAcquired, error: null };
+      }
+      if (fn === "apply_company_sentiment_batch") {
+        const { p_holder, p_rows } = args as {
+          p_holder: unknown;
+          p_rows: Array<Record<string, unknown>>;
+        };
+        applies.push({ rows: p_rows, holder: p_holder });
+        return { data: applyAccepted, error: null };
+      }
+      return { data: null, error: null };
     },
     from: (table: string) => {
       if (table === "company_sentiment_lock") {
@@ -109,15 +124,11 @@ function mockSentimentClient(priorRows: PriorRow[], opts: { lockAcquired?: boole
         select: () => ({
           in: async () => ({ data: priorRows, error: null }),
         }),
-        upsert: async (rows: Array<Record<string, unknown>>, options: unknown) => {
-          upserts.push({ rows, options });
-          return { error: null };
-        },
       };
     },
   };
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  return { client: client as any, upserts, rpcCalls, lockReleases };
+  return { client: client as any, applies, rpcCalls, lockReleases };
 }
 
 describe("updateRollingCompanySentiment", () => {
@@ -127,7 +138,7 @@ describe("updateRollingCompanySentiment", () => {
       id: `c-${i}`,
       scoredAt: new Date(now).toISOString(),
     }));
-    const { client, upserts } = mockSentimentClient([
+    const { client, applies } = mockSentimentClient([
       {
         company_key: "ticker:ACME",
         score: 0.5,
@@ -143,11 +154,11 @@ describe("updateRollingCompanySentiment", () => {
     );
 
     expect(outcome).toEqual({ companiesRescored: 0, error: null });
-    expect(upserts).toHaveLength(0);
+    expect(applies).toHaveLength(0);
   });
 
-  it("folds a genuinely new cluster into the EWMA and writes both id columns", async () => {
-    const { client, upserts } = mockSentimentClient([
+  it("folds a genuinely new cluster into the EWMA and writes both id columns via the guarded RPC", async () => {
+    const { client, applies, rpcCalls } = mockSentimentClient([
       {
         company_key: "ticker:ACME",
         score: 0,
@@ -163,9 +174,8 @@ describe("updateRollingCompanySentiment", () => {
     );
 
     expect(outcome).toEqual({ companiesRescored: 1, error: null });
-    expect(upserts).toHaveLength(1);
-    expect(upserts[0].options).toEqual({ onConflict: "company_key" });
-    expect(upserts[0].rows[0]).toMatchObject({
+    expect(applies).toHaveLength(1);
+    expect(applies[0].rows[0]).toMatchObject({
       company_key: "ticker:ACME",
       company_name: "Acme Corp",
       ticker: "ACME",
@@ -173,17 +183,20 @@ describe("updateRollingCompanySentiment", () => {
       trend: "up",
       evidence_cluster_ids: ["c-new", "old-1"],
     });
-    const scoredIds = (upserts[0].rows[0].scored_cluster_ids as ScoredClusterRecord[]).map(
+    const scoredIds = (applies[0].rows[0].scored_cluster_ids as ScoredClusterRecord[]).map(
       (r) => r.id,
     );
     expect(scoredIds).toEqual(["c-new", "old-1"]);
+    // The write is guarded by the same holder token the lock was acquired with.
+    const acquireCall = rpcCalls.find((c) => c.fn === "try_acquire_company_sentiment_lock")!;
+    expect(applies[0].holder).toBe((acquireCall.args as { p_holder: string }).p_holder);
   });
 
   it("skips the DB entirely when there is nothing to update", async () => {
-    const { client, upserts, rpcCalls } = mockSentimentClient([]);
+    const { client, applies, rpcCalls } = mockSentimentClient([]);
     const outcome = await updateRollingCompanySentiment(client, [], companiesByKey);
     expect(outcome).toEqual({ companiesRescored: 0, error: null });
-    expect(upserts).toHaveLength(0);
+    expect(applies).toHaveLength(0);
     expect(rpcCalls).toHaveLength(0);
   });
 
@@ -195,15 +208,17 @@ describe("updateRollingCompanySentiment", () => {
       companiesByKey,
     );
 
-    expect(rpcCalls).toHaveLength(1);
-    expect(rpcCalls[0].fn).toBe("try_acquire_company_sentiment_lock");
+    expect(rpcCalls.map((c) => c.fn)).toEqual([
+      "try_acquire_company_sentiment_lock",
+      "apply_company_sentiment_batch",
+    ]);
     expect(rpcCalls[0].args).toMatchObject({ p_ttl_seconds: expect.any(Number) });
     expect(lockReleases).toHaveLength(1);
     expect(lockReleases[0].holder).toBe((rpcCalls[0].args as { p_holder: string }).p_holder);
   });
 
   it("skips gracefully without writing when a concurrent run holds the lock", async () => {
-    const { client, upserts, lockReleases } = mockSentimentClient([], { lockAcquired: false });
+    const { client, applies, lockReleases } = mockSentimentClient([], { lockAcquired: false });
 
     const outcome = await updateRollingCompanySentiment(
       client,
@@ -213,7 +228,22 @@ describe("updateRollingCompanySentiment", () => {
 
     expect(outcome.companiesRescored).toBe(0);
     expect(outcome.error).toMatch(/lock/i);
-    expect(upserts).toHaveLength(0);
+    expect(applies).toHaveLength(0);
     expect(lockReleases).toHaveLength(0);
+  });
+
+  it("discards the write when the lease was reassigned before the guarded RPC ran", async () => {
+    const { client, applies, lockReleases } = mockSentimentClient([], { applyAccepted: false });
+
+    const outcome = await updateRollingCompanySentiment(
+      client,
+      [{ clusterKey: "c-new", companyKey: "ticker:ACME", score: 1, rationale: "" }],
+      companiesByKey,
+    );
+
+    expect(outcome.companiesRescored).toBe(0);
+    expect(outcome.error).toMatch(/lease/i);
+    expect(applies).toHaveLength(1); // the RPC was called, it just rejected the write
+    expect(lockReleases).toHaveLength(1); // release is still attempted; harmless if reassigned
   });
 });

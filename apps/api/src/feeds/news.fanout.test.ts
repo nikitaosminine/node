@@ -132,13 +132,13 @@ function stubFanoutHttp(options: {
         },
       ]);
     }
-    if (url.pathname === "/rest/v1/company_sentiment" && method === "POST") {
-      return jsonResponse(null, 201);
-    }
     if (url.pathname === "/rest/v1/portfolio_news_matches" && method === "POST") {
       return jsonResponse(null, 201);
     }
     if (url.pathname === "/rest/v1/rpc/try_acquire_company_sentiment_lock" && method === "POST") {
+      return jsonResponse(true, 200);
+    }
+    if (url.pathname === "/rest/v1/rpc/apply_company_sentiment_batch" && method === "POST") {
       return jsonResponse(true, 200);
     }
     if (url.pathname === "/rest/v1/company_sentiment_lock" && method === "DELETE") {
@@ -196,11 +196,17 @@ describe("runNewsFanout sentiment pipeline (end-to-end over stubbed HTTP)", () =
 
     // Rolling row: mean(0.7, 0.3)=0.5 observed, EWMA over prior 0 with
     // alpha=0.35 → 0.175; cluster-id lists use the durable DB ids, fresh first.
-    const companyUpsert = captured.find(
-      (r) => r.pathname === "/rest/v1/company_sentiment" && r.method === "POST",
+    // The write goes through the lease-guarded RPC, not a plain upsert.
+    const companyApply = captured.find(
+      (r) => r.pathname === "/rest/v1/rpc/apply_company_sentiment_batch" && r.method === "POST",
     );
-    expect(companyUpsert).toBeDefined();
-    const companyRow = (companyUpsert!.body as Array<Record<string, unknown>>)[0];
+    expect(companyApply).toBeDefined();
+    const applyBody = companyApply!.body as {
+      p_holder: string;
+      p_rows: Array<Record<string, unknown>>;
+    };
+    expect(applyBody.p_holder).toEqual(expect.any(String));
+    const companyRow = applyBody.p_rows[0];
     expect(companyRow).toMatchObject({
       company_key: "ticker:ACME",
       company_name: "Acme Corp",
@@ -243,11 +249,11 @@ describe("runNewsFanout sentiment pipeline (end-to-end over stubbed HTTP)", () =
     // marked as scored, so it stays eligible for the next fanout run.
     expect(result.clustersScored).toBe(1);
     expect(result.companiesRescored).toBe(1);
-    const companyUpsert = captured.find(
-      (r) => r.pathname === "/rest/v1/company_sentiment" && r.method === "POST",
+    const companyApply = captured.find(
+      (r) => r.pathname === "/rest/v1/rpc/apply_company_sentiment_batch" && r.method === "POST",
     );
-    expect(companyUpsert).toBeDefined();
-    const companyRow = (companyUpsert!.body as Array<Record<string, unknown>>)[0];
+    expect(companyApply).toBeDefined();
+    const companyRow = (companyApply!.body as { p_rows: Array<Record<string, unknown>> }).p_rows[0];
     expect(companyRow).toMatchObject({ company_key: "ticker:ACME", score: 0.245, trend: "up" });
     expect((companyRow.scored_cluster_ids as Array<{ id: string }>).map((r) => r.id)).toEqual([
       "db-1",
