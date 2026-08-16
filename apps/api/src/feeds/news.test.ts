@@ -500,6 +500,81 @@ describe("runNewsFanout — ETF-derived market coverage", () => {
 
     expect(state.subrequestCount).toBeLessThanOrEqual(26);
   });
+
+  it("rotates market topics within the retry-aware remaining search capacity", async () => {
+    vi.useFakeTimers();
+    const start = Date.now();
+    state.holdings = [
+      ...Array.from({ length: 5 }, (_, i) => ({
+        id: `h-company-${i}`,
+        ticker: `C${i}`,
+        isin: null,
+        asset_type: "EQUITY",
+        name: `Company ${i}`,
+        quantity: 1,
+        portfolio_id: `portfolio-${i}`,
+      })),
+      {
+        id: "h-nasdaq",
+        ticker: "PUST.PA",
+        isin: null,
+        asset_type: "ETF",
+        name: "Amundi PEA NASDAQ-100 UCITS ETF",
+        quantity: 1,
+        portfolio_id: "portfolio-1",
+      },
+      {
+        id: "h-sp500",
+        ticker: "SPY",
+        isin: null,
+        asset_type: "ETF",
+        name: "S&P 500 ETF",
+        quantity: 1,
+        portfolio_id: "portfolio-1",
+      },
+      {
+        id: "h-asia",
+        ticker: "PAASI.PA",
+        isin: null,
+        asset_type: "ETF",
+        name: "Amundi MSCI Emerging Asia UCITS ETF",
+        quantity: 1,
+        portfolio_id: "portfolio-1",
+      },
+      {
+        id: "h-japan",
+        ticker: "PTPXH.PA",
+        isin: null,
+        asset_type: "ETF",
+        name: "Japan TOPIX ETF",
+        quantity: 1,
+        portfolio_id: "portfolio-1",
+      },
+    ];
+    installFetchMock(state, { exaStatus: 500 });
+
+    const topicQueries = new Set<string>();
+    const topicMarkers = ["Nasdaq", "S&P 500", "China and South Korea", "Japanese economy"];
+    try {
+      for (let runIndex = 0; runIndex < 3; runIndex++) {
+        state.searchQueries = [];
+        state.subrequestCount = 0;
+        vi.setSystemTime(start + runIndex * 3_600_000);
+        const run = runNewsFanout(env);
+        await vi.runAllTimersAsync();
+        const result = await run;
+
+        expect(result.marketTopicsQueried).toBe(3);
+        state.searchQueries
+          .filter((query) => topicMarkers.some((marker) => query.includes(marker)))
+          .forEach((query) => topicQueries.add(query));
+      }
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect(topicQueries.size).toBe(4);
+  });
 });
 
 const sentimentResult = {
@@ -662,13 +737,14 @@ function mockSentimentClient(
       if (fn === "enqueue_company_sentiment_pending") {
         const { p_rows } = args as { p_rows: Array<Record<string, unknown>> };
         for (const row of p_rows) {
-          if (
-            !pendingRows.some(
-              (pending) =>
-                pending.company_key === row.company_key && pending.cluster_id === row.cluster_id,
-            )
-          ) {
+          const existingIndex = pendingRows.findIndex(
+            (pending) =>
+              pending.company_key === row.company_key && pending.cluster_id === row.cluster_id,
+          );
+          if (existingIndex < 0) {
             pendingRows.push(row);
+          } else {
+            pendingRows[existingIndex] = { ...pendingRows[existingIndex], ...row };
           }
         }
         return { data: true, error: null };
@@ -848,12 +924,62 @@ describe("updateRollingCompanySentiment", () => {
     expect(pendingRows).toHaveLength(0);
   });
 
-  it("skips the DB entirely when there is nothing to update", async () => {
+  it("drains pending observations when the current fanout has no direct companies", async () => {
+    const pendingRows: Array<Record<string, unknown>> = [
+      {
+        company_key: "ticker:ACME",
+        cluster_id: "queued",
+        company_name: "Acme Corp",
+        ticker: "ACME",
+        isin: null,
+        score: 0.8,
+        rationale: "queued",
+        observed_at: new Date().toISOString(),
+      },
+    ];
+    const { client, applies } = mockSentimentClient([], { pendingRows });
+
+    const outcome = await updateRollingCompanySentiment(client, [], new Map());
+
+    expect(outcome).toEqual({ companiesRescored: 1, error: null });
+    expect(applies[0].rows[0]).toMatchObject({ company_key: "ticker:ACME", score: 0.8 });
+    expect(pendingRows).toHaveLength(0);
+  });
+
+  it("prefers a current observation over an older pending conflict", async () => {
+    const pendingRows: Array<Record<string, unknown>> = [
+      {
+        company_key: "ticker:ACME",
+        cluster_id: "cluster-1",
+        company_name: "Acme Corp",
+        ticker: "ACME",
+        isin: null,
+        score: -0.8,
+        rationale: "old",
+        observed_at: new Date(Date.now() - 3_600_000).toISOString(),
+      },
+    ];
+    const { client, applies } = mockSentimentClient([], { pendingRows });
+
+    const outcome = await updateRollingCompanySentiment(
+      client,
+      [{ clusterKey: "cluster-1", companyKey: "ticker:ACME", score: 0.8, rationale: "fresh" }],
+      companiesByKey,
+    );
+
+    expect(outcome).toEqual({ companiesRescored: 1, error: null });
+    expect(applies[0].rows[0]).toMatchObject({ company_key: "ticker:ACME", score: 0.8 });
+    expect(pendingRows).toHaveLength(0);
+  });
+
+  it("does not write when there is no input or pending work", async () => {
     const { client, applies, rpcCalls } = mockSentimentClient([]);
     const outcome = await updateRollingCompanySentiment(client, [], new Map());
     expect(outcome).toEqual({ companiesRescored: 0, error: null });
     expect(applies).toHaveLength(0);
-    expect(rpcCalls).toHaveLength(0);
+    expect(rpcCalls.map((call) => call.fn)).toEqual([
+      "try_acquire_company_sentiment_lock",
+    ]);
   });
 
   it("acquires and releases the update lock around a successful run", async () => {

@@ -277,6 +277,10 @@ class NewsSubrequestBudget {
     this.activeReservation = count;
   }
 
+  availableSearchSubrequests(): number {
+    return Math.max(0, NEWS_SUBREQUEST_BUDGET - this.used - this.reserved);
+  }
+
   async fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
     if (
       this.used >= NEWS_SUBREQUEST_BUDGET ||
@@ -922,10 +926,6 @@ export async function updateRollingCompanySentiment(
   idBackedSentiments: ClusterSentiment[],
   companiesByKey: Map<string, SentimentCompanyRef>,
 ): Promise<{ companiesRescored: number; error: string | null }> {
-  if (idBackedSentiments.length === 0 && companiesByKey.size === 0) {
-    return { companiesRescored: 0, error: null };
-  }
-
   const companyKeys = [
     ...new Set([...idBackedSentiments.map((s) => s.companyKey), ...companiesByKey.keys()]),
   ];
@@ -972,20 +972,32 @@ export async function updateRollingCompanySentiment(
 
       if (pendingError) throw new Error(pendingError.message);
 
+      if (
+        idBackedSentiments.length === 0 &&
+        companiesByKey.size === 0 &&
+        (pendingRows ?? []).length === 0
+      ) {
+        return { companiesRescored: 0, error: null };
+      }
+
       const readCompanyKeys = [
         ...new Set([
           ...companyKeys,
           ...(pendingRows ?? []).map((row: { company_key: string }) => row.company_key),
         ]),
       ];
-      const { data: priorRows, error: priorError } = await client
-        .from("company_sentiment")
-        .select(
-          "company_key, company_name, ticker, isin, score, trend, evidence_cluster_ids, scored_cluster_ids",
-        )
-        .in("company_key", readCompanyKeys);
+      let priorRows: unknown[] = [];
+      if (readCompanyKeys.length > 0) {
+        const { data, error: priorError } = await client
+          .from("company_sentiment")
+          .select(
+            "company_key, company_name, ticker, isin, score, trend, evidence_cluster_ids, scored_cluster_ids",
+          )
+          .in("company_key", readCompanyKeys);
 
-      if (priorError) throw new Error(priorError.message);
+        if (priorError) throw new Error(priorError.message);
+        priorRows = data ?? [];
+      }
 
       const now = Date.now();
       const activePendingRows = (pendingRows ?? []).filter(
@@ -1370,15 +1382,10 @@ export async function runNewsFanout(env: Env): Promise<{
     errors.push(`market work-list: ${msg}`);
   }
   const rotationNow = Date.now();
-  const marketEntries = selectRotatingWindow(
-    [...marketList.values()].sort((a, b) =>
-      a.canonicalKey < b.canonicalKey ? -1 : a.canonicalKey > b.canonicalKey ? 1 : 0,
-    ),
-    MAX_MARKET_TOPICS,
-    rotationNow,
+  const marketCandidates = [...marketList.values()].sort((a, b) =>
+    a.canonicalKey < b.canonicalKey ? -1 : a.canonicalKey > b.canonicalKey ? 1 : 0,
   );
-  // Drop capped-away entries so later match/dedup phases can't reference them.
-  marketList = new Map(marketEntries.map((e) => [e.canonicalKey, e]));
+  let marketEntries: MarketEntry[] = [];
 
   const allCompanies = [...workList.values()].sort((a, b) =>
     a.canonicalKey < b.canonicalKey ? -1 : a.canonicalKey > b.canonicalKey ? 1 : 0,
@@ -1388,6 +1395,8 @@ export async function runNewsFanout(env: Env): Promise<{
   const startPublishedDate = new Date(Date.now() - NEWS_WINDOW_MS).toISOString();
   const userLocation = deriveUserLocation(workList);
   budget.reserve(MAX_POST_SEARCH_SUBREQUESTS);
+  const marketSearchReservation = marketCandidates.length > 0 ? MAX_RETRIES : 0;
+  if (marketSearchReservation > 0) budget.reserve(marketSearchReservation);
 
   // --- Phase 1: FETCH — collect results, no DB writes (N..2N+M subrequests) --
   const pendingClusters = new Map<string, PendingCluster>();
@@ -1549,6 +1558,22 @@ export async function runNewsFanout(env: Env): Promise<{
     }
   });
 
+  const marketSearchLimit = Math.min(
+    MAX_MARKET_TOPICS,
+    Math.floor(
+      (budget.availableSearchSubrequests() + marketSearchReservation) / MAX_RETRIES,
+    ),
+  );
+  marketEntries = selectRotatingWindow(marketCandidates, marketSearchLimit, rotationNow);
+  // Drop capped-away entries so later match/dedup phases can't reference them.
+  marketList = new Map(marketEntries.map((e) => [e.canonicalKey, e]));
+
+  const marketSearchSlots = marketEntries.length * MAX_RETRIES;
+  if (marketSearchSlots > marketSearchReservation) {
+    budget.reserve(marketSearchSlots - marketSearchReservation);
+  }
+  if (marketSearchSlots > 0) budget.activateReservation(marketSearchSlots);
+
   // Market-topic searches (M subrequests) — premium allowlist only. Macro/market
   // coverage is dense there, so no secondary tier: keeps the budget deterministic.
   await runWithConcurrency(marketEntries, FETCH_CONCURRENCY, async (entry) => {
@@ -1570,7 +1595,6 @@ export async function runNewsFanout(env: Env): Promise<{
     }
   });
   budget.activateReservation(MAX_POST_SEARCH_SUBREQUESTS);
-
   // Collapse same-story duplicates across sources (keep best source tier).
   const queryByKey = new Map<string, string>();
   for (const [key, entry] of workList) queryByKey.set(key, entry.query);

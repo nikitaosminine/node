@@ -49,10 +49,6 @@ alter table public.company_sentiment enable row level security;
 
 drop policy if exists "Authenticated users can read company sentiment"
   on public.company_sentiment;
-create policy "Authenticated users can read company sentiment"
-  on public.company_sentiment for select
-  to authenticated
-  using (true);
 
 drop policy if exists "Service role can manage company sentiment"
   on public.company_sentiment;
@@ -130,17 +126,29 @@ begin
   select
     r.company_key, r.cluster_id, r.company_name, r.ticker, r.isin,
     r.score, r.rationale, r.observed_at
-  from jsonb_to_recordset(p_rows) as r(
-    company_key text,
-    cluster_id text,
-    company_name text,
-    ticker text,
-    isin text,
-    score numeric,
-    rationale text,
-    observed_at timestamptz
-  )
-  on conflict (company_key, cluster_id) do nothing;
+  from (
+    select distinct on (raw.company_key, raw.cluster_id)
+      raw.company_key, raw.cluster_id, raw.company_name, raw.ticker,
+      raw.isin, raw.score, raw.rationale, raw.observed_at
+    from jsonb_to_recordset(p_rows) as raw(
+      company_key text,
+      cluster_id text,
+      company_name text,
+      ticker text,
+      isin text,
+      score numeric,
+      rationale text,
+      observed_at timestamptz
+    )
+    order by raw.company_key, raw.cluster_id, raw.observed_at desc nulls last
+  ) as r
+  on conflict (company_key, cluster_id) do update
+    set company_name = excluded.company_name,
+        ticker = excluded.ticker,
+        isin = excluded.isin,
+        score = excluded.score,
+        rationale = excluded.rationale,
+        observed_at = excluded.observed_at;
 
   return true;
 end;
