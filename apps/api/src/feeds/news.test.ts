@@ -725,6 +725,7 @@ function mockSentimentClient(
   const applies: Array<{ rows: Array<Record<string, unknown>>; holder: unknown }> = [];
   const rpcCalls: Array<{ fn: string; args: unknown }> = [];
   const lockReleases: Array<{ holder: unknown }> = [];
+  const companyReadKeys: string[][] = [];
   const lockAcquired = opts.lockAcquired ?? true;
   const applyAccepted = opts.applyAccepted ?? true;
   const lockSequence = [...(opts.lockSequence ?? [])];
@@ -809,13 +810,16 @@ function mockSentimentClient(
       }
       return {
         select: () => ({
-          in: async () => ({ data: priorRows, error: null }),
+          in: async (_column: string, keys: string[]) => {
+            companyReadKeys.push(keys);
+            return { data: priorRows, error: null };
+          },
         }),
       };
     },
   };
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  return { client: client as any, applies, rpcCalls, lockReleases };
+  return { client: client as any, applies, rpcCalls, lockReleases, companyReadKeys };
 }
 
 describe("updateRollingCompanySentiment", () => {
@@ -1073,5 +1077,31 @@ describe("updateRollingCompanySentiment", () => {
     expect(secondOutcome).toEqual({ companiesRescored: 1, error: null });
     expect(second.applies).toHaveLength(1);
     expect(pendingRows).toHaveLength(0);
+  });
+
+  it("reads only the provided scored-company scope", async () => {
+    const allCompanies = new Map(companiesByKey);
+    allCompanies.set("ticker:BETA", {
+      canonicalKey: "ticker:BETA",
+      name: "Beta Corp",
+      tickers: ["BETA"],
+      isins: [],
+    });
+    const { client, companyReadKeys } = mockSentimentClient([
+      {
+        company_key: "ticker:ACME",
+        score: 0,
+        evidence_cluster_ids: [],
+        scored_cluster_ids: [],
+      },
+    ]);
+
+    await updateRollingCompanySentiment(
+      client,
+      [{ clusterKey: "cluster-1", companyKey: "ticker:ACME", score: 0.7, rationale: "fresh" }],
+      new Map([["ticker:ACME", allCompanies.get("ticker:ACME")!]]),
+    );
+
+    expect(companyReadKeys).toEqual([["ticker:ACME"]]);
   });
 });

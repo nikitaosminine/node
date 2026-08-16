@@ -53,6 +53,7 @@ function stubFanoutHttp(options: {
   grokStatus: number;
   grokScores?: Array<{ i: number; sentiment: number; rationale: string }>;
   multiCompany?: boolean;
+  clusterPreReadStatus?: number;
 }) {
   const captured: CapturedRequest[] = [];
   let nextClusterId = 1;
@@ -143,6 +144,9 @@ function stubFanoutHttp(options: {
       );
     }
     if (url.pathname === "/rest/v1/news_clusters" && method === "GET") {
+      if (options.clusterPreReadStatus && options.clusterPreReadStatus !== 200) {
+        return jsonResponse({ message: "cluster pre-read failed" }, options.clusterPreReadStatus);
+      }
       return jsonResponse([]);
     }
     if (url.pathname === "/rest/v1/news_clusters" && method === "POST") {
@@ -341,13 +345,10 @@ describe("runNewsFanout sentiment pipeline (end-to-end over stubbed HTTP)", () =
     }
 
     expect(
-      captured.some((r) => r.pathname === "/rest/v1/company_sentiment" && r.method === "GET"),
-    ).toBe(true);
-    expect(
-      captured.find(
+      captured.some(
         (r) => r.pathname === "/rest/v1/rpc/apply_company_sentiment_batch" && r.method === "POST",
-      )?.body,
-    ).toMatchObject({ p_rows: [] });
+      ),
+    ).toBe(false);
   });
 
   it("does not fold the answered member of a partially answered cluster into EWMA", async () => {
@@ -364,9 +365,22 @@ describe("runNewsFanout sentiment pipeline (end-to-end over stubbed HTTP)", () =
     expect(result.companiesRescored).toBe(0);
     expect(clusterUpsertRows(captured)[0]).not.toHaveProperty("sentiments");
     expect(
-      captured.find(
+      captured.some(
         (r) => r.pathname === "/rest/v1/rpc/apply_company_sentiment_batch" && r.method === "POST",
-      )?.body,
-    ).toMatchObject({ p_rows: [] });
+      ),
+    ).toBe(false);
+  });
+
+  it("preserves stored sentiments when the cluster pre-read fails", async () => {
+    const { captured } = stubFanoutHttp({ grokStatus: 200, clusterPreReadStatus: 500 });
+
+    const result = await runNewsFanout(env);
+
+    expect(result.clustersUpserted).toBe(2);
+    expect(result.matchesUpserted).toBe(2);
+    expect(result.errors).toContain("cluster entities pre-read: cluster pre-read failed");
+    for (const row of clusterUpsertRows(captured)) {
+      expect(row).not.toHaveProperty("sentiments");
+    }
   });
 });

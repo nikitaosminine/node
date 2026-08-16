@@ -1640,6 +1640,7 @@ export async function runNewsFanout(env: Env): Promise<{
   // next run's pre-read, and a DB-side jsonb merge would need a new RPC/trigger
   // migration that this feature deliberately avoids.
   const existingSentimentsByClusterKey = new Map<string, unknown[]>();
+  let sentimentPreReadFailed = false;
   const companiesByKey = new Map<string, SentimentCompanyRef>();
   for (const [companyKey, entry] of workList) {
     const holderTickers = new Set<string>();
@@ -1661,6 +1662,7 @@ export async function runNewsFanout(env: Env): Promise<{
       .select("cluster_key,entities,sentiments")
       .in("cluster_key", survivors.map((p) => p.result.id ?? p.result.url!));
     if (preReadError) {
+      sentimentPreReadFailed = true;
       errors.push(`cluster entities pre-read: ${preReadError.message}`);
       console.error("[news] cluster entities pre-read failed:", preReadError.message);
     }
@@ -1737,7 +1739,7 @@ export async function runNewsFanout(env: Env): Promise<{
       [...p.tickers],
       [...p.isins],
       summaryByUrl.get(p.result.url!) ?? "",
-      resolvedSentiments,
+      sentimentPreReadFailed ? null : resolvedSentiments,
       companiesByKey,
       [...p.countries],
       [...p.sectors],
@@ -1795,10 +1797,15 @@ export async function runNewsFanout(env: Env): Promise<{
     },
   );
 
+  const sentimentCompaniesByKey = new Map<string, SentimentCompanyRef>();
+  for (const sentiment of idBackedSentiments) {
+    const ref = companiesByKey.get(sentiment.companyKey);
+    if (ref) sentimentCompaniesByKey.set(sentiment.companyKey, ref);
+  }
   const { companiesRescored, error: companySentimentError } = await updateRollingCompanySentiment(
     client,
     idBackedSentiments,
-    companiesByKey,
+    sentimentCompaniesByKey,
   );
   if (companySentimentError) errors.push(`company sentiment: ${companySentimentError}`);
 

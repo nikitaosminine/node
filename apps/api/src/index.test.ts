@@ -6,7 +6,7 @@ vi.mock("@supabase/supabase-js", () => ({
   createClient: vi.fn(() => ({ from: dbFrom })),
 }));
 
-import { researchPortfolioEtfGeography, type Env } from "./index";
+import { researchPortfolioEtfGeography, type Env, withInvocationSubrequestBudget } from "./index";
 
 const env = {
   SUPABASE_URL: "https://supabase.example",
@@ -192,5 +192,24 @@ describe("researchPortfolioEtfGeography re-research", () => {
     ]);
     expect(db.allocationDeletes).toEqual(["holding-vwce"]);
     expect(db.allocationInserts).toEqual([]);
+  });
+});
+
+describe("withInvocationSubrequestBudget", () => {
+  it("counts fetches shared by all scheduled fanouts", async () => {
+    const fetchMock = vi.fn(async () => new Response(null, { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await withInvocationSubrequestBudget(async () => {
+      for (let i = 0; i < 50; i++) {
+        await fetch("https://example.test");
+      }
+      await expect(fetch("https://example.test")).rejects.toThrow(
+        "scheduled invocation subrequest budget exhausted",
+      );
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(50);
+    expect(globalThis.fetch).toBe(fetchMock);
   });
 });

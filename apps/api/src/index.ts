@@ -86,6 +86,28 @@ function json(body: unknown, status = 200): Response {
   return Response.json(body, { status, headers: CORS_HEADERS });
 }
 
+const INVOCATION_SUBREQUEST_BUDGET = 50;
+
+export async function withInvocationSubrequestBudget<T>(work: () => Promise<T>): Promise<T> {
+  const originalFetch = globalThis.fetch;
+  const nativeFetch = originalFetch.bind(globalThis);
+  let used = 0;
+  const guardedFetch: typeof globalThis.fetch = async (input, init) => {
+    if (used >= INVOCATION_SUBREQUEST_BUDGET) {
+      throw new Error("scheduled invocation subrequest budget exhausted");
+    }
+    used++;
+    return nativeFetch(input, init);
+  };
+
+  globalThis.fetch = guardedFetch;
+  try {
+    return await work();
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+}
+
 // Deterministic UUID from a stable input string (SHA-256 → UUID format).
 // Used to give LangSmith feedback an idempotent feedbackId: the same
 // (run, user, slide) always maps to the same UUID, so re-votes UPSERT the
@@ -5850,56 +5872,58 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
     return json({ error: "Not found" }, 404);
   },
   async scheduled(controller: ScheduledController, env: Env, _ctx: ExecutionContext): Promise<void> {
-    try {
-      await runScheduledFanout(env, {
-        now: new Date(controller.scheduledTime),
-        source: "cron",
-      });
-    } catch (error) {
-      console.error("scheduled fanout failed", error);
-    }
-    try {
-      await enqueueDailySnapshotsForClosedMarkets(env, controller.scheduledTime);
-    } catch (error) {
-      console.error("daily snapshot fanout failed", error);
-    }
-    // News fanout — decoupled from the hourly cron to a few times/day to cut Exa
-    // spend. Runs only on these cron slots (not the hourly "5 * * * *"): weekday
-    // morning, afternoon, and evening. Manual runs go via /api/_debug/run-news-fanout.
-    const NEWS_CRON_SLOTS = new Set(["30 6 * * 2-6", "30 16 * * 1-5", "0 21 * * 1-5"]);
-    if (NEWS_CRON_SLOTS.has(controller.cron)) {
+    return withInvocationSubrequestBudget(async () => {
       try {
-        await runNewsFanout(env);
+        await runScheduledFanout(env, {
+          now: new Date(controller.scheduledTime),
+          source: "cron",
+        });
       } catch (error) {
-        console.error("news fanout failed", error);
+        console.error("scheduled fanout failed", error);
       }
-    }
-    try {
-      await runPolymarketFanout(env);
-    } catch (error) {
-      console.error("polymarket fanout failed", error);
-    }
-    // Weekly recap fanout — rides the hourly cron; fires for portfolios where
-    // it is Saturday 08:00 in the user's tz. Daily recaps are chained off the
-    // snapshot commit in queue(), not here.
-    if (controller.cron === "5 * * * *") {
       try {
-        await runWeeklyRecapFanout(env, { now: new Date(controller.scheduledTime) });
+        await enqueueDailySnapshotsForClosedMarkets(env, controller.scheduledTime);
       } catch (error) {
-        console.error("weekly recap fanout failed", error);
+        console.error("daily snapshot fanout failed", error);
       }
-      // Monthly ETF geography refresh — piggybacks on the hourly cron on the
-      // first of each month at UTC midnight (fires at 00:05). Re-researches all
-      // ETF holdings across all portfolios to pick up index rebalancing changes.
-      const scheduledDate = new Date(controller.scheduledTime);
-      if (scheduledDate.getUTCDate() === 1 && scheduledDate.getUTCHours() === 0) {
+      // News fanout — decoupled from the hourly cron to a few times/day to cut Exa
+      // spend. Runs only on these cron slots (not the hourly "5 * * * *"): weekday
+      // morning, afternoon, and evening. Manual runs go via /api/_debug/run-news-fanout.
+      const NEWS_CRON_SLOTS = new Set(["30 6 * * 2-6", "30 16 * * 1-5", "0 21 * * 1-5"]);
+      if (NEWS_CRON_SLOTS.has(controller.cron)) {
         try {
-          await runGeographyMonthlyRefresh(env);
+          await runNewsFanout(env);
         } catch (error) {
-          console.error("monthly geography refresh failed", error);
+          console.error("news fanout failed", error);
         }
       }
-    }
+      try {
+        await runPolymarketFanout(env);
+      } catch (error) {
+        console.error("polymarket fanout failed", error);
+      }
+      // Weekly recap fanout — rides the hourly cron; fires for portfolios where
+      // it is Saturday 08:00 in the user's tz. Daily recaps are chained off the
+      // snapshot commit in queue(), not here.
+      if (controller.cron === "5 * * * *") {
+        try {
+          await runWeeklyRecapFanout(env, { now: new Date(controller.scheduledTime) });
+        } catch (error) {
+          console.error("weekly recap fanout failed", error);
+        }
+        // Monthly ETF geography refresh — piggybacks on the hourly cron on the
+        // first of each month at UTC midnight (fires at 00:05). Re-researches all
+        // ETF holdings across all portfolios to pick up index rebalancing changes.
+        const scheduledDate = new Date(controller.scheduledTime);
+        if (scheduledDate.getUTCDate() === 1 && scheduledDate.getUTCHours() === 0) {
+          try {
+            await runGeographyMonthlyRefresh(env);
+          } catch (error) {
+            console.error("monthly geography refresh failed", error);
+          }
+        }
+      }
+    });
   },
   async queue(batch: MessageBatch<WorkerQueueMessage>, env: Env): Promise<void> {
     for (const message of batch.messages) {
