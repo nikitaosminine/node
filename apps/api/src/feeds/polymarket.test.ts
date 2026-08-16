@@ -7,12 +7,16 @@ vi.mock("@supabase/supabase-js", () => ({
 }));
 
 import {
+  EXCLUDE_TAG_IDS,
+  MIN_LIQUIDITY_USD,
   NON_FINANCIAL_RE,
   TAG_IDS,
   buildPortfolioProfile,
   enqueueEtfConstituentsEnrichment,
   fetchCandidateMarkets,
   invokePolymarketGrok,
+  isBelowLiquidityFloor,
+  isEligibleMarket,
   isNearCertainMarket,
   isShortTermMarket,
   runPolymarketFanout,
@@ -40,10 +44,10 @@ function gammaEvent(conditionId = "0xmarket", eventId = "event-1", eventSlug = "
         question: "Will the Fed cut rates in 2026?",
         outcomes: '["Yes","No"]',
         outcomePrices: '["0.55","0.45"]',
-        liquidity: 1000,
+        liquidity: 5000,
         volume24hr: 500,
         startDate: "2026-01-01T00:00:00Z",
-        endDate: "2026-12-31T00:00:00Z",
+        endDate: "2027-12-31T00:00:00Z",
         active: true,
       },
     ],
@@ -105,54 +109,145 @@ describe("isNearCertainMarket", () => {
   });
 });
 
+describe("isBelowLiquidityFloor", () => {
+  it("flags markets below the $2,000 liquidity floor", () => {
+    expect(isBelowLiquidityFloor(1999)).toBe(true);
+    expect(isBelowLiquidityFloor(333)).toBe(true);
+  });
+
+  it("keeps markets at or above the floor", () => {
+    expect(isBelowLiquidityFloor(MIN_LIQUIDITY_USD)).toBe(false);
+    expect(isBelowLiquidityFloor(5000)).toBe(false);
+  });
+
+  it("rejects markets with missing or invalid liquidity", () => {
+    expect(isBelowLiquidityFloor(null)).toBe(true);
+    expect(isBelowLiquidityFloor(undefined)).toBe(true);
+    expect(isBelowLiquidityFloor("not-a-number")).toBe(true);
+  });
+});
+
+describe("isEligibleMarket", () => {
+  const now = new Date("2026-08-16T00:00:00Z");
+  const baseMarket = {
+    start_date: "2026-01-01T00:00:00Z",
+    end_date: "2026-12-31T00:00:00Z",
+    outcome_prices: [0.55, 0.45],
+    liquidity: 5000,
+  };
+
+  it("accepts a market passing every check", () => {
+    expect(isEligibleMarket(baseMarket, now)).toBe(true);
+  });
+
+  it("rejects a market whose end_date has already passed", () => {
+    expect(isEligibleMarket({ ...baseMarket, end_date: "2026-01-01T00:00:00Z" }, now)).toBe(false);
+  });
+
+  it("rejects a short-duration market", () => {
+    expect(
+      isEligibleMarket(
+        { ...baseMarket, start_date: "2026-08-01T00:00:00Z", end_date: "2026-08-05T00:00:00Z" },
+        now,
+      ),
+    ).toBe(false);
+  });
+
+  it("rejects a near-certain market", () => {
+    expect(isEligibleMarket({ ...baseMarket, outcome_prices: [0.98, 0.02] }, now)).toBe(false);
+  });
+
+  it("rejects a market below the liquidity floor", () => {
+    expect(isEligibleMarket({ ...baseMarket, liquidity: 333 }, now)).toBe(false);
+  });
+
+  it("rejects markets with missing or invalid required metadata", () => {
+    expect(
+      isEligibleMarket(
+        { start_date: null, end_date: null, outcome_prices: null, liquidity: null },
+        now,
+      ),
+    ).toBe(false);
+    expect(isEligibleMarket({ ...baseMarket, end_date: "not-a-date" }, now)).toBe(false);
+    expect(isEligibleMarket({ ...baseMarket, liquidity: "not-a-number" }, now)).toBe(false);
+  });
+});
+
 describe("category endpoint filter application", () => {
   // Mirrors the filter chain applied post-query in the
-  // GET /api/polymarket/category handler in index.ts.
+  // GET /api/polymarket/category handler in index.ts: the slimmed
+  // NON_FINANCIAL_RE backstop plus the shared isEligibleMarket gate.
   function applyCategoryFilters(
     markets: Array<{
       question: string;
       start_date: string | null;
       end_date: string | null;
       outcome_prices: number[];
+      liquidity: number | null;
     }>,
   ) {
     return markets
       .filter((m) => !NON_FINANCIAL_RE.test(m.question ?? ""))
-      .filter((m) => !isShortTermMarket(m.start_date, m.end_date))
-      .filter((m) => !isNearCertainMarket(m.outcome_prices));
+      .filter((m) => isEligibleMarket(m));
   }
 
-  it("drops short-duration, near-certain, and non-financial markets while keeping normal ones", () => {
+  it("drops short-duration, near-certain, illiquid, and non-financial markets while keeping normal ones", () => {
     const markets = [
       {
         question: "Will MSFT close $440-$450 this week?",
-        start_date: "2026-01-01T00:00:00Z",
-        end_date: "2026-01-05T00:00:00Z",
+        start_date: "2027-01-01T00:00:00Z",
+        end_date: "2027-01-05T00:00:00Z",
         outcome_prices: [0.5, 0.5],
+        liquidity: 5000,
       },
       {
-        question: "Will the Fed cut rates in 2026?",
-        start_date: "2026-01-01T00:00:00Z",
-        end_date: "2026-12-31T00:00:00Z",
+        question: "Will the Fed cut rates in 2027?",
+        start_date: "2027-01-01T00:00:00Z",
+        end_date: "2027-12-31T00:00:00Z",
         outcome_prices: [0.99, 0.01],
+        liquidity: 5000,
       },
       {
         question: "Will the Super Bowl champion be decided by field goal?",
-        start_date: "2026-01-01T00:00:00Z",
-        end_date: "2026-12-31T00:00:00Z",
+        start_date: "2027-01-01T00:00:00Z",
+        end_date: "2027-12-31T00:00:00Z",
         outcome_prices: [0.5, 0.5],
+        liquidity: 5000,
+      },
+      {
+        question: "Will an AI-arena model be the top performer this month?",
+        start_date: "2027-01-01T00:00:00Z",
+        end_date: "2027-03-01T00:00:00Z",
+        outcome_prices: [0.6, 0.4],
+        liquidity: 500,
       },
       {
         question: "Will EWY close above $60 in May?",
-        start_date: "2026-01-01T00:00:00Z",
-        end_date: "2026-02-01T00:00:00Z",
+        start_date: "2027-01-01T00:00:00Z",
+        end_date: "2027-02-01T00:00:00Z",
         outcome_prices: [0.6, 0.4],
+        liquidity: 5000,
       },
     ];
 
     const filtered = applyCategoryFilters(markets);
 
     expect(filtered.map((m) => m.question)).toEqual(["Will EWY close above $60 in May?"]);
+  });
+});
+
+describe("TAG_IDS", () => {
+  it("drops politics and stocks, keeping business ingested with no dedicated tab", () => {
+    expect(TAG_IDS).not.toHaveProperty("politics");
+    expect(TAG_IDS).not.toHaveProperty("stocks");
+    expect(TAG_IDS).toMatchObject({
+      geopolitics: 100265,
+      economy: 100328,
+      finance: 120,
+      crypto: 21,
+      business: 107,
+      tech: 1401,
+    });
   });
 });
 
@@ -179,6 +274,9 @@ describe("fetchCandidateMarkets", () => {
       expect(url.searchParams.get("order")).toBe("volume24hr");
       expect(url.searchParams.get("active")).toBe("true");
       expect(url.searchParams.get("closed")).toBe("false");
+      expect(url.searchParams.getAll("exclude_tag_id").sort()).toEqual(
+        Object.values(EXCLUDE_TAG_IDS).map(String).sort(),
+      );
     }
   });
 
@@ -199,6 +297,47 @@ describe("fetchCandidateMarkets", () => {
 
     await expect(runPolymarketFanout(env)).rejects.toThrow("Gamma candidate pool is empty");
     expect(dbFrom).not.toHaveBeenCalled();
+  });
+
+  it("does not let an ineligible market enter the fanout candidate pool", async () => {
+    dbFrom.mockImplementation((table: string) => {
+      if (table === "polymarket_markets") {
+        return {
+          upsert: vi.fn().mockResolvedValue({ error: null }),
+          update: vi.fn(() => ({
+            eq: vi.fn(() => ({
+              or: vi.fn(() => ({
+                select: vi.fn().mockResolvedValue({ data: [], error: null }),
+              })),
+            })),
+          })),
+        };
+      }
+      if (table === "portfolios") {
+        return {
+          select: vi.fn().mockResolvedValue({ data: [], error: null }),
+        };
+      }
+      throw new Error(`Unexpected table: ${table}`);
+    });
+
+    const ineligibleEvent = gammaEvent();
+    ineligibleEvent.markets[0].liquidity = 333;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify([ineligibleEvent]), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          }),
+      ),
+    );
+
+    await expect(runPolymarketFanout(env)).rejects.toThrow(
+      "no eligible rotating candidates remained",
+    );
+    expect(dbFrom).toHaveBeenCalledWith("portfolios");
   });
 });
 

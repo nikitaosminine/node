@@ -2,9 +2,9 @@ import { describe, expect, it, vi } from "vitest";
 
 // Exercise the real Worker fetch handler for GET /api/polymarket/category with
 // a stubbed auth context and Supabase query builder, so the test proves the
-// endpoint itself applies the NON_FINANCIAL_RE / isShortTermMarket /
-// isNearCertainMarket filter chain (not just that the helpers work in
-// isolation).
+// endpoint itself applies the NON_FINANCIAL_RE backstop plus the shared
+// isEligibleMarket gate (end_date/duration/near-certain/liquidity) — not just
+// that the helpers work in isolation.
 
 vi.mock("@supabase/supabase-js", () => ({
   createClient: vi.fn(),
@@ -64,10 +64,10 @@ function marketRow(overrides: Record<string, unknown>) {
     tags: [{ id: 100328 }],
     outcomes: ["Yes", "No"],
     outcome_prices: [0.6, 0.4],
-    liquidity: 1000,
+    liquidity: 5000,
     volume_24hr: 500,
     start_date: "2026-01-01T00:00:00Z",
-    end_date: "2026-12-31T00:00:00Z",
+    end_date: "2027-12-31T00:00:00Z",
     image: null,
     active: true,
     fetched_at: "2026-08-01T00:00:00Z",
@@ -92,6 +92,11 @@ describe("GET /api/polymarket/category", () => {
       marketRow({
         condition_id: "non-financial",
         question: "Will the Super Bowl champion be decided by field goal?",
+      }),
+      marketRow({
+        condition_id: "illiquid",
+        question: "Will an AI-arena model be the top performer this month?",
+        liquidity: 333,
       }),
       marketRow({
         condition_id: "keeper",

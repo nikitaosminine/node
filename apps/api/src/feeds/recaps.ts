@@ -41,6 +41,7 @@ import type {
   Direction,
 } from "./recap-types";
 import { NEWS_INCLUDE_DOMAINS, NEWS_INCLUDE_DOMAINS_SECONDARY } from "./news";
+import { isEligibleMarket, type MarketEligibilityInput } from "./polymarket";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnySupabaseClient = SupabaseClient<any, any, any>;
@@ -60,6 +61,17 @@ interface Env {
   LANGSMITH_ENDPOINT?: string;
   // Required for org-scoped API keys (sent as x-tenant-id).
   LANGSMITH_WORKSPACE_ID?: string;
+}
+
+export interface PolymarketWatchRow {
+  polymarket_markets?: MarketEligibilityInput | null;
+}
+
+export function filterEligiblePolymarketWatchRows<T extends PolymarketWatchRow>(
+  rows: T[],
+  now: Date = new Date(),
+): T[] {
+  return rows.filter((row) => isEligibleMarket(row.polymarket_markets ?? {}, now)).slice(0, 5);
 }
 
 function db(env: Env): AnySupabaseClient {
@@ -106,7 +118,11 @@ function directionOf(x: number): Direction {
   return "flat";
 }
 
-async function mapLimit<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+async function mapLimit<T, R>(
+  items: T[],
+  limit: number,
+  fn: (item: T) => Promise<R>,
+): Promise<R[]> {
   const out: R[] = new Array(items.length);
   let i = 0;
   async function worker() {
@@ -135,7 +151,9 @@ function toDateStr(d: Date): string {
 }
 
 async function fetchYahooSeries(symbol: string, fromMs: number): Promise<YahooSeries> {
-  const url = new URL(`https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}`);
+  const url = new URL(
+    `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}`,
+  );
   url.searchParams.set("period1", String(Math.floor(fromMs / 1000)));
   url.searchParams.set("period2", String(Math.floor(Date.now() / 1000)));
   url.searchParams.set("interval", "1d");
@@ -276,7 +294,9 @@ async function exaSearch(
         await sleep(350 * attempt);
         continue;
       }
-      console.warn(`[exa] fetch threw after ${attempt} attempts: ${err instanceof Error ? err.message : String(err)}`);
+      console.warn(
+        `[exa] fetch threw after ${attempt} attempts: ${err instanceof Error ? err.message : String(err)}`,
+      );
       return { results: [], status: "error" };
     }
   }
@@ -315,7 +335,7 @@ interface GatheredContext {
   type: RecapType;
   periodLabel: string; // "today" | "this week"
   periodStart: string; // recap.period_start (YYYY-MM-DD) — anchors the news window
-  periodEnd: string;   // recap.period_end   (YYYY-MM-DD)
+  periodEnd: string; // recap.period_end   (YYYY-MM-DD)
   // performance
   returnPct: number;
   portfolioSeries: Array<{ date: string; close: number }>;
@@ -350,7 +370,7 @@ interface RecapRowLite {
 // Step 1+2: gather facts + retrieve narrative
 // ---------------------------------------------------------------------------
 
-async function gatherContext(
+export async function gatherContext(
   env: Env,
   recap: RecapRowLite,
 ): Promise<GatheredContext | null> {
@@ -413,7 +433,10 @@ async function gatherContext(
     let best: number | null = null;
     let bestDate = "";
     for (const [d, p] of dateMap.entries()) {
-      if (d <= dateStr && d > bestDate) { bestDate = d; best = p; }
+      if (d <= dateStr && d > bestDate) {
+        bestDate = d;
+        best = p;
+      }
     }
     return best;
   }
@@ -479,9 +502,9 @@ async function gatherContext(
     if (contribution < 0 && (!loser || contribution < loser.contribution)) loser = info;
   }
   const dominantMover =
-    [gainer, loser].filter((m): m is MoverInfo => m != null).sort(
-      (a, b) => Math.abs(b.contribution) - Math.abs(a.contribution),
-    )[0] ?? null;
+    [gainer, loser]
+      .filter((m): m is MoverInfo => m != null)
+      .sort((a, b) => Math.abs(b.contribution) - Math.abs(a.contribution))[0] ?? null;
 
   const { data: savedBenchmarks } = await client
     .from("saved_benchmarks")
@@ -495,7 +518,9 @@ async function gatherContext(
           ticker: String(b.ticker).toUpperCase(),
           // Collapse stray whitespace in user-entered benchmark names so the
           // chart axis label is clean (e.g. "EURO STOXX 50      I").
-          label: String(b.name ?? b.ticker).replace(/\s+/g, " ").trim(),
+          label: String(b.name ?? b.ticker)
+            .replace(/\s+/g, " ")
+            .trim(),
         }))
       : (EXCHANGE_INDEX_DEFAULTS[primaryExchange] ?? []);
 
@@ -509,28 +534,35 @@ async function gatherContext(
     .filter((x): x is { label: string; changePct: number } => x.changePct != null);
 
   // --- watch (slide 4): top portfolio-relevant Polymarket markets ---
-  // Select by relevance (is_pinned then score) — drop the near-term end_date
-  // filter that was excluding the portfolio's highest-relevance markets
-  // (Fed rate hike 0.82, no rate cuts 0.80, inflation 0.72, recession 0.68…
-  // all Dec-2026 end dates). Keep end_date only as context "by when".
-  const { data: watchRows } = await client
+  // Select by relevance (is_pinned then score), then apply the same shared
+  // isEligibleMarket gate as the fanout candidate path and the category
+  // endpoint (design doc 1A-122 P3) — end_date > now, duration >= 14d,
+  // near-certain < 0.97, liquidity >= $2k. Over-fetch since some rows will
+  // be filtered out post-query.
+  const { data: watchRowsRaw } = await client
     .from("portfolio_polymarket_matches")
     .select(
       `is_pinned, score,
-       polymarket_markets!inner(question, event_slug, outcome_prices, end_date, active)`,
+       polymarket_markets!inner(question, event_slug, outcome_prices, end_date, start_date, liquidity, active)`,
     )
     .eq("portfolio_id", recap.portfolio_id)
     .eq("polymarket_markets.active", true)
-    .gte("polymarket_markets.end_date", new Date().toISOString())
     .order("is_pinned", { ascending: false })
     .order("score", { ascending: false, nullsFirst: false })
-    .limit(5);
+    .limit(20);
+
+  const watchRows = filterEligiblePolymarketWatchRows(
+    (watchRowsRaw ?? []) as unknown as PolymarketWatchRow[],
+  );
 
   // Geography exposure for the watch prompt (US% and notable ETFs).
   const { data: geoRows } = await client
     .from("holding_geography_allocations")
     .select("country_code,weight_pct,holding_id")
-    .in("holding_id", holdingRows?.map((h: { id?: string }) => String(h.id ?? "")).filter(Boolean) ?? []);
+    .in(
+      "holding_id",
+      holdingRows?.map((h: { id?: string }) => String(h.id ?? "")).filter(Boolean) ?? [],
+    );
 
   // Compute US % of the total securities weight (sum of all geo allocations).
   let totalGeoWeight = 0;
@@ -584,9 +616,10 @@ async function gatherContext(
 // ---------------------------------------------------------------------------
 
 function buildLlmSchema(type: RecapType): GeminiSchema {
-  const kindEnum = type === "daily"
-    ? ["performance", "macro", "mover"]
-    : ["performance", "macro", "mover", "watch"];
+  const kindEnum =
+    type === "daily"
+      ? ["performance", "macro", "mover"]
+      : ["performance", "macro", "mover", "watch"];
   return {
     type: "OBJECT",
     properties: {
@@ -640,10 +673,13 @@ function buildFactsLines(ctx: GatheredContext): string[] {
   // Portfolio composition — so the model knows exactly which holdings are exposed to each risk.
   lines.push(
     "Portfolio holdings: " +
-      ctx.holdingsSummary.map((h) => `${h.name} (${h.ticker})`).join(", ") + ".",
+      ctx.holdingsSummary.map((h) => `${h.name} (${h.ticker})`).join(", ") +
+      ".",
   );
   if (ctx.usPct > 0) {
-    lines.push(`US exposure: ~${ctx.usPct}% of the portfolio. US monetary policy and economic data are directly material.`);
+    lines.push(
+      `US exposure: ~${ctx.usPct}% of the portfolio. US monetary policy and economic data are directly material.`,
+    );
   }
   if (ctx.watch.length > 0) {
     lines.push(
@@ -676,8 +712,12 @@ function buildResearchSystemPrompt(type: RecapType): string {
     "Search efficiently: ONE search per name or topic with good keywords. The recency window is applied automatically — do not put dates or years in queries. If a search returns a 'rate-limited' or 'failed' note, that means UNKNOWN (not 'no news') — do not re-run the same query; move on and rely on stored news or sector context.",
     "Ground every claim in a tool result. Never invent figures, dates, or company-specific news. If no company-specific news exists for a mover, say so explicitly so the writer attributes it to sector/broad movement.",
     "When you have enough, STOP calling tools and reply with a concise plain-text findings brief, organized as: MOVERS (per-name catalyst, or 'no company news'), MACRO (market backdrop), and " +
-      (isDaily ? "(daily recaps have no forward-looking section)." : "WATCH (1-2 concrete, dated forward catalysts for these specific holdings, drawing on the polymarket signals)."),
-  ].filter(Boolean).join(" ");
+      (isDaily
+        ? "(daily recaps have no forward-looking section)."
+        : "WATCH (1-2 concrete, dated forward catalysts for these specific holdings, drawing on the polymarket signals)."),
+  ]
+    .filter(Boolean)
+    .join(" ");
 }
 
 function buildResearchUserPrompt(ctx: GatheredContext): string {
@@ -689,11 +729,17 @@ function buildResearchUserPrompt(ctx: GatheredContext): string {
       : `This recap covers the trading week of ${ctx.periodStart} to ${ctx.periodEnd}.`,
   );
   lines.push("=== YOUR TASK ===");
-  lines.push("Research the catalysts behind the movers and the market backdrop, then synthesize a plain-text findings brief for the writer. Cite source titles where useful.");
+  lines.push(
+    "Research the catalysts behind the movers and the market backdrop, then synthesize a plain-text findings brief for the writer. Cite source titles where useful.",
+  );
   if (ctx.type === "daily") {
-    lines.push("This is a DAILY recap — focus on that session: its moves, company announcements, intraday catalysts. The search recency window is applied for you; use keyword-only queries (no dates).");
+    lines.push(
+      "This is a DAILY recap — focus on that session: its moves, company announcements, intraday catalysts. The search recency window is applied for you; use keyword-only queries (no dates).",
+    );
   } else {
-    lines.push("This is a WEEKLY recap — capture context across the full week plus forward-looking catalysts for next week. The search recency window is applied for you; use keyword-only queries (no dates).");
+    lines.push(
+      "This is a WEEKLY recap — capture context across the full week plus forward-looking catalysts for next week. The search recency window is applied for you; use keyword-only queries (no dates).",
+    );
   }
   return lines.join("\n");
 }
@@ -702,12 +748,12 @@ function buildResearchUserPrompt(ctx: GatheredContext): string {
 
 function buildComposeSystemPrompt(type: RecapType): string {
   const slideCount = type === "daily" ? "3" : "4";
-  const slideOrder = type === "daily"
-    ? "performance, macro, mover"
-    : "performance, macro, mover, watch";
-  const watchLine = type === "weekly"
-    ? "For the watch slide, name the 1-2 most important concrete, dated catalysts from the research findings; avoid vague themes like 'monitor inflation' unless tied to a specific named event."
-    : "";
+  const slideOrder =
+    type === "daily" ? "performance, macro, mover" : "performance, macro, mover, watch";
+  const watchLine =
+    type === "weekly"
+      ? "For the watch slide, name the 1-2 most important concrete, dated catalysts from the research findings; avoid vague themes like 'monitor inflation' unless tied to a specific named event."
+      : "";
   return [
     `You write a ${slideCount}-slide ${type} portfolio recap for a retail investor.`,
     "Voice: calm, factual, sharp, concise. Each slide is 1-3 short lines. Short and sweet.",
@@ -719,7 +765,9 @@ function buildComposeSystemPrompt(type: RecapType): string {
     "Never invent a cause. If the research found no company-specific news drove a move, say so plainly; attribute it to broad/sector movement only when that is supported.",
     watchLine,
     `Return the ${slideCount} slides in order: ${slideOrder}.`,
-  ].filter(Boolean).join(" ");
+  ]
+    .filter(Boolean)
+    .join(" ");
 }
 
 function buildComposeUserPrompt(ctx: GatheredContext, findings: string): string {
@@ -731,7 +779,11 @@ function buildComposeUserPrompt(ctx: GatheredContext, findings: string): string 
   }
   lines.push("");
   lines.push("=== RESEARCH FINDINGS (your primary grounding; written by the research step) ===");
-  lines.push(findings.trim() ? findings.trim() : "(research returned no findings — write from FACTS and sector context only; do not invent catalysts)");
+  lines.push(
+    findings.trim()
+      ? findings.trim()
+      : "(research returned no findings — write from FACTS and sector context only; do not invent catalysts)",
+  );
   lines.push("");
   lines.push("=== SOURCE SNIPPETS (cite these only; do not invent others) ===");
   if (ctx.macroPressSummaries.length > 0) {
@@ -748,7 +800,9 @@ function buildComposeUserPrompt(ctx: GatheredContext, findings: string): string 
   lines.push("");
   lines.push("=== SLIDES TO WRITE ===");
   lines.push("performance: one line on whether the book was up or down and the broad reason.");
-  lines.push("macro: the market backdrop — how the relevant indices moved and why, grounded in the findings.");
+  lines.push(
+    "macro: the market backdrop — how the relevant indices moved and why, grounded in the findings.",
+  );
   lines.push(
     "mover: cover the biggest gainer AND the biggest loser. For each, why it moved — use the findings if present, else its sector/industry context. Keep it sharp.",
   );
@@ -792,10 +846,15 @@ function assembleSlides(ctx: GatheredContext, llm: RecapLlmOutput): SlideSpec[] 
     if (s.body.some((b) => figureRe.test(b)) || figureRe.test(s.headline)) proseFigureHits++;
   }
   if (proseFigureHits > 0) {
-    console.warn(`[recaps] prose contained figures in ${proseFigureHits} slide(s) — rendered as-is, structured data is source of truth`);
+    console.warn(
+      `[recaps] prose contained figures in ${proseFigureHits} slide(s) — rendered as-is, structured data is source of truth`,
+    );
   }
 
-  const prose = (kind: SlideKind, fallbackHeadline: string): { headline: string; body: string[] } => {
+  const prose = (
+    kind: SlideKind,
+    fallbackHeadline: string,
+  ): { headline: string; body: string[] } => {
     const s = byKind.get(kind);
     return { headline: s?.headline ?? fallbackHeadline, body: s?.body ?? [] };
   };
@@ -804,7 +863,10 @@ function assembleSlides(ctx: GatheredContext, llm: RecapLlmOutput): SlideSpec[] 
 
   // 1. performance
   {
-    const p = prose("performance", ctx.returnPct >= 0 ? "Your portfolio gained" : "Your portfolio dipped");
+    const p = prose(
+      "performance",
+      ctx.returnPct >= 0 ? "Your portfolio gained" : "Your portfolio dipped",
+    );
     slides.push({
       schema_version: 1,
       kind: "performance",
@@ -873,23 +935,27 @@ function assembleSlides(ctx: GatheredContext, llm: RecapLlmOutput): SlideSpec[] 
     if (ctx.gainer && ctx.gainer.series.length >= 2) {
       moverCharts.push({
         type: "sparkline",
-        series: [{
-          key: "gainer",
-          label: ctx.gainer.ticker,
-          color: "positive",
-          points: ctx.gainer.series.map((p2) => ({ x: p2.date, y: p2.close })),
-        }],
+        series: [
+          {
+            key: "gainer",
+            label: ctx.gainer.ticker,
+            color: "positive",
+            points: ctx.gainer.series.map((p2) => ({ x: p2.date, y: p2.close })),
+          },
+        ],
       });
     }
     if (ctx.loser && ctx.loser.series.length >= 2) {
       moverCharts.push({
         type: "sparkline",
-        series: [{
-          key: "loser",
-          label: ctx.loser.ticker,
-          color: "negative",
-          points: ctx.loser.series.map((p2) => ({ x: p2.date, y: p2.close })),
-        }],
+        series: [
+          {
+            key: "loser",
+            label: ctx.loser.ticker,
+            color: "negative",
+            points: ctx.loser.series.map((p2) => ({ x: p2.date, y: p2.close })),
+          },
+        ],
       });
     }
 
@@ -954,12 +1020,19 @@ function buildResearchTools(type: RecapType): GeminiFunctionDeclaration[] {
       parameters: {
         type: "object",
         properties: {
-          query: str("The search query — keywords only, no dates/years (e.g. 'action Schneider Electric SU.PA bourse')."),
-          language: { type: "string", enum: ["en", "fr"], description: "Query language and Exa userLocation." },
+          query: str(
+            "The search query — keywords only, no dates/years (e.g. 'action Schneider Electric SU.PA bourse').",
+          ),
+          language: {
+            type: "string",
+            enum: ["en", "fr"],
+            description: "Query language and Exa userLocation.",
+          },
           topic: {
             type: "string",
             enum: ["mover", "macro"],
-            description: "What this search is for: 'mover' = news about a specific holding (e.g. the biggest gainer/loser), 'macro' = the broad market/sector backdrop. Controls which slide cites the results.",
+            description:
+              "What this search is for: 'mover' = news about a specific holding (e.g. the biggest gainer/loser), 'macro' = the broad market/sector backdrop. Controls which slide cites the results.",
           },
         },
         required: ["query", "language", "topic"],
@@ -1040,7 +1113,10 @@ function buildResearchToolHandlers(
       if (cached) return cached;
 
       if (exaCalls >= MAX_EXA_CALLS) {
-        return { results: [], note: "Search budget reached for this recap. Synthesize from what you already have and finish." };
+        return {
+          results: [],
+          note: "Search budget reached for this recap. Synthesize from what you already have and finish.",
+        };
       }
       exaCalls++;
 
@@ -1053,14 +1129,28 @@ function buildResearchToolHandlers(
         ? [...NEWS_INCLUDE_DOMAINS, ...NEWS_INCLUDE_DOMAINS_SECONDARY]
         : NEWS_INCLUDE_DOMAINS;
 
-      const { results, status } = await exaSearch(env.EXA_SEARCH, query, startPublished, endPublished, isFrench ? "fr" : "us", 8, domains);
+      const { results, status } = await exaSearch(
+        env.EXA_SEARCH,
+        query,
+        startPublished,
+        endPublished,
+        isFrench ? "fr" : "us",
+        8,
+        domains,
+      );
       const out = results
         .filter((r) => r.url && r.title)
         .slice(0, 5)
         .map((r) => ({
           title: r.title ?? "",
           url: r.url ?? "",
-          source: (() => { try { return new URL(r.url!).hostname.replace(/^www\./, ""); } catch { return ""; } })(),
+          source: (() => {
+            try {
+              return new URL(r.url!).hostname.replace(/^www\./, "");
+            } catch {
+              return "";
+            }
+          })(),
           summary: r.summary ?? "",
           score: r.score ?? 0,
           published: r.publishedDate ?? "",
@@ -1074,7 +1164,9 @@ function buildResearchToolHandlers(
         const sumsKey = topic === "mover" ? "moverSummaries" : "macroSummaries";
         if (collectedSources[bucket].length < 3) {
           collectedSources[bucket].push(...toSources(results, 3 - collectedSources[bucket].length));
-          collectedSources[sumsKey].push(...results.slice(0, 2).map((r) => r.summary ?? r.title ?? ""));
+          collectedSources[sumsKey].push(
+            ...results.slice(0, 2).map((r) => r.summary ?? r.title ?? ""),
+          );
         }
       }
 
@@ -1083,9 +1175,13 @@ function buildResearchToolHandlers(
       const response: Record<string, unknown> =
         status === "ok"
           ? { results: out }
-          : { results: out, note: status === "rate_limited"
-              ? "News search was rate-limited (already retried with backoff). Treat as UNKNOWN, not 'no news' — do not invent a catalyst; rely on stored news / sector context."
-              : "News search failed transiently. Treat as UNKNOWN, not 'no news'." };
+          : {
+              results: out,
+              note:
+                status === "rate_limited"
+                  ? "News search was rate-limited (already retried with backoff). Treat as UNKNOWN, not 'no news' — do not invent a catalyst; rely on stored news / sector context."
+                  : "News search failed transiently. Treat as UNKNOWN, not 'no news'.",
+            };
       // Cache every outcome (ok or failed). A repeated query returns the cached
       // response with no new Exa call — exaSearch already did the backoff retries,
       // so re-firing the same query in-run can't clear a persistent throttle and
@@ -1124,8 +1220,16 @@ function buildResearchToolHandlers(
 
       // Fill mover sources from stored news for the dominant mover — but only if
       // search_news hasn't already populated them (don't clobber prior results).
-      if (articles.length > 0 && ctx.dominantMover?.ticker === ticker && collectedSources.mover.length === 0) {
-        collectedSources.mover = articles.map((a) => ({ title: a.title, url: a.url, source: a.source }));
+      if (
+        articles.length > 0 &&
+        ctx.dominantMover?.ticker === ticker &&
+        collectedSources.mover.length === 0
+      ) {
+        collectedSources.mover = articles.map((a) => ({
+          title: a.title,
+          url: a.url,
+          source: a.source,
+        }));
         collectedSources.moverSummaries = articles.map((a) => a.snippet || a.title);
       }
 
@@ -1162,7 +1266,8 @@ function mergeCollectedSources(ctx: GatheredContext, collected: CollectedSources
   return {
     ...ctx,
     moverPress: collected.mover.length > 0 ? collected.mover : ctx.moverPress,
-    moverPressSummaries: collected.moverSummaries.length > 0 ? collected.moverSummaries : ctx.moverPressSummaries,
+    moverPressSummaries:
+      collected.moverSummaries.length > 0 ? collected.moverSummaries : ctx.moverPressSummaries,
     macroPress: collected.macro,
     macroPressSummaries: collected.macroSummaries,
     moverNoPress: collected.mover.length === 0 && ctx.moverPress.length === 0,
@@ -1190,7 +1295,10 @@ export async function generateRecap(
   if (!ctx) {
     await client
       .from("recaps")
-      .update({ status: "skipped", error: "insufficient data (need price_history data and holdings)" })
+      .update({
+        status: "skipped",
+        error: "insufficient data (need price_history data and holdings)",
+      })
       .eq("id", recapId);
     return { status: "skipped", reason: "insufficient data" };
   }
@@ -1224,7 +1332,13 @@ export async function generateRecap(
     toolCallLog: ToolCallRecord[];
   }> => {
     // --- Stage 1: research ---
-    const handlers = buildResearchToolHandlers(env, client, recap.portfolio_id, ctx, collectedSources);
+    const handlers = buildResearchToolHandlers(
+      env,
+      client,
+      recap.portfolio_id,
+      ctx,
+      collectedSources,
+    );
     const research = await invokeGeminiResearch(env, {
       system: buildResearchSystemPrompt(ctx.type),
       user: buildResearchUserPrompt(ctx),
@@ -1232,7 +1346,9 @@ export async function generateRecap(
       handlers,
       maxIterations: ctx.type === "daily" ? 5 : 6,
     });
-    console.log(`[recaps] research stage: ${research.toolCalls.length} tool calls, ${research.findings.length} chars of findings`);
+    console.log(
+      `[recaps] research stage: ${research.toolCalls.length} tool calls, ${research.findings.length} chars of findings`,
+    );
 
     // Merge any sources the research agent retrieved so the compose prompt and
     // the assembled source chips both reflect the enriched evidence.
@@ -1347,7 +1463,11 @@ export async function generateRecap(
         prompt: usage.promptTokens,
         completion: usage.completionTokens,
         total: usage.totalTokens,
-        tool_calls: toolCallLog.map((t) => ({ tool: t.tool, durationMs: t.durationMs, input: t.input })),
+        tool_calls: toolCallLog.map((t) => ({
+          tool: t.tool,
+          durationMs: t.durationMs,
+          input: t.input,
+        })),
       },
       generated_at: new Date().toISOString(),
       error: null,
