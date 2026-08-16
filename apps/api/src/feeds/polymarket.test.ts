@@ -185,7 +185,7 @@ describe("fetchCandidateMarkets", () => {
     }
   });
 
-  it("rejects a completely failed candidate refresh before any database access", async () => {
+  it("rejects a completely failed candidate refresh without touching feed matches", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(
@@ -200,8 +200,21 @@ describe("fetchCandidateMarkets", () => {
       ),
     );
 
+    dbFrom.mockImplementation((table: string) => {
+      if (table === "polymarket_price_history") {
+        return {
+          delete: vi.fn(() => ({
+            lt: vi.fn().mockResolvedValue({ count: 0, error: null }),
+          })),
+        };
+      }
+      throw new Error(`Unexpected table: ${table}`);
+    });
+
     await expect(runPolymarketFanout(env)).rejects.toThrow("Gamma candidate pool is empty");
-    expect(dbFrom).not.toHaveBeenCalled();
+    expect(dbFrom).toHaveBeenCalledWith("polymarket_price_history");
+    expect(dbFrom).not.toHaveBeenCalledWith("polymarket_markets");
+    expect(dbFrom).not.toHaveBeenCalledWith("portfolio_polymarket_matches");
   });
 });
 
@@ -239,6 +252,14 @@ describe("stale market deactivation", () => {
               }),
             };
           }),
+        };
+      }
+      if (table === "polymarket_price_history") {
+        return {
+          insert: vi.fn().mockResolvedValue({ error: null }),
+          delete: vi.fn(() => ({
+            lt: vi.fn().mockResolvedValue({ count: 0, error: null }),
+          })),
         };
       }
       if (table === "portfolios") {
@@ -565,6 +586,14 @@ describe("Polymarket Grok curation", () => {
                 select: vi.fn().mockResolvedValue({ data: [], error: null }),
               })),
             })),
+          })),
+        };
+      }
+      if (table === "polymarket_price_history") {
+        return {
+          insert: vi.fn().mockResolvedValue({ error: null }),
+          delete: vi.fn(() => ({
+            lt: vi.fn().mockResolvedValue({ count: 0, error: null }),
           })),
         };
       }
@@ -955,21 +984,12 @@ describe("ETF constituents in portfolio profiles", () => {
 });
 
 describe("polymarket price history failure independence", () => {
-  // Minimal fanout mocks: Gamma returns one rotating event per tag plus the
-  // pinned-slug lookups; an empty portfolios list stops the run right after
-  // the price-history steps, which is all these tests care about.
+  // Minimal fanout mocks: Gamma returns the same rotating event for each tag;
+  // an empty portfolios list stops the run after the price-history steps.
   function stubGammaFetch() {
     vi.stubGlobal(
       "fetch",
-      vi.fn(async (input: RequestInfo | URL) => {
-        const url = String(input);
-        if (url.includes("/events/slug/")) {
-          const slug = url.split("/events/slug/")[1];
-          return new Response(
-            JSON.stringify(gammaEvent(`0xpinned-${slug}`, `event-${slug}`, slug)),
-            { status: 200, headers: { "Content-Type": "application/json" } },
-          );
-        }
+      vi.fn(async () => {
         return new Response(JSON.stringify([gammaEvent("0xrotating")]), {
           status: 200,
           headers: { "Content-Type": "application/json" },
@@ -1018,7 +1038,7 @@ describe("polymarket price history failure independence", () => {
     expect(result.errors).toEqual([
       expect.stringMatching(/^price history insert: .*insert blew up/),
     ]);
-    expect(result.marketsUpserted).toBe(5);
+    expect(result.marketsUpserted).toBe(1);
   });
 
   it("records a distinct sweep error without losing the snapshot insert", async () => {
@@ -1037,7 +1057,7 @@ describe("polymarket price history failure independence", () => {
     const result = await runPolymarketFanout(env);
 
     expect(inserted).toHaveLength(1);
-    expect(result.priceSnapshotsWritten).toBe(5);
+    expect(result.priceSnapshotsWritten).toBe(1);
     expect(result.priceHistorySwept).toBe(0);
     expect(result.errors).toEqual([expect.stringMatching(/^price history sweep: .*sweep blew up/)]);
   });
