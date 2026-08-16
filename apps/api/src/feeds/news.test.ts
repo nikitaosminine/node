@@ -1,6 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { buildClusterRow, resolveSentimentsForRow, updateRollingCompanySentiment } from "./news";
+import {
+  buildClusterRow,
+  MAX_COMPANY_SEARCHES_PER_RUN,
+  resolveSentimentsForRow,
+  selectRotatingWindow,
+  updateRollingCompanySentiment,
+} from "./news";
 import type { ClusterSentiment, ScoredClusterRecord, SentimentCompanyRef } from "./sentiment";
 
 const { dbFrom } = vi.hoisted(() => ({ dbFrom: vi.fn() }));
@@ -15,6 +21,7 @@ const env = {
   SUPABASE_URL: "https://supabase.example",
   SUPABASE_SERVICE_KEY: "service-key",
   EXA_SEARCH: "exa-key",
+  GROK_MAIN_API_KEY: "grok-key",
 };
 
 const RECENT = new Date(Date.now() - 3_600_000).toISOString();
@@ -51,6 +58,9 @@ interface CapturedState {
   constituentsReject: boolean;
   constituentsError: boolean;
   geographyError: boolean;
+  nextClusterId: number;
+  subrequestCount: number;
+  clusterIds: Map<string, string>;
 }
 
 function installDbMock(state: CapturedState): void {
@@ -93,7 +103,11 @@ function installDbMock(state: CapturedState): void {
             state.clusterRows.push(...rows);
             return {
               select: async () => ({
-                data: rows.map((r, i) => ({ id: `cluster-${i}`, cluster_key: r.cluster_key })),
+                data: rows.map((r) => {
+                  const id = `cluster-${state.nextClusterId++}`;
+                  state.clusterIds.set(r.cluster_key, id);
+                  return { id, cluster_key: r.cluster_key };
+                }),
                 error: null,
               }),
             };
@@ -120,7 +134,14 @@ function installFetchMock(
   vi.stubGlobal(
     "fetch",
     vi.fn(async (url: string, init?: { body?: string }) => {
+      state.subrequestCount++;
       const body = JSON.parse(init?.body ?? "{}");
+      if (String(url).includes("api.x.ai")) {
+        return new Response(JSON.stringify({ choices: [{ message: { content: '{"scores":[]}' } }] }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
       if (String(url).endsWith("/search")) {
         state.searchQueries.push(body.query);
         let results: unknown[] = [];
@@ -183,6 +204,9 @@ describe("runNewsFanout — ETF-derived market coverage", () => {
       constituentsReject: false,
       constituentsError: false,
       geographyError: false,
+      nextClusterId: 0,
+      subrequestCount: 0,
+      clusterIds: new Map(),
     };
     installDbMock(state);
     installFetchMock(state);
@@ -313,7 +337,9 @@ describe("runNewsFanout — ETF-derived market coverage", () => {
       sectors: ["Technology"],
     });
 
-    const survivorMatch = state.matchRows.find((m) => m.cluster_id === `cluster-${survivorIdx}`);
+    const survivorMatch = state.matchRows.find(
+      (m) => m.cluster_id === state.clusterIds.get("exa-dup-co"),
+    );
     expect(survivorMatch).toBeDefined();
     expect(survivorMatch!.match_reason).toEqual({
       matched_tickers: ["AIR.PA"],
@@ -394,16 +420,34 @@ describe("runNewsFanout — ETF-derived market coverage", () => {
 
     // One shared topic (not two), whose merged terms keep the Broadcom story.
     expect(result.marketTopicsQueried).toBe(1);
-    const avgoIdx = state.clusterRows.findIndex((r) => r.cluster_key === "exa-avgo");
-    expect(avgoIdx).toBeGreaterThanOrEqual(0);
+    expect(state.clusterIds.get("exa-avgo")).toBeDefined();
 
     // Both portfolios hold an ETF mapping to the shared topic and both match
     // the story only the second ETF's constituent terms could keep.
-    const avgoMatches = state.matchRows.filter((m) => m.cluster_id === `cluster-${avgoIdx}`);
+    const avgoMatches = state.matchRows.filter(
+      (m) => m.cluster_id === state.clusterIds.get("exa-avgo"),
+    );
     expect(avgoMatches.map((m) => m.portfolio_id).sort()).toEqual([
       "portfolio-1",
       "portfolio-2",
     ]);
+  });
+
+  it("keeps a large company universe within the subrequest budget", async () => {
+    state.holdings = Array.from({ length: 100 }, (_, i) => ({
+      id: `h-company-${i}`,
+      ticker: `C${i}`,
+      isin: null,
+      asset_type: "EQUITY",
+      name: `Company ${i}`,
+      quantity: 1,
+      portfolio_id: `portfolio-${i}`,
+    }));
+
+    const result = await runNewsFanout(env);
+
+    expect(result.distinctCompaniesQueried).toBe(MAX_COMPANY_SEARCHES_PER_RUN);
+    expect(state.subrequestCount).toBeLessThanOrEqual(50);
   });
 });
 
@@ -460,22 +504,48 @@ describe("resolveSentimentsForRow", () => {
   ];
 
   it("returns the scored entries when every requested company got an answer", () => {
-    expect(resolveSentimentsForRow(1, scored, null)).toEqual(scored);
+    expect(resolveSentimentsForRow(["ticker:ACME"], scored, null)).toEqual(scored);
   });
 
   it("returns an explicit empty array when there were no companies to score", () => {
-    expect(resolveSentimentsForRow(0, [], null)).toEqual([]);
+    expect(resolveSentimentsForRow([], [], null)).toEqual([]);
   });
 
   it("preserves stored data (null) when the response only covers a subset of the requested companies", () => {
     // Grok answered for 1 of 2 requested (cluster, company) pairs — a valid,
     // parseable response, so sentimentError is null, but writing `scored`
     // as-is would erase the still-unanswered company's stored sentiment.
-    expect(resolveSentimentsForRow(2, scored, null)).toBeNull();
+    expect(resolveSentimentsForRow(["ticker:ACME", "ticker:BETA"], scored, null)).toBeNull();
+  });
+
+  it("requires the exact requested company keys, not just the expected count", () => {
+    expect(
+      resolveSentimentsForRow(
+        ["ticker:BETA"],
+        [{ ...scored[0], companyKey: "ticker:ACME" }],
+        null,
+      ),
+    ).toBeNull();
   });
 
   it("preserves stored data (null) when scoring failed outright", () => {
-    expect(resolveSentimentsForRow(1, [], "Grok sentiment scoring failed (500)")).toBeNull();
+    expect(resolveSentimentsForRow(["ticker:ACME"], [], "Grok sentiment scoring failed (500)")).toBeNull();
+  });
+});
+
+describe("selectRotatingWindow", () => {
+  it("keeps each run bounded and reaches every entry over the rotation", () => {
+    const entries = Array.from({ length: 10 }, (_, i) => `company-${i}`);
+    const hour = 3_600_000;
+    const seen = new Set<string>();
+
+    for (let run = 0; run < entries.length; run++) {
+      const selected = selectRotatingWindow(entries, MAX_COMPANY_SEARCHES_PER_RUN, run * hour);
+      expect(selected).toHaveLength(MAX_COMPANY_SEARCHES_PER_RUN);
+      selected.forEach((entry) => seen.add(entry));
+    }
+
+    expect(seen).toEqual(new Set(entries));
   });
 });
 
@@ -488,18 +558,25 @@ interface PriorRow {
 
 function mockSentimentClient(
   priorRows: PriorRow[],
-  opts: { lockAcquired?: boolean; applyAccepted?: boolean } = {},
+  opts: {
+    lockAcquired?: boolean;
+    applyAccepted?: boolean;
+    lockSequence?: boolean[];
+    applySequence?: boolean[];
+  } = {},
 ) {
   const applies: Array<{ rows: Array<Record<string, unknown>>; holder: unknown }> = [];
   const rpcCalls: Array<{ fn: string; args: unknown }> = [];
   const lockReleases: Array<{ holder: unknown }> = [];
   const lockAcquired = opts.lockAcquired ?? true;
   const applyAccepted = opts.applyAccepted ?? true;
+  const lockSequence = [...(opts.lockSequence ?? [])];
+  const applySequence = [...(opts.applySequence ?? [])];
   const client = {
     rpc: async (fn: string, args: unknown) => {
       rpcCalls.push({ fn, args });
       if (fn === "try_acquire_company_sentiment_lock") {
-        return { data: lockAcquired, error: null };
+        return { data: lockSequence.shift() ?? lockAcquired, error: null };
       }
       if (fn === "apply_company_sentiment_batch") {
         const { p_holder, p_rows } = args as {
@@ -507,7 +584,7 @@ function mockSentimentClient(
           p_rows: Array<Record<string, unknown>>;
         };
         applies.push({ rows: p_rows, holder: p_holder });
-        return { data: applyAccepted, error: null };
+        return { data: applySequence.shift() ?? applyAccepted, error: null };
       }
       return { data: null, error: null };
     },
@@ -621,7 +698,7 @@ describe("updateRollingCompanySentiment", () => {
     expect(lockReleases[0].holder).toBe((rpcCalls[0].args as { p_holder: string }).p_holder);
   });
 
-  it("skips gracefully without writing when a concurrent run holds the lock", async () => {
+  it("retries lock contention before giving up without writing", async () => {
     const { client, applies, lockReleases } = mockSentimentClient([], { lockAcquired: false });
 
     const outcome = await updateRollingCompanySentiment(
@@ -636,8 +713,26 @@ describe("updateRollingCompanySentiment", () => {
     expect(lockReleases).toHaveLength(0);
   });
 
-  it("discards the write when the lease was reassigned before the guarded RPC ran", async () => {
-    const { client, applies, lockReleases } = mockSentimentClient([], { applyAccepted: false });
+  it("hands off to a waiting run after the lock is released", async () => {
+    const { client, applies, rpcCalls } = mockSentimentClient([], {
+      lockSequence: [false, true],
+    });
+
+    const outcome = await updateRollingCompanySentiment(
+      client,
+      [{ clusterKey: "c-new", companyKey: "ticker:ACME", score: 1, rationale: "valid" }],
+      companiesByKey,
+    );
+
+    expect(outcome).toEqual({ companiesRescored: 1, error: null });
+    expect(rpcCalls.filter((call) => call.fn === "try_acquire_company_sentiment_lock")).toHaveLength(2);
+    expect(applies).toHaveLength(1);
+  });
+
+  it("hands off after a lease loss and persists the observation after re-reading", async () => {
+    const { client, applies, lockReleases } = mockSentimentClient([], {
+      applySequence: [false, true],
+    });
 
     const outcome = await updateRollingCompanySentiment(
       client,
@@ -645,9 +740,8 @@ describe("updateRollingCompanySentiment", () => {
       companiesByKey,
     );
 
-    expect(outcome.companiesRescored).toBe(0);
-    expect(outcome.error).toMatch(/lease/i);
-    expect(applies).toHaveLength(1); // the RPC was called, it just rejected the write
-    expect(lockReleases).toHaveLength(1); // release is still attempted; harmless if reassigned
+    expect(outcome).toEqual({ companiesRescored: 1, error: null });
+    expect(applies).toHaveLength(2);
+    expect(lockReleases).toHaveLength(2);
   });
 });

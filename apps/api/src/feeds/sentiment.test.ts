@@ -112,6 +112,23 @@ describe("parseSentimentResponse (strict JSON)", () => {
     expect(parseSentimentResponse(raw, pairIndex)).toEqual([]);
   });
 
+  it("rejects non-number sentiment values instead of coercing them to neutral", () => {
+    const { pairIndex } = buildSentimentPrompt([target]);
+    for (const sentiment of [null, false, "", "0"]) {
+      const raw = JSON.stringify({ scores: [{ i: 1, sentiment, rationale: "valid reason" }] });
+      expect(parseSentimentResponse(raw, pairIndex)).toEqual([]);
+    }
+  });
+
+  it("rejects missing, empty, and multiline rationales", () => {
+    const { pairIndex } = buildSentimentPrompt([target]);
+    for (const rationale of [undefined, null, false, "", "   ", "first line\nsecond line"]) {
+      const item: Record<string, unknown> = { i: 1, sentiment: 0.2 };
+      if (rationale !== undefined) item.rationale = rationale;
+      expect(parseSentimentResponse(JSON.stringify({ scores: [item] }), pairIndex)).toEqual([]);
+    }
+  });
+
   it("keeps only the first entry when the same pair index repeats", () => {
     const { pairIndex } = buildSentimentPrompt([target]);
     const raw = JSON.stringify({

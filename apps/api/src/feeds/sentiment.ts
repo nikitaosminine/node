@@ -165,9 +165,20 @@ export function parseSentimentResponse(
   for (const item of scores) {
     if (!item || typeof item !== "object") continue;
     const rec = item as Record<string, unknown>;
-    const i = typeof rec.i === "number" ? rec.i : Number(rec.i);
-    const sentiment = typeof rec.sentiment === "number" ? rec.sentiment : Number(rec.sentiment);
-    if (!Number.isFinite(i) || !Number.isFinite(sentiment)) continue;
+    const i = rec.i;
+    const sentiment = rec.sentiment;
+    const rawRationale = typeof rec.rationale === "string" ? rec.rationale : "";
+    const rationale = rawRationale.trim();
+    if (
+      typeof i !== "number" ||
+      !Number.isInteger(i) ||
+      typeof sentiment !== "number" ||
+      !Number.isFinite(sentiment) ||
+      rationale.length === 0 ||
+      /[\r\n\u2028\u2029]/.test(rawRationale)
+    ) {
+      continue;
+    }
     if (seenIndices.has(i)) continue;
     const ref = pairIndex.get(i);
     if (!ref) continue;
@@ -177,7 +188,7 @@ export function parseSentimentResponse(
       clusterKey: ref.clusterKey,
       companyKey: ref.companyKey,
       score: Math.max(-1, Math.min(1, sentiment)),
-      rationale: typeof rec.rationale === "string" ? rec.rationale.slice(0, 300) : "",
+      rationale: rationale.slice(0, 300),
     });
   }
   return out;

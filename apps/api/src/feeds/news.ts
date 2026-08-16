@@ -77,11 +77,24 @@ const NEWS_WINDOW_MS = CLUSTER_TTL_HOURS * 3_600_000;
 const RESULTS_PER_COMPANY = 25;
 // Bounded concurrency for the Exa fetch phase.
 const FETCH_CONCURRENCY = 4;
-// Distinct-company window per run (rotating-cursor insurance for growth).
-// At current scale (~4 distinct companies) this covers everything every run.
-const FANOUT_WINDOW = 200;
 // Hard cap on ETF-derived market-topic searches per run (subrequest-budget guard).
 const MAX_MARKET_TOPICS = 12;
+const NEWS_SUBREQUEST_BUDGET = 50;
+const MAX_COMPANY_SENTIMENT_ATTEMPTS = 3;
+const MAX_COMPANY_SENTIMENT_SUBREQUESTS = MAX_COMPANY_SENTIMENT_ATTEMPTS * 4;
+const MAX_FIXED_FANOUT_SUBREQUESTS = 11;
+export const MAX_COMPANY_SEARCHES_PER_RUN = Math.max(
+  1,
+  Math.floor(
+    (NEWS_SUBREQUEST_BUDGET -
+      MAX_MARKET_TOPICS -
+      MAX_FIXED_FANOUT_SUBREQUESTS -
+      MAX_COMPANY_SENTIMENT_SUBREQUESTS) /
+      2,
+  ),
+);
+const FANOUT_WINDOW = MAX_COMPANY_SEARCHES_PER_RUN;
+const FANOUT_ROTATION_INTERVAL_MS = 3_600_000;
 // Per-topic keep cap (best Exa score first) so broad market queries don't
 // drown per-company coverage in the feed.
 const MARKET_RESULTS_KEPT = 12;
@@ -234,6 +247,17 @@ const STOPWORDS = new Set([
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+export function selectRotatingWindow<T>(
+  entries: readonly T[],
+  limit: number,
+  now: number = Date.now(),
+): T[] {
+  if (entries.length === 0 || limit <= 0) return [];
+  if (entries.length <= limit) return [...entries];
+  const start = Math.floor(now / FANOUT_ROTATION_INTERVAL_MS) % entries.length;
+  return Array.from({ length: limit }, (_, offset) => entries[(start + offset) % entries.length]);
 }
 
 function normalizeName(name: string): string {
@@ -703,12 +727,20 @@ async function exaFetchSummaries(
 // ---------------------------------------------------------------------------
 
 export function resolveSentimentsForRow(
-  expectedCompanyCount: number,
+  expectedCompanyKeys: string[],
   scored: ClusterSentiment[],
   sentimentError: string | null,
 ): ClusterSentiment[] | null {
   if (sentimentError) return null;
-  if (scored.length < expectedCompanyCount) return null;
+  const expected = new Set(expectedCompanyKeys);
+  const answered = new Set(scored.map((s) => s.companyKey));
+  if (
+    scored.length !== expected.size ||
+    answered.size !== expected.size ||
+    [...expected].some((companyKey) => !answered.has(companyKey))
+  ) {
+    return null;
+  }
   return scored;
 }
 
@@ -790,6 +822,7 @@ export function buildClusterRow(
 // ---------------------------------------------------------------------------
 
 const COMPANY_SENTIMENT_LOCK_TTL_SECONDS = 60;
+const COMPANY_SENTIMENT_RETRY_DELAY_MS = 10;
 
 async function acquireCompanySentimentLock(
   client: AnySupabaseClient,
@@ -819,15 +852,8 @@ async function releaseCompanySentimentLock(
 }
 
 // ---------------------------------------------------------------------------
-// Rolling per-company sentiment (EWMA) — up to 4 subrequests (lock acquire,
-// prior-score lookup, batch write RPC, lock release), 0 when there is
-// nothing to update. A cluster already present in the company's stored scored_cluster_ids
-// is the same article re-surfacing across fanout runs within the 7-day window
-// and must not move the EWMA again; scored_cluster_ids (pruned by age, not
-// count — see MAX_SCORED_CLUSTER_IDS in feeds/sentiment.ts) is the dedupe
-// source of truth, while evidence_cluster_ids stays a 10-id display list.
-// Companies with nothing new this run are skipped and their rows left
-// untouched. Never throws.
+// Rolling per-company sentiment (EWMA) — lock contention and lease loss get
+// bounded retries, each re-reading the current rows before merging.
 // ---------------------------------------------------------------------------
 
 export async function updateRollingCompanySentiment(
@@ -837,103 +863,113 @@ export async function updateRollingCompanySentiment(
 ): Promise<{ companiesRescored: number; error: string | null }> {
   if (idBackedSentiments.length === 0) return { companiesRescored: 0, error: null };
 
-  const holder = crypto.randomUUID();
-  if (!(await acquireCompanySentimentLock(client, holder))) {
-    return {
-      companiesRescored: 0,
-      error: "company sentiment update skipped: another fanout run holds the lock",
-    };
-  }
+  const companyKeys = [...new Set(idBackedSentiments.map((s) => s.companyKey))];
+  let lastError = "company sentiment update skipped: another fanout run holds the lock";
 
-  try {
-    const companyKeys = [...new Set(idBackedSentiments.map((s) => s.companyKey))];
-    const { data: priorRows, error: priorError } = await client
-      .from("company_sentiment")
-      .select("company_key, score, evidence_cluster_ids, scored_cluster_ids")
-      .in("company_key", companyKeys);
-
-    if (priorError) throw new Error(priorError.message);
-
-    const priorByKey = new Map<
-      string,
-      { score: number; evidence_cluster_ids: string[]; scored_cluster_ids: ScoredClusterRecord[] }
-    >(
-      (priorRows ?? []).map(
-        (r: {
-          company_key: string;
-          score: number;
-          evidence_cluster_ids: string[] | null;
-          scored_cluster_ids: ScoredClusterRecord[] | null;
-        }) => [
-          r.company_key,
-          {
-            score: r.score,
-            evidence_cluster_ids: r.evidence_cluster_ids ?? [],
-            scored_cluster_ids: r.scored_cluster_ids ?? [],
-          },
-        ],
-      ),
-    );
-
-    const priorScoredByCompany = new Map<string, Set<string>>(
-      [...priorByKey].map(([companyKey, prior]) => [
-        companyKey,
-        new Set(prior.scored_cluster_ids.map((r) => r.id)),
-      ]),
-    );
-    const observationsByCompany = aggregateObservationsByCompany(
-      idBackedSentiments,
-      priorScoredByCompany,
-    );
-
-    const now = Date.now();
-    const companySentimentRows = [...observationsByCompany].map(([companyKey, obs]) => {
-      const prior = priorByKey.get(companyKey) ?? null;
-      const { score, trend } = computeEwma(prior?.score ?? null, obs.observedScore);
-      const ref = companiesByKey.get(companyKey);
-      return {
-        company_key: companyKey,
-        company_name: ref?.name ?? companyKey,
-        ticker: ref?.tickers[0] ?? null,
-        isin: ref?.isins[0] ?? null,
-        score,
-        trend,
-        evidence_cluster_ids: mergeEvidenceClusterIds(
-          prior?.evidence_cluster_ids ?? [],
-          obs.clusterKeys,
-        ),
-        scored_cluster_ids: mergeScoredClusterIds(
-          prior?.scored_cluster_ids ?? [],
-          obs.clusterKeys,
-          now,
-          NEWS_WINDOW_MS,
-        ),
-        updated_at: new Date(now).toISOString(),
-      };
-    });
-
-    if (companySentimentRows.length === 0) return { companiesRescored: 0, error: null };
-
-    const { data: applied, error: applyError } = await client.rpc("apply_company_sentiment_batch", {
-      p_holder: holder,
-      p_rows: companySentimentRows,
-    });
-
-    if (applyError) throw new Error(applyError.message);
-    if (applied !== true) {
-      return {
-        companiesRescored: 0,
-        error: "company sentiment update skipped: lease was lost before the write completed",
-      };
+  for (let attempt = 1; attempt <= MAX_COMPANY_SENTIMENT_ATTEMPTS; attempt++) {
+    const holder = crypto.randomUUID();
+    if (!(await acquireCompanySentimentLock(client, holder))) {
+      if (attempt < MAX_COMPANY_SENTIMENT_ATTEMPTS) {
+        await sleep(COMPANY_SENTIMENT_RETRY_DELAY_MS * attempt);
+      }
+      continue;
     }
-    return { companiesRescored: companySentimentRows.length, error: null };
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.error("[news] rolling company sentiment update failed:", msg);
-    return { companiesRescored: 0, error: msg };
-  } finally {
-    await releaseCompanySentimentLock(client, holder);
+
+    let retryLeaseLoss = false;
+    try {
+      const { data: priorRows, error: priorError } = await client
+        .from("company_sentiment")
+        .select("company_key, score, evidence_cluster_ids, scored_cluster_ids")
+        .in("company_key", companyKeys);
+
+      if (priorError) throw new Error(priorError.message);
+
+      const priorByKey = new Map<
+        string,
+        { score: number; evidence_cluster_ids: string[]; scored_cluster_ids: ScoredClusterRecord[] }
+      >(
+        (priorRows ?? []).map(
+          (r: {
+            company_key: string;
+            score: number;
+            evidence_cluster_ids: string[] | null;
+            scored_cluster_ids: ScoredClusterRecord[] | null;
+          }) => [
+            r.company_key,
+            {
+              score: r.score,
+              evidence_cluster_ids: r.evidence_cluster_ids ?? [],
+              scored_cluster_ids: r.scored_cluster_ids ?? [],
+            },
+          ],
+        ),
+      );
+
+      const priorScoredByCompany = new Map<string, Set<string>>(
+        [...priorByKey].map(([companyKey, prior]) => [
+          companyKey,
+          new Set(prior.scored_cluster_ids.map((r) => r.id)),
+        ]),
+      );
+      const observationsByCompany = aggregateObservationsByCompany(
+        idBackedSentiments,
+        priorScoredByCompany,
+      );
+
+      const now = Date.now();
+      const companySentimentRows = [...observationsByCompany].map(([companyKey, obs]) => {
+        const prior = priorByKey.get(companyKey) ?? null;
+        const { score, trend } = computeEwma(prior?.score ?? null, obs.observedScore);
+        const ref = companiesByKey.get(companyKey);
+        return {
+          company_key: companyKey,
+          company_name: ref?.name ?? companyKey,
+          ticker: ref?.tickers[0] ?? null,
+          isin: ref?.isins[0] ?? null,
+          score,
+          trend,
+          evidence_cluster_ids: mergeEvidenceClusterIds(
+            prior?.evidence_cluster_ids ?? [],
+            obs.clusterKeys,
+          ),
+          scored_cluster_ids: mergeScoredClusterIds(
+            prior?.scored_cluster_ids ?? [],
+            obs.clusterKeys,
+            now,
+            NEWS_WINDOW_MS,
+          ),
+          updated_at: new Date(now).toISOString(),
+        };
+      });
+
+      if (companySentimentRows.length === 0) return { companiesRescored: 0, error: null };
+
+      const { data: applied, error: applyError } = await client.rpc("apply_company_sentiment_batch", {
+        p_holder: holder,
+        p_rows: companySentimentRows,
+      });
+
+      if (applyError) throw new Error(applyError.message);
+      if (applied !== true) {
+        lastError = "company sentiment update skipped: lease was lost before the write completed";
+        retryLeaseLoss = true;
+      } else {
+        return { companiesRescored: companySentimentRows.length, error: null };
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error("[news] rolling company sentiment update failed:", msg);
+      return { companiesRescored: 0, error: msg };
+    } finally {
+      await releaseCompanySentimentLock(client, holder);
+    }
+
+    if (retryLeaseLoss && attempt < MAX_COMPANY_SENTIMENT_ATTEMPTS) {
+      await sleep(COMPANY_SENTIMENT_RETRY_DELAY_MS * attempt);
+    }
   }
+
+  return { companiesRescored: 0, error: lastError };
 }
 
 // ---------------------------------------------------------------------------
@@ -1070,16 +1106,13 @@ function dedupeByStory(
 //   ≤2   Exa contents calls (batched summaries, one per language FR/EN)
 //   1    cluster entities pre-read (batched .in() on cluster_key, so a
 //        re-upsert never erases entity attribution from a previous run)
-//   1    batch cluster upsert (all at once)
+//   ≤2   batch cluster upserts (sentiment-bearing and sentiment-preserving rows)
 //   1    batch match upsert
 //   1    sweep
 //   1    Grok sentiment scoring call (skipped if no survivors)
-//   1    company_sentiment prior-score lookup (skipped if nothing scored)
-//   1    company_sentiment batch write RPC, lock-checked (skipped if nothing scored)
-//   1    company sentiment lock acquire/release (skipped if nothing scored)
+//   ≤12  company sentiment lock/read/write/release requests (skipped if nothing scored)
 //   ─────────────────
-//   worst case 2N+M+14 (= 26 today with N=4, M=4; ≤ 2N+26 at the topic cap),
-//   typical N+M+9 ≈ 17 — well under 50 at current scale.
+//   worst case 2N+M+23 (N ≤ 7, M ≤ 12) = 49 — within the 50-subrequest cap.
 // ---------------------------------------------------------------------------
 
 interface PendingCluster {
@@ -1152,17 +1185,21 @@ export async function runNewsFanout(env: Env): Promise<{
     console.error("[news] market work-list failed:", msg);
     errors.push(`market work-list: ${msg}`);
   }
-  const marketEntries = [...marketList.values()]
-    .sort((a, b) => (a.canonicalKey < b.canonicalKey ? -1 : a.canonicalKey > b.canonicalKey ? 1 : 0))
-    .slice(0, MAX_MARKET_TOPICS);
+  const rotationNow = Date.now();
+  const marketEntries = selectRotatingWindow(
+    [...marketList.values()].sort((a, b) =>
+      a.canonicalKey < b.canonicalKey ? -1 : a.canonicalKey > b.canonicalKey ? 1 : 0,
+    ),
+    MAX_MARKET_TOPICS,
+    rotationNow,
+  );
   // Drop capped-away entries so later match/dedup phases can't reference them.
   marketList = new Map(marketEntries.map((e) => [e.canonicalKey, e]));
 
   const allCompanies = [...workList.values()].sort((a, b) =>
     a.canonicalKey < b.canonicalKey ? -1 : a.canonicalKey > b.canonicalKey ? 1 : 0,
   );
-  const cursor = 0;
-  const companies = allCompanies.slice(cursor, cursor + FANOUT_WINDOW);
+  const companies = selectRotatingWindow(allCompanies, FANOUT_WINDOW, rotationNow);
 
   const startPublishedDate = new Date(Date.now() - NEWS_WINDOW_MS).toISOString();
   const userLocation = deriveUserLocation(workList);
@@ -1459,23 +1496,26 @@ export async function runNewsFanout(env: Env): Promise<{
     if (arr) arr.push(s);
     else sentimentsByClusterKey.set(s.clusterKey, [s]);
   }
-  const expectedCompanyCountByCluster = new Map<string, number>(
-    sentimentTargets.map((t) => [t.clusterKey, t.companies.length]),
+  const expectedCompanyKeysByCluster = new Map<string, string[]>(
+    sentimentTargets.map((t) => [t.clusterKey, t.companies.map((company) => company.canonicalKey)]),
   );
+  const resolvedSentimentsByClusterKey = new Map<string, ClusterSentiment[] | null>();
 
-  // --- Batch cluster upsert (1 subrequest) -----------------------------------
+  // --- Batch cluster upsert ---------------------------------------------------
   const clusterRows = survivors.map((p) => {
     const clusterKey = p.result.id ?? p.result.url!;
+    const resolvedSentiments = resolveSentimentsForRow(
+      expectedCompanyKeysByCluster.get(clusterKey) ?? [],
+      sentimentsByClusterKey.get(clusterKey) ?? [],
+      sentimentError,
+    );
+    resolvedSentimentsByClusterKey.set(clusterKey, resolvedSentiments);
     return buildClusterRow(
       p.result,
       [...p.tickers],
       [...p.isins],
       summaryByUrl.get(p.result.url!) ?? "",
-      resolveSentimentsForRow(
-        expectedCompanyCountByCluster.get(clusterKey) ?? 0,
-        sentimentsByClusterKey.get(clusterKey) ?? [],
-        sentimentError,
-      ),
+      resolvedSentiments,
       companiesByKey,
       [...p.countries],
       [...p.sectors],
@@ -1485,11 +1525,18 @@ export async function runNewsFanout(env: Env): Promise<{
   const clusterMap = new Map<string, ClusterAccum>();
   const clusterKeyToId = new Map<string, string>();
 
-  if (clusterRows.length > 0) {
+  const clusterRowsWithSentiments = clusterRows.filter((row) =>
+    Object.prototype.hasOwnProperty.call(row, "sentiments"),
+  );
+  const clusterRowsWithoutSentiments = clusterRows.filter(
+    (row) => !Object.prototype.hasOwnProperty.call(row, "sentiments"),
+  );
+  for (const rows of [clusterRowsWithSentiments, clusterRowsWithoutSentiments]) {
+    if (rows.length === 0) continue;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const { data: upserted, error: clusterBatchError } = (await (client as any)
       .from("news_clusters")
-      .upsert(clusterRows, { onConflict: "cluster_key" })
+      .upsert(rows, { onConflict: "cluster_key" })
       .select("id, cluster_key")) as {
       data: Array<{ id: string; cluster_key: string }> | null;
       error: { message: string } | null;
@@ -1498,33 +1545,34 @@ export async function runNewsFanout(env: Env): Promise<{
     if (clusterBatchError) {
       errors.push(`batch cluster upsert: ${clusterBatchError.message}`);
       console.error("[news] batch cluster upsert failed:", clusterBatchError.message);
-    } else {
-      for (const row of upserted ?? []) {
-        const pending = pendingClusters.get(row.cluster_key);
-        if (pending) {
-          clusterMap.set(row.id, {
-            publishedAt: pending.result.publishedDate ?? new Date().toISOString(),
-            exaScore: pending.exaScore,
-            companyKeys: pending.companyKeys,
-          });
-          clusterKeyToId.set(row.cluster_key, row.id);
-        }
+      continue;
+    }
+    for (const row of upserted ?? []) {
+      const pending = pendingClusters.get(row.cluster_key);
+      if (pending) {
+        clusterMap.set(row.id, {
+          publishedAt: pending.result.publishedDate ?? new Date().toISOString(),
+          exaScore: pending.exaScore,
+          companyKeys: pending.companyKeys,
+        });
+        clusterKeyToId.set(row.cluster_key, row.id);
       }
-      clustersUpserted = clusterMap.size;
     }
   }
+  clustersUpserted = clusterMap.size;
 
   // --- Rolling per-company sentiment (EWMA) — up to 2 subrequests ------------
   // Skipped entirely (0 subrequests) when nothing was scored, e.g. sentiment
   // scoring failed above; the feed above is already fully populated by now.
   // Swap the survivor-scoped clusterKey for the durable DB cluster id so
   // company_sentiment cluster-id lists reference real, queryable rows.
-  const idBackedSentiments: ClusterSentiment[] = clusterSentiments
-    .map((s) => {
-      const clusterId = clusterKeyToId.get(s.clusterKey);
-      return clusterId ? { ...s, clusterKey: clusterId } : null;
-    })
-    .filter((s): s is ClusterSentiment => s !== null);
+  const idBackedSentiments: ClusterSentiment[] = [...resolvedSentimentsByClusterKey].flatMap(
+    ([clusterKey, sentiments]) => {
+      const clusterId = clusterKeyToId.get(clusterKey);
+      if (!clusterId || !sentiments) return [];
+      return sentiments.map((s) => ({ ...s, clusterKey: clusterId }));
+    },
+  );
 
   const { companiesRescored, error: companySentimentError } = await updateRollingCompanySentiment(
     client,
@@ -1651,7 +1699,9 @@ export async function runNewsFanout(env: Env): Promise<{
     secondarySearches,
     dedupedAway,
     expiredSwept: expiredSwept ?? 0,
-    clustersScored: sentimentsByClusterKey.size,
+    clustersScored: [...resolvedSentimentsByClusterKey.values()].filter(
+      (sentiments) => sentiments !== null && sentiments.length > 0,
+    ).length,
     companiesRescored,
     errors,
   };
