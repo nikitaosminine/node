@@ -86,10 +86,7 @@ describe("PolymarketFeed", () => {
       fetched_at: "2026-08-16T11:55:00.000Z",
       end_date: "2026-08-16T11:00:00.000Z",
     });
-    mockFeedResponse([
-      match(fallback, 0, null),
-      match(curated, 0.8, "Relevant to your holdings"),
-    ]);
+    mockFeedResponse([match(fallback, 0, null), match(curated, 0.8, "Relevant to your holdings")]);
 
     render(<PolymarketFeed portfolioId="portfolio-1" />);
 
@@ -103,9 +100,7 @@ describe("PolymarketFeed", () => {
 
     const curatedRow = screen.getByText("Curated market").closest("a");
     expect(curatedRow).not.toBeNull();
-    expect(
-      within(curatedRow as HTMLElement).getByText("Relevant to your holdings"),
-    ).toBeVisible();
+    expect(within(curatedRow as HTMLElement).getByText("Relevant to your holdings")).toBeVisible();
     expect(screen.queryByText("Resolved")).toBeNull();
   });
 
