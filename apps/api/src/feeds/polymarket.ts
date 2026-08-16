@@ -147,7 +147,6 @@ export interface PolymarketFanoutResult {
   errors: string[];
 }
 
-
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
@@ -473,10 +472,7 @@ export async function fetchCandidateMarkets(env: Env): Promise<Map<string, FlatM
 // Upsert markets into polymarket_markets
 // ---------------------------------------------------------------------------
 
-async function upsertMarkets(
-  client: AnySupabaseClient,
-  markets: FlatMarket[],
-): Promise<void> {
+async function upsertMarkets(client: AnySupabaseClient, markets: FlatMarket[]): Promise<void> {
   if (markets.length === 0) return;
 
   const rows = markets.map((m) => ({
@@ -529,9 +525,7 @@ const STALE_FANOUT_WINDOW_HOURS = 48;
  */
 async function deactivateStaleMarkets(client: AnySupabaseClient): Promise<number> {
   const nowIso = new Date().toISOString();
-  const staleCutoffIso = new Date(
-    Date.now() - STALE_FANOUT_WINDOW_HOURS * 3_600_000,
-  ).toISOString();
+  const staleCutoffIso = new Date(Date.now() - STALE_FANOUT_WINDOW_HOURS * 3_600_000).toISOString();
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const { data, error } = (await (client as any)
@@ -539,7 +533,10 @@ async function deactivateStaleMarkets(client: AnySupabaseClient): Promise<number
     .update({ active: false })
     .eq("active", true)
     .or(`end_date.lt.${nowIso},fetched_at.lt.${staleCutoffIso}`)
-    .select("condition_id")) as { data: { condition_id: string }[] | null; error: { message: string } | null };
+    .select("condition_id")) as {
+    data: { condition_id: string }[] | null;
+    error: { message: string } | null;
+  };
 
   if (error) {
     throw new Error(`[polymarket] failed to deactivate stale markets: ${error.message}`);
@@ -555,6 +552,28 @@ interface PortfolioMarketSelection {
 
 function postgrestInList(values: string[]): string {
   return `(${values.map((value) => `"${value.replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`).join(",")})`;
+}
+
+/**
+ * Remove rows written by the pre-1A-131 global pinned-market fanout. This runs
+ * before any holdings/profile/scoring work so a portfolio cannot retain those
+ * rows when curation fails partway through.
+ */
+async function sweepLegacyPinnedMatches(
+  client: AnySupabaseClient,
+  portfolioId: string,
+): Promise<void> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const { error } = (await (client as any)
+    .from("portfolio_polymarket_matches")
+    .delete()
+    .eq("portfolio_id", portfolioId)
+    .eq("is_pinned", true)) as { error: { message: string } | null };
+  if (error) {
+    throw new Error(
+      `[polymarket] legacy pinned-match sweep failed for portfolio ${portfolioId}: ${error.message}`,
+    );
+  }
 }
 
 /**
@@ -704,9 +723,7 @@ export async function enqueueEtfConstituentsEnrichment(
       error: { message: string } | null;
     };
     if (updateError) {
-      throw new Error(
-        `[polymarket] constituents enrichment claim failed: ${updateError.message}`,
-      );
+      throw new Error(`[polymarket] constituents enrichment claim failed: ${updateError.message}`);
     }
     if (updatedRows && updatedRows.length > 0) {
       claimed.push(gap);
@@ -996,6 +1013,10 @@ export async function runPolymarketFanout(
     const portfolioId = portfolio.id;
 
     try {
+      // Sweep legacy global pins before any holdings/profile/scoring work. If
+      // curation fails, the old pinned rows must not survive in the feed.
+      await sweepLegacyPinnedMatches(client, portfolioId);
+
       // 4a. Holdings-hash cache check — skip Grok if holdings unchanged AND cache is fresh
       const { data: holdingsData } = await client
         .from("holdings")
@@ -1006,18 +1027,7 @@ export async function runPolymarketFanout(
       const holdings: HoldingRow[] = (holdingsData as HoldingRow[] | null) ?? [];
 
       if (holdings.length === 0) {
-        // Portfolio has no holdings — sweep legacy pinned rows, skip scoring
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const { error: legacySweepError } = (await (client as any)
-          .from("portfolio_polymarket_matches")
-          .delete()
-          .eq("portfolio_id", portfolioId)
-          .eq("is_pinned", true)) as { error: { message: string } | null };
-        if (legacySweepError) {
-          throw new Error(
-            `[polymarket] legacy pinned-match sweep failed for portfolio ${portfolioId}: ${legacySweepError.message}`,
-          );
-        }
+        // Portfolio has no holdings — skip scoring after the legacy sweep.
         curation.portfoliosWithoutHoldings++;
         portfoliosProcessed++;
         continue;

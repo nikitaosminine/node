@@ -397,16 +397,18 @@ describe("Polymarket Grok curation", () => {
         };
       }
       if (table === "portfolio_polymarket_matches") {
+        const not = vi.fn().mockResolvedValue({ error: null });
+        const deleteEq = vi.fn((column: string) =>
+          column === "portfolio_id"
+            ? { eq: vi.fn().mockResolvedValue({ error: null }), not }
+            : Promise.resolve({ error: null }),
+        );
         return {
           upsert: vi.fn(async (rows: unknown[]) => {
             matchUpserts.push(rows);
             return { error: null };
           }),
-          delete: vi.fn(() => ({
-            eq: vi.fn(() => ({
-              not: vi.fn().mockResolvedValue({ error: null }),
-            })),
-          })),
+          delete: vi.fn(() => ({ eq: deleteEq })),
         };
       }
       if (table === "holdings") {
@@ -598,6 +600,109 @@ describe("Polymarket Grok curation", () => {
       portfoliosProcessed: 1,
       curation: { portfoliosWithoutHoldings: 1 },
       errors: [],
+    });
+  });
+
+  it("sweeps legacy pinned rows before profile failures skip a portfolio", async () => {
+    const deleteFilters: Array<[string, unknown]> = [];
+    const holding = {
+      ticker: "AAPL",
+      isin: null,
+      asset_type: "stock",
+      name: "Apple",
+      quantity: 1,
+    };
+
+    dbFrom.mockImplementation((table: string) => {
+      if (table === "polymarket_markets") {
+        return {
+          upsert: vi.fn().mockResolvedValue({ error: null }),
+          update: vi.fn(() => ({
+            eq: vi.fn(() => ({
+              or: vi.fn(() => ({
+                select: vi.fn().mockResolvedValue({ data: [], error: null }),
+              })),
+            })),
+          })),
+        };
+      }
+      if (table === "portfolios") {
+        return {
+          select: vi.fn().mockResolvedValue({
+            data: [{ id: "portfolio-profile-failure", user_id: "user-1" }],
+            error: null,
+          }),
+        };
+      }
+      if (table === "portfolio_polymarket_matches") {
+        const eq = vi.fn((column: string, value: unknown) => {
+          deleteFilters.push([column, value]);
+          if (column === "portfolio_id") {
+            return {
+              eq: vi.fn((nestedColumn: string, nestedValue: unknown) => {
+                deleteFilters.push([nestedColumn, nestedValue]);
+                return Promise.resolve({ error: null });
+              }),
+              not: vi.fn().mockResolvedValue({ error: null }),
+            };
+          }
+          return Promise.resolve({ error: null });
+        });
+        return { delete: vi.fn(() => ({ eq })), upsert: vi.fn() };
+      }
+      if (table === "holdings") {
+        return {
+          select: vi.fn(() => ({
+            eq: vi.fn(() => ({
+              gt: vi.fn().mockResolvedValue({ data: [holding], error: null }),
+            })),
+          })),
+        };
+      }
+      if (table === "portfolio_holdings_cache") {
+        return {
+          select: vi.fn(() => ({
+            eq: vi.fn(() => ({
+              maybeSingle: vi.fn().mockResolvedValue({ data: null, error: null }),
+            })),
+          })),
+        };
+      }
+      if (table === "holding_geography_allocations") {
+        return {
+          select: vi.fn(() => ({
+            eq: vi.fn(() => ({
+              order: vi.fn(() => ({
+                limit: vi.fn().mockRejectedValue(new Error("profile lookup failed")),
+              })),
+            })),
+          })),
+        };
+      }
+      throw new Error(`Unexpected table: ${table}`);
+    });
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify([gammaEvent()]), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          }),
+      ),
+    );
+
+    const result = await runPolymarketFanout({ ...env, GROK_MAIN_API_KEY: "grok-key" });
+
+    expect(deleteFilters).toEqual([
+      ["portfolio_id", "portfolio-profile-failure"],
+      ["is_pinned", true],
+    ]);
+    expect(result).toMatchObject({
+      portfoliosProcessed: 0,
+      portfoliosSkipped: 1,
+      errors: [expect.stringContaining("profile lookup failed")],
     });
   });
 });
