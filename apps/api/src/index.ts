@@ -5545,11 +5545,11 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
         .gt("news_clusters.expires_at", new Date().toISOString())
         // Minimum score floor. Score is providerScore × recency × holdingsBooster.
         // Under Firecrawl's rank decay (0.95^(rank−1), clamped ≥0.2) a rank-10
-        // article never falls below 0.063 and a rank-25 article floors only past
-        // ~6.4 days old — the floor keeps its permissive intent and only trims
-        // the bottom-rank near-expiry tail; junk control lives in the fanout
-        // filters. Revisit upward (~0.10) only after observing served
-        // distributions (1A-114 spike, dimension 5).
+        // article never falls below 0.063 and a rank-15 article reaches the
+        // 0.05 serving floor only at the very end of the 7-day window. The floor
+        // keeps its permissive intent and only trims the bottom-rank near-expiry
+        // tail; junk control lives in the fanout filters. Revisit upward (~0.10)
+        // only after observing served distributions (1A-114 spike, dimension 5).
         .gte("score", 0.05)
         .order("score", { ascending: false })
         .limit(limit);

@@ -57,9 +57,10 @@ export function normalizeFirecrawlKey(key: string): string {
 
 // Firecrawl returns no relevance score, but its 1-based rank is empirically
 // meaningful (all on-target company results sat at rank ≤ 7 in the 1A-114
-// spike). Rank decay: 1 → 1.0, 5 → 0.81, 10 → 0.63, 25 → 0.29; the 0.2 clamp
-// never binds within limit 25. Missing rank → 0.5, mirroring the old
-// missing-score convention.
+// spike). Rank decay: 1 → 1.0, 5 → 0.81, 10 → 0.63, 15 → 0.49; the 0.2 clamp
+// does not bind within the production limits (10 for company queries, 15 for
+// market-topic queries). Missing rank → 0.5, mirroring the old missing-score
+// convention.
 export function providerScore(position: number | null | undefined): number {
   if (typeof position !== "number" || !Number.isFinite(position) || position < 1) return 0.5;
   return Math.max(0.2, 0.95 ** (position - 1));
