@@ -1,10 +1,5 @@
 import { type SupabaseClient } from "@supabase/supabase-js";
-import {
-  adminDb,
-  assertPortfolioAccess,
-  requireAuth,
-  requirePortfolioAccess,
-} from "./auth";
+import { adminDb, assertPortfolioAccess, requireAuth, requirePortfolioAccess } from "./auth";
 import {
   buildEtfGeographyResearchPrompt,
   assetTypeWithCachedGeography,
@@ -115,13 +110,18 @@ function parseSymbols(raw: string | null): string[] {
 }
 
 function normalizeCurrencyCode(value: unknown): string | null {
-  const currency = String(value ?? "").trim().toUpperCase();
+  const currency = String(value ?? "")
+    .trim()
+    .toUpperCase();
   return /^[A-Z]{3}$/.test(currency) ? currency : null;
 }
 
 // Copy only whitelisted keys from a client-supplied body. Prevents callers from
 // setting internal/ownership columns (e.g. user_id) on insert/update.
-function pickColumns(body: Record<string, unknown>, keys: readonly string[]): Record<string, unknown> {
+function pickColumns(
+  body: Record<string, unknown>,
+  keys: readonly string[],
+): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const key of keys) {
     if (body[key] !== undefined) out[key] = body[key];
@@ -206,7 +206,10 @@ async function searchYahooAssets(query: string): Promise<AssetSearchResult[]> {
     .slice(0, 10);
 }
 
-function yahooExchangeToPrimary(exchange: string | null | undefined, ticker: string | null | undefined): string | null {
+function yahooExchangeToPrimary(
+  exchange: string | null | undefined,
+  ticker: string | null | undefined,
+): string | null {
   const value = `${exchange ?? ""} ${ticker ?? ""}`.toUpperCase();
   if (/\b(NYQ|NYSE)\b/.test(value)) return "NYSE";
   if (/\b(NMS|NGM|NCM|NASDAQ)\b/.test(value)) return "NASDAQ";
@@ -231,7 +234,10 @@ function parseFlexibleNumber(raw: string | number | null | undefined): number {
   if (lastComma > -1 && lastDot > -1) {
     const decimalSeparator = lastComma > lastDot ? "," : ".";
     const thousandsSeparator = decimalSeparator === "," ? "." : ",";
-    return Number.parseFloat(value.split(thousandsSeparator).join("").replace(decimalSeparator, ".")) || 0;
+    return (
+      Number.parseFloat(value.split(thousandsSeparator).join("").replace(decimalSeparator, ".")) ||
+      0
+    );
   }
 
   if (lastComma > -1) {
@@ -290,7 +296,14 @@ function computeDailyTwrByDate(
 }
 
 function isTransactionSide(value: unknown): value is TransactionSide {
-  return value === "BUY" || value === "SELL" || value === "DEP" || value === "WD" || value === "DIV" || value === "FEE";
+  return (
+    value === "BUY" ||
+    value === "SELL" ||
+    value === "DEP" ||
+    value === "WD" ||
+    value === "DIV" ||
+    value === "FEE"
+  );
 }
 
 function normalizeTransactionRows(rows: NormalisedTransactionRow[]): NormalisedTransactionRow[] {
@@ -441,12 +454,7 @@ interface YahooQuoteSummaryResponse {
 
 type AgentRunTriggerType = "scheduled" | "ondemand";
 type AgentRunStatus =
-  | "queued"
-  | "running"
-  | "completed"
-  | "failed"
-  | "cancelled"
-  | "failed_validation";
+  "queued" | "running" | "completed" | "failed" | "cancelled" | "failed_validation";
 
 interface AgentRunQueueMessage {
   runId: string;
@@ -477,10 +485,7 @@ interface GeographyQueueMessage {
 }
 
 type WorkerQueueMessage =
-  | AgentRunQueueMessage
-  | SnapshotQueueMessage
-  | GeographyQueueMessage
-  | RecapQueueMessage;
+  AgentRunQueueMessage | SnapshotQueueMessage | GeographyQueueMessage | RecapQueueMessage;
 
 const STALE_GEOGRAPHY_RUNNING_JOB_MS = 15 * 60 * 1000;
 
@@ -519,11 +524,7 @@ interface AssetSearchResult {
 }
 
 type AgentToolName =
-  | "portfolio_context"
-  | "market_quotes"
-  | "get_ecb_data"
-  | "get_fred_indicator"
-  | "search_news";
+  "portfolio_context" | "market_quotes" | "get_ecb_data" | "get_fred_indicator" | "search_news";
 
 interface AgentToolCall {
   tool: AgentToolName;
@@ -976,9 +977,11 @@ async function researchEtfGeography(
       webSearchModel,
     });
     if (constituentsData) {
-      void upsertEtfConstituents(adminDb(env), holding.isin, constituentsData).catch((err: unknown) => {
-        console.error(`[etf-constituents] side-effect upsert failed for ${holding.isin}:`, err);
-      });
+      void upsertEtfConstituents(adminDb(env), holding.isin, constituentsData).catch(
+        (err: unknown) => {
+          console.error(`[etf-constituents] side-effect upsert failed for ${holding.isin}:`, err);
+        },
+      );
     }
   }
 
@@ -1047,9 +1050,7 @@ async function invokeGrokWebGeographyResearch(
   };
 }
 
-function resolveFastHoldingGeography(
-  holding: HoldingGeographyRow,
-): {
+function resolveFastHoldingGeography(holding: HoldingGeographyRow): {
   allocations: NormalizedGeographyAllocation[];
   source: GeographySource;
   confidence: number;
@@ -1100,7 +1101,10 @@ async function runGeographyMonthlyRefresh(env: Env): Promise<void> {
   );
 }
 
-async function recomputePortfolioGeography(env: Env, portfolioId: string): Promise<{
+async function recomputePortfolioGeography(
+  env: Env,
+  portfolioId: string,
+): Promise<{
   checked: number;
   resolved: number;
   unresolved: number;
@@ -1132,7 +1136,9 @@ async function recomputePortfolioGeography(env: Env, portfolioId: string): Promi
           .select("holding_id,source")
           .in("holding_id", holdingIds);
   if (existingAllocationsError) {
-    throw new Error(`geography existing allocations lookup failed: ${existingAllocationsError.message}`);
+    throw new Error(
+      `geography existing allocations lookup failed: ${existingAllocationsError.message}`,
+    );
   }
 
   const allocationSourcesByHolding = new Map<string, string[]>();
@@ -1233,7 +1239,9 @@ async function recomputePortfolioGeography(env: Env, portfolioId: string): Promi
       .neq("source", "llm_web");
   }
   if (allocationRows.length > 0) {
-    const { error: insertError } = await client.from("holding_geography_allocations").insert(allocationRows);
+    const { error: insertError } = await client
+      .from("holding_geography_allocations")
+      .insert(allocationRows);
     if (insertError) throw new Error(`geography allocation insert failed: ${insertError.message}`);
   }
 
@@ -1274,7 +1282,8 @@ async function pendingFundLikeHoldingIds(
     .from("holding_geography_allocations")
     .select("holding_id,source")
     .in("holding_id", holdingIds);
-  if (allocationsError) throw new Error(`pending geography allocations lookup failed: ${allocationsError.message}`);
+  if (allocationsError)
+    throw new Error(`pending geography allocations lookup failed: ${allocationsError.message}`);
 
   const coveredHoldingIds = new Set(
     (allocations ?? [])
@@ -1291,7 +1300,12 @@ async function enqueuePendingGeographyResearch(
   portfolioId: string,
   reason: GeographyQueueMessage["reason"],
   options: { force?: boolean; includeResearched?: boolean } = {},
-): Promise<{ queued: boolean; pendingResearchCount: number; holdingIds: string[]; sentHoldingIds: string[] }> {
+): Promise<{
+  queued: boolean;
+  pendingResearchCount: number;
+  holdingIds: string[];
+  sentHoldingIds: string[];
+}> {
   const client = adminDb(env);
   const holdingIds = await pendingFundLikeHoldingIds(env, portfolioId, {
     includeResearched: options.includeResearched,
@@ -1305,7 +1319,8 @@ async function enqueuePendingGeographyResearch(
     .from("geography_research_jobs")
     .select("holding_id,status,started_at,updated_at")
     .in("holding_id", holdingIds);
-  if (existingJobsError) throw new Error(`geography jobs lookup failed: ${existingJobsError.message}`);
+  if (existingJobsError)
+    throw new Error(`geography jobs lookup failed: ${existingJobsError.message}`);
 
   const jobsByHolding = new Map(
     (existingJobs ?? []).map((job) => [
@@ -1328,12 +1343,24 @@ async function enqueuePendingGeographyResearch(
   });
 
   if (holdingIdsToQueue.length === 0) {
-    return { queued: false, pendingResearchCount: holdingIds.length, holdingIds, sentHoldingIds: [] };
+    return {
+      queued: false,
+      pendingResearchCount: holdingIds.length,
+      holdingIds,
+      sentHoldingIds: [],
+    };
   }
 
   if (!env.GEOGRAPHY_QUEUE) {
-    console.warn(`GEOGRAPHY_QUEUE binding missing; ${holdingIdsToQueue.length} geography research jobs not queued`);
-    return { queued: false, pendingResearchCount: holdingIds.length, holdingIds, sentHoldingIds: [] };
+    console.warn(
+      `GEOGRAPHY_QUEUE binding missing; ${holdingIdsToQueue.length} geography research jobs not queued`,
+    );
+    return {
+      queued: false,
+      pendingResearchCount: holdingIds.length,
+      holdingIds,
+      sentHoldingIds: [],
+    };
   }
 
   const now = new Date().toISOString();
@@ -1392,17 +1419,23 @@ async function syncAndEnqueueGeography(
   };
 }
 
-async function refreshMissingFundLikeAssetTypes(env: Env, portfolioId: string): Promise<{ updated: number }> {
+async function refreshMissingFundLikeAssetTypes(
+  env: Env,
+  portfolioId: string,
+): Promise<{ updated: number }> {
   const client = adminDb(env);
   const { data: holdings, error: holdingsError } = await client
     .from("holdings")
     .select("id,ticker,name,asset_type")
     .eq("portfolio_id", portfolioId);
-  if (holdingsError) throw new Error(`geography repair holdings lookup failed: ${holdingsError.message}`);
+  if (holdingsError)
+    throw new Error(`geography repair holdings lookup failed: ${holdingsError.message}`);
 
   const holdingRows = (holdings ?? []).map((row) => ({
     id: String(row.id),
-    ticker: String(row.ticker ?? "").trim().toUpperCase(),
+    ticker: String(row.ticker ?? "")
+      .trim()
+      .toUpperCase(),
     name: String(row.name ?? row.ticker ?? ""),
     assetType: row.asset_type == null ? null : String(row.asset_type),
   }));
@@ -1413,7 +1446,8 @@ async function refreshMissingFundLikeAssetTypes(env: Env, portfolioId: string): 
     .from("holding_geography_allocations")
     .select("holding_id,source")
     .in("holding_id", holdingIds);
-  if (allocationsError) throw new Error(`geography repair allocation lookup failed: ${allocationsError.message}`);
+  if (allocationsError)
+    throw new Error(`geography repair allocation lookup failed: ${allocationsError.message}`);
 
   const coveredHoldingIds = new Set(
     (allocations ?? [])
@@ -1440,11 +1474,16 @@ async function refreshMissingFundLikeAssetTypes(env: Env, portfolioId: string): 
       id: holding.id,
       assetType: typeByTicker.get(holding.ticker),
     }))
-    .filter((holding): holding is { id: string; assetType: string } => isFundLikeAsset(holding.assetType));
+    .filter((holding): holding is { id: string; assetType: string } =>
+      isFundLikeAsset(holding.assetType),
+    );
 
   await Promise.all(
     updates.map(async (holding) => {
-      const { error } = await client.from("holdings").update({ asset_type: holding.assetType }).eq("id", holding.id);
+      const { error } = await client
+        .from("holdings")
+        .update({ asset_type: holding.assetType })
+        .eq("id", holding.id);
       if (error) throw new Error(`geography repair asset type update failed: ${error.message}`);
     }),
   );
@@ -1452,7 +1491,10 @@ async function refreshMissingFundLikeAssetTypes(env: Env, portfolioId: string): 
   return { updated: updates.length };
 }
 
-async function repairPortfolioGeography(env: Env, portfolioId: string): Promise<{
+async function repairPortfolioGeography(
+  env: Env,
+  portfolioId: string,
+): Promise<{
   checked: number;
   resolved: number;
   unresolved: number;
@@ -1463,7 +1505,9 @@ async function repairPortfolioGeography(env: Env, portfolioId: string): Promise<
 }> {
   const assetTypeRepair = await refreshMissingFundLikeAssetTypes(env, portfolioId);
   const result = await recomputePortfolioGeography(env, portfolioId);
-  const queued = await enqueuePendingGeographyResearch(env, portfolioId, "manual_retry", { force: true });
+  const queued = await enqueuePendingGeographyResearch(env, portfolioId, "manual_retry", {
+    force: true,
+  });
   return {
     ...result,
     pendingResearch: queued.pendingResearchCount,
@@ -1569,7 +1613,8 @@ function completedUnknownGeographyReason(result: {
   const rejectedWeightTotal = Number(diagnostics?.rejectedWeightTotal ?? NaN);
   const notes = typeof result.evidence.notes === "string" ? result.evidence.notes.trim() : "";
   const parts = [reason];
-  if (Number.isFinite(acceptedWeightTotal)) parts.push(`accepted ${acceptedWeightTotal.toFixed(1)}%`);
+  if (Number.isFinite(acceptedWeightTotal))
+    parts.push(`accepted ${acceptedWeightTotal.toFixed(1)}%`);
   if (Number.isFinite(rejectedWeightTotal) && rejectedWeightTotal > 0) {
     parts.push(`rejected ${rejectedWeightTotal.toFixed(1)}%`);
   }
@@ -1582,7 +1627,11 @@ function completedUnknownGeographyReason(result: {
 export async function researchPortfolioEtfGeography(
   env: Env,
   portfolioId: string,
-  options: { holdingIds?: string[]; onlyPending?: boolean; reason?: GeographyQueueMessage["reason"] } = {},
+  options: {
+    holdingIds?: string[];
+    onlyPending?: boolean;
+    reason?: GeographyQueueMessage["reason"];
+  } = {},
 ): Promise<{ checked: number; resolved: number; unresolved: number }> {
   const client = adminDb(env);
   const { data, error } = await client
@@ -1614,7 +1663,8 @@ export async function researchPortfolioEtfGeography(
           .from("holding_geography_allocations")
           .select("holding_id,source,updated_at")
           .in("holding_id", holdingIds);
-  if (allocationsError) throw new Error(`ETF geography allocations lookup failed: ${allocationsError.message}`);
+  if (allocationsError)
+    throw new Error(`ETF geography allocations lookup failed: ${allocationsError.message}`);
 
   const allocationsByHolding = new Map<string, Array<Record<string, unknown>>>();
   for (const allocation of allocationsData ?? []) {
@@ -1628,11 +1678,16 @@ export async function researchPortfolioEtfGeography(
     const alreadyCoveredHoldings = holdings.filter(
       (holding) => (allocationsByHolding.get(holding.id) ?? []).length > 0,
     );
-    await Promise.all(alreadyCoveredHoldings.map((holding) => markGeographyJobCompleted(client, holding.id)));
+    await Promise.all(
+      alreadyCoveredHoldings.map((holding) => markGeographyJobCompleted(client, holding.id)),
+    );
   }
 
   const holdingsToResearch = holdings
-    .filter((holding) => !options.onlyPending || (allocationsByHolding.get(holding.id) ?? []).length === 0)
+    .filter(
+      (holding) =>
+        !options.onlyPending || (allocationsByHolding.get(holding.id) ?? []).length === 0,
+    )
     .sort((a, b) => {
       const aPending = (allocationsByHolding.get(a.id) ?? []).length === 0 ? 0 : 1;
       const bPending = (allocationsByHolding.get(b.id) ?? []).length === 0 ? 0 : 1;
@@ -1690,7 +1745,8 @@ export async function researchPortfolioEtfGeography(
             evidence: result.evidence,
           })),
         );
-        if (insertError) throw new Error(`ETF geography allocation insert failed: ${insertError.message}`);
+        if (insertError)
+          throw new Error(`ETF geography allocation insert failed: ${insertError.message}`);
       }
       await markGeographyJobCompleted(client, holding.id, {
         lastError: result.allocations.length === 0 ? completedUnknownGeographyReason(result) : null,
@@ -1701,7 +1757,11 @@ export async function researchPortfolioEtfGeography(
     }
   }
 
-  return { checked: holdingsToResearch.length, resolved, unresolved: holdingsToResearch.length - resolved };
+  return {
+    checked: holdingsToResearch.length,
+    resolved,
+    unresolved: holdingsToResearch.length - resolved,
+  };
 }
 
 async function getPortfolioGeography(
@@ -1720,7 +1780,8 @@ async function getPortfolioGeography(
     .select("currency")
     .eq("id", portfolioId)
     .single();
-  if (portfolioError) throw new Error(`geography portfolio lookup failed: ${portfolioError.message}`);
+  if (portfolioError)
+    throw new Error(`geography portfolio lookup failed: ${portfolioError.message}`);
   const portfolioCurrency = normalizeCurrencyCode(portfolioData?.currency) ?? "EUR";
 
   const holdings = (holdingsData ?? []).map((row) => ({
@@ -1732,7 +1793,8 @@ async function getPortfolioGeography(
     quantity: Number(row.quantity ?? 0),
     purchase_price: Number(row.purchase_price ?? 0),
     fees: Number(row.fees ?? 0),
-    geography_checked_at: row.geography_checked_at == null ? null : String(row.geography_checked_at),
+    geography_checked_at:
+      row.geography_checked_at == null ? null : String(row.geography_checked_at),
   }));
   const holdingIds = holdings.map((holding) => holding.id);
   const { data: allocationsData, error: allocationsError } =
@@ -1742,7 +1804,8 @@ async function getPortfolioGeography(
           .from("holding_geography_allocations")
           .select("holding_id,country_code,country_name,weight_pct,source,confidence,updated_at")
           .in("holding_id", holdingIds);
-  if (allocationsError) throw new Error(`geography allocations lookup failed: ${allocationsError.message}`);
+  if (allocationsError)
+    throw new Error(`geography allocations lookup failed: ${allocationsError.message}`);
 
   const { data: jobsData, error: jobsError } =
     holdingIds.length === 0
@@ -1754,7 +1817,9 @@ async function getPortfolioGeography(
   if (jobsError) throw new Error(`geography jobs lookup failed: ${jobsError.message}`);
 
   const quotesBySymbol =
-    options.useQuotes === false ? {} : await getQuotesResilient(holdings.map((holding) => holding.ticker));
+    options.useQuotes === false
+      ? {}
+      : await getQuotesResilient(holdings.map((holding) => holding.ticker));
   const fxRates = await getFxRates(
     holdings.map((holding) => quotesBySymbol[holding.ticker]?.currency ?? holding.currency),
     portfolioCurrency,
@@ -1798,7 +1863,12 @@ async function getPortfolioGeography(
     const sourceCurrency = quote?.currency ?? holding.currency;
     const value = Math.max(
       0,
-      convertCurrencyValue(price * holding.quantity + holding.fees, sourceCurrency, portfolioCurrency, fxRates),
+      convertCurrencyValue(
+        price * holding.quantity + holding.fees,
+        sourceCurrency,
+        portfolioCurrency,
+        fxRates,
+      ),
     );
     securitiesValue += value;
 
@@ -1836,13 +1906,16 @@ async function getPortfolioGeography(
       };
       current.value += countryValue;
       current.confidence = Math.max(current.confidence, Number(allocation.confidence ?? 0));
-      if (current.source !== "llm_web") current.source = String(allocation.source ?? current.source);
+      if (current.source !== "llm_web")
+        current.source = String(allocation.source ?? current.source);
       countryValues.set(code, current);
     }
 
     if (holding.geography_checked_at) {
-      if (!freshest || holding.geography_checked_at > freshest) freshest = holding.geography_checked_at;
-      if (!stalest || holding.geography_checked_at < stalest) stalest = holding.geography_checked_at;
+      if (!freshest || holding.geography_checked_at > freshest)
+        freshest = holding.geography_checked_at;
+      if (!stalest || holding.geography_checked_at < stalest)
+        stalest = holding.geography_checked_at;
     }
   }
 
@@ -1866,7 +1939,10 @@ async function getPortfolioGeography(
     runningResearchCount,
     failedResearchCount,
     completedUnknownResearchCount,
-    completedUnknownResearchReasons: Array.from(new Set(completedUnknownResearchReasons)).slice(0, 3),
+    completedUnknownResearchReasons: Array.from(new Set(completedUnknownResearchReasons)).slice(
+      0,
+      3,
+    ),
     failedResearchReasons: Array.from(new Set(failedResearchReasons)).slice(0, 3),
     checkedAt: freshest,
     oldestCheckedAt: stalest,
@@ -1897,9 +1973,7 @@ async function getQuotesFromBatch(symbols: string[]): Promise<Record<string, Yah
       (currentPrice != null &&
       row.regularMarketPreviousClose != null &&
       row.regularMarketPreviousClose !== 0
-        ? ((currentPrice - row.regularMarketPreviousClose) /
-          row.regularMarketPreviousClose) *
-          100
+        ? ((currentPrice - row.regularMarketPreviousClose) / row.regularMarketPreviousClose) * 100
         : null);
 
     acc[symbol] = {
@@ -1980,7 +2054,10 @@ function currencyRateKey(from: string, to: string): string {
   return `${from}:${to}`;
 }
 
-async function getFxRates(sourceCurrencies: string[], targetCurrency: string): Promise<Record<string, number>> {
+async function getFxRates(
+  sourceCurrencies: string[],
+  targetCurrency: string,
+): Promise<Record<string, number>> {
   const target = normalizeCurrencyCode(targetCurrency) ?? "EUR";
   const sources = Array.from(
     new Set(sourceCurrencies.map((currency) => normalizeCurrencyCode(currency) ?? target)),
@@ -2137,7 +2214,8 @@ async function getBenchmarkPrices(
   const latestCachedDate = cached.at(-1)?.date ?? null;
   const cacheCoversRequestedStart =
     earliestCachedDate != null && earliestCachedDate <= latestAcceptableFirstCachedDate;
-  if (cacheCoversRequestedStart && latestCachedDate && latestCachedDate >= staleAfterDate) return cached;
+  if (cacheCoversRequestedStart && latestCachedDate && latestCachedDate >= staleAfterDate)
+    return cached;
 
   try {
     const { prices } = await fetchHistoricalPrices(normalizedTicker, from);
@@ -2278,8 +2356,13 @@ function benchmarkAssetTypeScore(assetType: string): number {
   return 5;
 }
 
-function scoreBenchmarkCandidate(concept: BenchmarkConcept, candidate: AssetSearchResult, query: string): number {
-  const candidateText = `${candidate.name} ${candidate.ticker} ${candidate.assetType} ${candidate.exchange}`.toLowerCase();
+function scoreBenchmarkCandidate(
+  concept: BenchmarkConcept,
+  candidate: AssetSearchResult,
+  query: string,
+): number {
+  const candidateText =
+    `${candidate.name} ${candidate.ticker} ${candidate.assetType} ${candidate.exchange}`.toLowerCase();
   const conceptName = concept.name.toLowerCase();
   const conceptTokens = tokenizeBenchmarkText(`${concept.name} ${query}`);
   const uniqueTokens = Array.from(new Set(conceptTokens));
@@ -2302,7 +2385,9 @@ async function collectBenchmarkCandidates(
   const byTicker = new Map<string, AssetSearchResult & { score: number }>();
   let checked = 0;
   const queries = Array.from(
-    new Set([concept.name, ...concept.yahooSearchQueries].map((query) => query.trim()).filter(Boolean)),
+    new Set(
+      [concept.name, ...concept.yahooSearchQueries].map((query) => query.trim()).filter(Boolean),
+    ),
   ).slice(0, 6);
 
   for (const query of queries) {
@@ -2324,7 +2409,10 @@ async function collectBenchmarkCandidates(
   return { candidates, checked };
 }
 
-async function getBenchmarkWebFallbackQueries(env: Env, concept: BenchmarkConcept): Promise<string[]> {
+async function getBenchmarkWebFallbackQueries(
+  env: Env,
+  concept: BenchmarkConcept,
+): Promise<string[]> {
   const apiKey = env.GROK_SUB_API_KEY ?? env.GROK_NORMALIZATION_API_KEY;
   if (!apiKey) return [];
   const body = {
@@ -2338,7 +2426,7 @@ async function getBenchmarkWebFallbackQueries(env: Env, concept: BenchmarkConcep
             text: [
               "You resolve investment benchmark concepts to Yahoo Finance searchable names.",
               "Use web search only to clarify the exact index, ETF, or fund name.",
-              "Return strict JSON only: {\"yahooSearchQueries\":[\"...\"]}.",
+              'Return strict JSON only: {"yahooSearchQueries":["..."]}.',
             ].join(" "),
           },
         ],
@@ -2375,7 +2463,10 @@ async function getBenchmarkWebFallbackQueries(env: Env, concept: BenchmarkConcep
 async function resolveBenchmarkConcepts(
   env: Env,
   concepts: BenchmarkConcept[],
-): Promise<{ suggestions: ResolvedBenchmarkSuggestion[]; diagnostics: BenchmarkSuggestionDiagnostics }> {
+): Promise<{
+  suggestions: ResolvedBenchmarkSuggestion[];
+  diagnostics: BenchmarkSuggestionDiagnostics;
+}> {
   const suggestions: ResolvedBenchmarkSuggestion[] = [];
   const seenTickers = new Set<string>();
   const diagnostics: BenchmarkSuggestionDiagnostics = {
@@ -2394,7 +2485,9 @@ async function resolveBenchmarkConcepts(
       if (fallbackQueries.length > 0) {
         const fallbackConcept = {
           ...concept,
-          yahooSearchQueries: Array.from(new Set([...concept.yahooSearchQueries, ...fallbackQueries])),
+          yahooSearchQueries: Array.from(
+            new Set([...concept.yahooSearchQueries, ...fallbackQueries]),
+          ),
         };
         const fallbackResult = await collectBenchmarkCandidates(fallbackConcept);
         candidates = fallbackResult.candidates;
@@ -2440,8 +2533,10 @@ async function buildBenchmarkSuggestionHoldingsPayload(
   if (rows.length === 0) return [];
 
   const [sectorsBySymbol, quotesBySymbol, allocationsResult] = await Promise.all([
-    getSectorsForSymbols(rows.map((row) => row.ticker)).catch(() => ({} as Record<string, string>)),
-    getQuotesResilient(rows.map((row) => row.ticker)).catch(() => ({} as Record<string, YahooQuoteItem>)),
+    getSectorsForSymbols(rows.map((row) => row.ticker)).catch(() => ({}) as Record<string, string>),
+    getQuotesResilient(rows.map((row) => row.ticker)).catch(
+      () => ({}) as Record<string, YahooQuoteItem>,
+    ),
     client
       .from("holding_geography_allocations")
       .select("holding_id,country_name,weight_pct")
@@ -2466,7 +2561,8 @@ async function buildBenchmarkSuggestionHoldingsPayload(
     return {
       ...row,
       value: Math.max(0, price * row.quantity),
-      assetType: normalizeYahooAssetType(quote?.assetType, row.assetType) ?? row.assetType ?? "Other",
+      assetType:
+        normalizeYahooAssetType(quote?.assetType, row.assetType) ?? row.assetType ?? "Other",
       sector: sectorsBySymbol[row.ticker] ?? row.assetType ?? "Other",
     };
   });
@@ -2569,7 +2665,10 @@ async function buildBenchmarkPortfolioSummary(
       : await client
           .from("holding_geography_allocations")
           .select("holding_id,country_name,weight_pct")
-          .in("holding_id", holdings.map((holding) => holding.id));
+          .in(
+            "holding_id",
+            holdings.map((holding) => holding.id),
+          );
   if (allocationsResult.error) throw new Error(allocationsResult.error.message);
 
   const allocationsByHolding = new Map<string, Array<{ countryName: string; weightPct: number }>>();
@@ -2631,7 +2730,8 @@ async function getAssetMetadataFromBatch(symbols: string[]): Promise<{
     if (!symbol) continue;
     const assetType = normalizeYahooAssetType(row.quoteType, row.typeDisp);
     if (assetType) typeByTicker.set(symbol, assetType);
-    const currency = normalizeCurrencyCode(row.currency) ?? normalizeCurrencyCode(row.financialCurrency);
+    const currency =
+      normalizeCurrencyCode(row.currency) ?? normalizeCurrencyCode(row.financialCurrency);
     if (currency) currencyByTicker.set(symbol, currency);
   }
   return { typeByTicker, currencyByTicker };
@@ -2648,10 +2748,15 @@ async function getPricesByTicker(
 }> {
   const client = adminDb(env);
   const allPriceRows: Array<{ yahoo_ticker: string; date: string; closing_price: number }> = [];
-  const { typeByTicker, currencyByTicker } = await getAssetMetadataFromBatch(tickers).catch((error) => {
-    console.error("asset metadata fetch failed", error);
-    return { typeByTicker: new Map<string, string>(), currencyByTicker: new Map<string, string>() };
-  });
+  const { typeByTicker, currencyByTicker } = await getAssetMetadataFromBatch(tickers).catch(
+    (error) => {
+      console.error("asset metadata fetch failed", error);
+      return {
+        typeByTicker: new Map<string, string>(),
+        currencyByTicker: new Map<string, string>(),
+      };
+    },
+  );
   const entries = await Promise.all(
     tickers.map(async (ticker) => {
       try {
@@ -2725,7 +2830,9 @@ function getCarryForwardPrice(dateMap: Map<string, number> | undefined, dateStr:
 async function loadPortfolioTransactions(env: Env, portfolioId: string): Promise<TransactionRow[]> {
   const { data, error } = await adminDb(env)
     .from("transactions")
-    .select("id, portfolio_id, date, symbol, isin, yahoo_ticker, side, quantity, net_amount, commission")
+    .select(
+      "id, portfolio_id, date, symbol, isin, yahoo_ticker, side, quantity, net_amount, commission",
+    )
     .eq("portfolio_id", portfolioId)
     .order("date", { ascending: true });
   if (error) throw new Error(error.message);
@@ -2743,7 +2850,10 @@ async function loadPortfolioTransactions(env: Env, portfolioId: string): Promise
   }));
 }
 
-function stableGeographyKey(input: { isin?: string | null; ticker?: string | null }): string | null {
+function stableGeographyKey(input: {
+  isin?: string | null;
+  ticker?: string | null;
+}): string | null {
   const isin = input.isin?.trim().toUpperCase();
   if (isin) return `isin:${isin}`;
   const ticker = input.ticker?.trim().toUpperCase();
@@ -2780,7 +2890,8 @@ async function snapshotHoldingGeography(
       "id,ticker,isin,asset_type,country_code,country_name,geography_source,geography_confidence,geography_checked_at",
     )
     .eq("portfolio_id", portfolioId);
-  if (holdingsError) throw new Error(`geography snapshot holdings lookup failed: ${holdingsError.message}`);
+  if (holdingsError)
+    throw new Error(`geography snapshot holdings lookup failed: ${holdingsError.message}`);
 
   const holdingKeysById = new Map<string, string>();
   const snapshot = new Map<string, CachedHoldingGeography>();
@@ -2797,7 +2908,8 @@ async function snapshotHoldingGeography(
       country_name: holding.country_name == null ? null : String(holding.country_name),
       geography_source: String(holding.geography_source ?? "unknown") as GeographySource,
       geography_confidence: Number(holding.geography_confidence ?? 0),
-      geography_checked_at: holding.geography_checked_at == null ? null : String(holding.geography_checked_at),
+      geography_checked_at:
+        holding.geography_checked_at == null ? null : String(holding.geography_checked_at),
       allocations: [],
     });
   }
@@ -2808,7 +2920,8 @@ async function snapshotHoldingGeography(
     .from("holding_geography_allocations")
     .select("holding_id,country_code,country_name,weight_pct,source,confidence,evidence")
     .in("holding_id", holdingIds);
-  if (allocationsError) throw new Error(`geography snapshot allocations lookup failed: ${allocationsError.message}`);
+  if (allocationsError)
+    throw new Error(`geography snapshot allocations lookup failed: ${allocationsError.message}`);
 
   for (const allocation of allocations ?? []) {
     const key = holdingKeysById.get(String(allocation.holding_id));
@@ -2894,7 +3007,10 @@ async function rebuildCurrentHoldings(
     else lots.delete(key);
   }
 
-  const { error: deleteError } = await client.from("holdings").delete().eq("portfolio_id", portfolioId);
+  const { error: deleteError } = await client
+    .from("holdings")
+    .delete()
+    .eq("portfolio_id", portfolioId);
   if (deleteError) throw new Error(`holdings rebuild delete failed: ${deleteError.message}`);
   const holdingRows = [...lots.values()].map((lot) => {
     const ticker = lot.ticker.toUpperCase();
@@ -2939,12 +3055,16 @@ async function rebuildCurrentHoldings(
       const assetType = holding.asset_type == null ? null : String(holding.asset_type);
       const isFundLike = !shouldInferDirectGeographyFromIsin(assetType, name, ticker);
       const allocationsToRestore = isFundLike
-        ? (cached?.allocations ?? []).filter((allocation) => isValidFundGeographySource(allocation.source))
+        ? (cached?.allocations ?? []).filter((allocation) =>
+            isValidFundGeographySource(allocation.source),
+          )
         : (cached?.allocations ?? []);
       const shouldRestoreHoldingGeography =
         Boolean(cached) &&
         (!isFundLike ||
-          hasValidFundGeographyAllocation((cached?.allocations ?? []).map((allocation) => allocation.source)));
+          hasValidFundGeographyAllocation(
+            (cached?.allocations ?? []).map((allocation) => allocation.source),
+          ));
 
       if (cached && shouldRestoreHoldingGeography) {
         restoredHoldingUpdates.push({
@@ -2975,7 +3095,8 @@ async function rebuildCurrentHoldings(
             geography_checked_at: holding.geography_checked_at,
           })
           .eq("id", holding.id);
-        if (restoreHoldingError) throw new Error(`holding geography restore failed: ${restoreHoldingError.message}`);
+        if (restoreHoldingError)
+          throw new Error(`holding geography restore failed: ${restoreHoldingError.message}`);
       }),
     );
     if (restoredRows.length > 0) {
@@ -3010,7 +3131,8 @@ function computeSnapshotForDate(
   let securitiesValue = 0;
   for (const holding of holdings.values()) {
     if (holding.quantity <= 0 || !holding.ticker) continue;
-    securitiesValue += holding.quantity * getCarryForwardPrice(pricesByTicker.get(holding.ticker), dateStr);
+    securitiesValue +=
+      holding.quantity * getCarryForwardPrice(pricesByTicker.get(holding.ticker), dateStr);
   }
 
   return {
@@ -3036,8 +3158,14 @@ async function recomputeSnapshots(env: Env, portfolioId: string): Promise<void> 
   const firstDate = new Date(`${txns[0].date}T00:00:00.000Z`);
   const today = new Date();
   today.setUTCHours(0, 0, 0, 0);
-  const tickers = Array.from(new Set(txns.map((txn) => txn.yahoo_ticker).filter(Boolean))) as string[];
-  const { pricesByTicker, typeByTicker, currencyByTicker } = await getPricesByTicker(env, tickers, firstDate);
+  const tickers = Array.from(
+    new Set(txns.map((txn) => txn.yahoo_ticker).filter(Boolean)),
+  ) as string[];
+  const { pricesByTicker, typeByTicker, currencyByTicker } = await getPricesByTicker(
+    env,
+    tickers,
+    firstDate,
+  );
   await rebuildCurrentHoldings(env, portfolioId, typeByTicker, currencyByTicker);
   const snapshots: Array<{
     portfolio_id: string;
@@ -3103,7 +3231,9 @@ async function appendTodaySnapshot(env: Env, portfolioId: string): Promise<strin
   const txns = await loadPortfolioTransactions(env, portfolioId);
   if (txns.length === 0) return null;
 
-  const tickers = Array.from(new Set(txns.map((txn) => txn.yahoo_ticker).filter(Boolean))) as string[];
+  const tickers = Array.from(
+    new Set(txns.map((txn) => txn.yahoo_ticker).filter(Boolean)),
+  ) as string[];
   const { pricesByTicker, typeByTicker, currencyByTicker } = await getPricesByTicker(
     env,
     tickers,
@@ -3121,10 +3251,12 @@ async function appendTodaySnapshot(env: Env, portfolioId: string): Promise<strin
 
   const date = latestTradingDay;
   const snapshotData = computeSnapshotForDate(txns, pricesByTicker, date);
-  await adminDb(env).from("portfolio_snapshots").upsert(
-    { portfolio_id: portfolioId, date, ...snapshotData },
-    { onConflict: "portfolio_id,date" },
-  );
+  await adminDb(env)
+    .from("portfolio_snapshots")
+    .upsert(
+      { portfolio_id: portfolioId, date, ...snapshotData },
+      { onConflict: "portfolio_id,date" },
+    );
 
   // Compute TWR incrementally from the previous snapshot
   const { data: prevSnaps } = await adminDb(env)
@@ -3141,7 +3273,8 @@ async function appendTodaySnapshot(env: Env, portfolioId: string): Promise<strin
   let twr_pct = 0;
   if (prev && Number(prev.total_value) > 0) {
     const prevIndex = 1 + Number(prev.twr_pct ?? 0) / 100;
-    const periodReturn = (snapshotData.total_value - todayFlow - Number(prev.total_value)) / Number(prev.total_value);
+    const periodReturn =
+      (snapshotData.total_value - todayFlow - Number(prev.total_value)) / Number(prev.total_value);
     const newIndex = Number.isFinite(periodReturn) ? prevIndex * (1 + periodReturn) : prevIndex;
     twr_pct = Math.round((newIndex - 1) * 100 * 100) / 100;
   }
@@ -3155,7 +3288,10 @@ async function appendTodaySnapshot(env: Env, portfolioId: string): Promise<strin
   return date;
 }
 
-async function enqueueDailySnapshotsForClosedMarkets(env: Env, scheduledTime: number): Promise<void> {
+async function enqueueDailySnapshotsForClosedMarkets(
+  env: Env,
+  scheduledTime: number,
+): Promise<void> {
   if (!env.SNAPSHOT_QUEUE) return;
   const scheduledAt = new Date(scheduledTime);
   const timeKey = `${scheduledAt.getUTCHours()}:${String(scheduledAt.getUTCMinutes()).padStart(2, "0")}`;
@@ -3347,12 +3483,19 @@ async function createAndQueueRecap(
 async function runWeeklyRecapFanout(
   env: Env,
   options: { now: Date; dryRun?: boolean },
-): Promise<{ dryRun: boolean; checkedPortfolios: number; duePortfolios: number; queued: number; queuedIds: string[] }> {
+): Promise<{
+  dryRun: boolean;
+  checkedPortfolios: number;
+  duePortfolios: number;
+  queued: number;
+  queuedIds: string[];
+}> {
   const client = adminDb(env);
-  const [{ data: portfolios, error: pErr }, { data: userSettings, error: sErr }] = await Promise.all([
-    client.from("portfolios").select("id,user_id"),
-    client.from("agent_user_settings").select("user_id,timezone"),
-  ]);
+  const [{ data: portfolios, error: pErr }, { data: userSettings, error: sErr }] =
+    await Promise.all([
+      client.from("portfolios").select("id,user_id"),
+      client.from("agent_user_settings").select("user_id,timezone"),
+    ]);
   if (pErr) throw new Error(`weekly recap fanout portfolios error: ${pErr.message}`);
   if (sErr) throw new Error(`weekly recap fanout settings error: ${sErr.message}`);
 
@@ -3368,7 +3511,9 @@ async function runWeeklyRecapFanout(
 
   const due = (portfolios ?? []).filter((p) => {
     const tz = tzByUser.get(String(p.user_id)) ?? "Europe/Paris";
-    return getWeekdayInTimezone(options.now, tz) === "Sat" && getHourInTimezone(options.now, tz) === 8;
+    return (
+      getWeekdayInTimezone(options.now, tz) === "Sat" && getHourInTimezone(options.now, tz) === 8
+    );
   });
 
   if (options.dryRun) {
@@ -3418,21 +3563,27 @@ async function runScheduledFanout(
   }
 
   const client = adminDb(env);
-  const [{ data: portfolios, error: portfoliosError }, { data: userSettings, error: userSettingsError }, { data: portfolioSettings, error: portfolioSettingsError }] =
-    await Promise.all([
-      client.from("portfolios").select("id,user_id"),
-      client.from("agent_user_settings").select("user_id,timezone,global_runs_per_day"),
-      client
-        .from("agent_portfolio_settings")
-        .select("portfolio_id,user_id,runs_per_day_override,agent_enabled"),
-    ]);
+  const [
+    { data: portfolios, error: portfoliosError },
+    { data: userSettings, error: userSettingsError },
+    { data: portfolioSettings, error: portfolioSettingsError },
+  ] = await Promise.all([
+    client.from("portfolios").select("id,user_id"),
+    client.from("agent_user_settings").select("user_id,timezone,global_runs_per_day"),
+    client
+      .from("agent_portfolio_settings")
+      .select("portfolio_id,user_id,runs_per_day_override,agent_enabled"),
+  ]);
 
-  if (portfoliosError) throw new Error(`scheduled fanout portfolios error: ${portfoliosError.message}`);
+  if (portfoliosError)
+    throw new Error(`scheduled fanout portfolios error: ${portfoliosError.message}`);
   if (userSettingsError) {
     throw new Error(`scheduled fanout agent_user_settings error: ${userSettingsError.message}`);
   }
   if (portfolioSettingsError) {
-    throw new Error(`scheduled fanout agent_portfolio_settings error: ${portfolioSettingsError.message}`);
+    throw new Error(
+      `scheduled fanout agent_portfolio_settings error: ${portfolioSettingsError.message}`,
+    );
   }
 
   const userSettingsByUserId = new Map(
@@ -3530,7 +3681,9 @@ async function runPortfolioContextTool(
 
   const portfolioTickers = new Set((holdings ?? []).map((row) => String(row.ticker).toUpperCase()));
   const filteredTheses = (theses ?? []).filter((row) =>
-    (row.tickers ?? []).some((ticker: string) => portfolioTickers.has(String(ticker).toUpperCase())),
+    (row.tickers ?? []).some((ticker: string) =>
+      portfolioTickers.has(String(ticker).toUpperCase()),
+    ),
   );
 
   return {
@@ -3547,8 +3700,7 @@ async function runPortfolioContextTool(
       body: row.body ?? [],
       evidence: row.evidence ?? [],
       horizon: String(row.horizon ?? ""),
-      conviction:
-        row.conviction === "low" || row.conviction === "high" ? row.conviction : "med",
+      conviction: row.conviction === "low" || row.conviction === "high" ? row.conviction : "med",
       tickers: (row.tickers ?? []).map((ticker: string) => String(ticker).toUpperCase()),
       status: String(row.status),
     })),
@@ -3556,7 +3708,9 @@ async function runPortfolioContextTool(
 }
 
 async function runMarketQuotesTool(input: { tickers: string[] }): Promise<MarketQuotesResult> {
-  const dedupedTickers = Array.from(new Set(input.tickers.map((ticker) => ticker.toUpperCase()))).slice(0, 30);
+  const dedupedTickers = Array.from(
+    new Set(input.tickers.map((ticker) => ticker.toUpperCase())),
+  ).slice(0, 30);
   if (dedupedTickers.length === 0) {
     return { tickers: [], quotes: [] };
   }
@@ -3584,7 +3738,10 @@ async function runMarketQuotesTool(input: { tickers: string[] }): Promise<Market
   };
 }
 
-async function runEcbDataTool(input: { dataset?: string; lastNObservations?: number }): Promise<EcbDataResult> {
+async function runEcbDataTool(input: {
+  dataset?: string;
+  lastNObservations?: number;
+}): Promise<EcbDataResult> {
   const dataset = input.dataset || "FM/B.U2.EUR.4F.KR.MRR_FR.LEV";
   const url = new URL(`https://data-api.ecb.europa.eu/service/data/${dataset}`);
   url.searchParams.set("format", "csvdata");
@@ -3627,7 +3784,9 @@ async function runFredIndicatorTool(
   url.searchParams.set("sort_order", "desc");
   url.searchParams.set("limit", String(input.limit ?? 3));
 
-  const data = await fetchJson<{ observations?: Array<{ date?: string; value?: string }> }>(url.toString());
+  const data = await fetchJson<{ observations?: Array<{ date?: string; value?: string }> }>(
+    url.toString(),
+  );
   return {
     series_id: input.series_id,
     observations: (data.observations ?? []).map((row) => ({
@@ -3754,21 +3913,27 @@ function outputTextFromResponse(raw: Record<string, unknown>): string {
   if (typeof raw.output_text === "string") return raw.output_text;
   if (!Array.isArray(raw.output)) return "";
   return (raw.output as Array<Record<string, unknown>>)
-    .flatMap((item) => (Array.isArray(item.content) ? (item.content as Array<Record<string, unknown>>) : []))
+    .flatMap((item) =>
+      Array.isArray(item.content) ? (item.content as Array<Record<string, unknown>>) : [],
+    )
     .map((content) => String(content.text ?? ""))
     .join("\n");
 }
 
-async function runNewsSearchTool(
-  input: { query: string; limit?: number; recencyDays?: number },
-): Promise<NewsSearchResult> {
+async function runNewsSearchTool(input: {
+  query: string;
+  limit?: number;
+  recencyDays?: number;
+}): Promise<NewsSearchResult> {
   const encoded = encodeURIComponent(input.query);
   const recencyDays = Math.max(1, Math.min(365, Number(input.recencyDays ?? 60)));
   const url = `https://news.google.com/rss/search?q=${encoded}`;
   const res = await fetch(url, { headers: { "User-Agent": "Mozilla/5.0" } });
   if (!res.ok) throw new Error(`search_news failed (${res.status})`);
   const xml = await res.text();
-  const items = Array.from(xml.matchAll(/<item>[\s\S]*?<title>(.*?)<\/title>[\s\S]*?<link>(.*?)<\/link>[\s\S]*?<\/item>/g))
+  const items = Array.from(
+    xml.matchAll(/<item>[\s\S]*?<title>(.*?)<\/title>[\s\S]*?<link>(.*?)<\/link>[\s\S]*?<\/item>/g),
+  )
     .slice(0, input.limit ?? 6)
     .map((match) => ({
       title: match[1]?.replace(/<!\[CDATA\[|\]\]>/g, "") ?? "",
@@ -3939,7 +4104,8 @@ function normalizeMainAgentOutput(raw: Record<string, unknown>): MainAgentOutput
         if (!["at_risk", "supportive", "watch", "neutral"].includes(signalType)) return null;
         const riskHorizon = row.risk_horizon == null ? null : String(row.risk_horizon);
         const changeTypeRaw = String(row.change_type ?? "new_information");
-        const changeType: "new_information" | "confirmation" | "contradiction" | "no_material_change" =
+        const changeType:
+          "new_information" | "confirmation" | "contradiction" | "no_material_change" =
           changeTypeRaw === "confirmation" ||
           changeTypeRaw === "contradiction" ||
           changeTypeRaw === "no_material_change"
@@ -3977,8 +4143,14 @@ function normalizeMainAgentOutput(raw: Record<string, unknown>): MainAgentOutput
 
 function validateMainAgentOutput(output: MainAgentOutput): void {
   for (const signal of output.signals) {
-    if (signal.signal_type !== "neutral" && signal.evidence_ids.length === 0 && !signal.no_evidence_reason) {
-      throw new Error("Model output missing required items: non-neutral signal missing evidence_ids");
+    if (
+      signal.signal_type !== "neutral" &&
+      signal.evidence_ids.length === 0 &&
+      !signal.no_evidence_reason
+    ) {
+      throw new Error(
+        "Model output missing required items: non-neutral signal missing evidence_ids",
+      );
     }
   }
 }
@@ -4028,7 +4200,7 @@ async function runToolWithGuardrails<TInput, TOutput>(
           }
         : tool === "market_quotes"
           ? {
-            quotes: (output as MarketQuotesResult).quotes.length,
+              quotes: (output as MarketQuotesResult).quotes.length,
             }
           : tool === "get_ecb_data"
             ? {
@@ -4086,7 +4258,10 @@ export default {
       const auth = await requireAuth(request, env);
       if (auth instanceof Response) return auth;
       if (!env.GROK_NORMALIZATION_API_KEY) {
-        return json({ error: "Server misconfiguration: GROK_NORMALIZATION_API_KEY is missing" }, 500);
+        return json(
+          { error: "Server misconfiguration: GROK_NORMALIZATION_API_KEY is missing" },
+          500,
+        );
       }
 
       const body = (await request.json().catch(() => ({}))) as { csv?: string };
@@ -4179,7 +4354,11 @@ export default {
           });
           if (!res.ok) {
             const text = await res.text();
-            return { columns: [], rows: [], errors: [`A batch failed (${res.status}): ${text.slice(0, 150)}`] };
+            return {
+              columns: [],
+              rows: [],
+              errors: [`A batch failed (${res.status}): ${text.slice(0, 150)}`],
+            };
           }
           const llmData = (await res.json()) as GrokChatResponse;
           const content: string = llmData.choices?.[0]?.message?.content ?? "";
@@ -4198,11 +4377,17 @@ export default {
             if (start >= 0 && end > start) {
               parsed = JSON.parse(stripped.slice(start, end + 1)) as Record<string, unknown>;
             } else {
-              return { columns: [], rows: [], errors: ["A batch returned unparseable content and was skipped."] };
+              return {
+                columns: [],
+                rows: [],
+                errors: ["A batch returned unparseable content and was skipped."],
+              };
             }
           }
           return {
-            columns: Array.isArray(parsed.columns_detected) ? (parsed.columns_detected as string[]) : [],
+            columns: Array.isArray(parsed.columns_detected)
+              ? (parsed.columns_detected as string[])
+              : [],
             rows: Array.isArray(parsed.rows) ? (parsed.rows as unknown[]) : [],
             errors: Array.isArray(parsed.errors) ? (parsed.errors as string[]) : [],
           };
@@ -4251,7 +4436,10 @@ export default {
         const results = await searchYahooAssets(q);
         return json(results.map((result) => ({ name: result.name, ticker: result.ticker })));
       } catch (error) {
-        return json({ error: error instanceof Error ? error.message : "Benchmark search failed" }, 500);
+        return json(
+          { error: error instanceof Error ? error.message : "Benchmark search failed" },
+          500,
+        );
       }
     }
 
@@ -4260,9 +4448,12 @@ export default {
       const portfolioId = String(body.portfolioId ?? "").trim();
       if (!portfolioId) return json({ error: "portfolioId is required" }, 400);
       const auth = await requirePortfolioAccess(request, env, portfolioId);
-        if (auth instanceof Response) return auth;
+      if (auth instanceof Response) return auth;
       if (!env.GROK_NORMALIZATION_API_KEY) {
-        return json({ error: "Server misconfiguration: GROK_NORMALIZATION_API_KEY is missing" }, 500);
+        return json(
+          { error: "Server misconfiguration: GROK_NORMALIZATION_API_KEY is missing" },
+          500,
+        );
       }
 
       try {
@@ -4305,7 +4496,10 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
         );
         return json(suggestions);
       } catch (error) {
-        return json({ error: error instanceof Error ? error.message : "Benchmark suggestions failed" }, 500);
+        return json(
+          { error: error instanceof Error ? error.message : "Benchmark suggestions failed" },
+          500,
+        );
       }
     }
 
@@ -4319,7 +4513,10 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
       try {
         return json(await getBenchmarkPrices(env, ticker, from));
       } catch (error) {
-        return json({ error: error instanceof Error ? error.message : "Benchmark price fetch failed" }, 500);
+        return json(
+          { error: error instanceof Error ? error.message : "Benchmark price fetch failed" },
+          500,
+        );
       }
     }
 
@@ -4348,7 +4545,7 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
     if (portfolioMatch) {
       const id = portfolioMatch[1];
       const auth = await requirePortfolioAccess(request, env, id);
-        if (auth instanceof Response) return auth;
+      if (auth instanceof Response) return auth;
       if (method === "GET") {
         const { data, error } = await auth.db.from("portfolios").select("*").eq("id", id).single();
         if (error) return json({ error: error.message }, 404);
@@ -4376,7 +4573,7 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
     if (savedBenchmarksMatch) {
       const portfolioId = savedBenchmarksMatch[1];
       const auth = await requirePortfolioAccess(request, env, portfolioId);
-        if (auth instanceof Response) return auth;
+      if (auth instanceof Response) return auth;
 
       if (method === "GET") {
         const { data, error } = await auth.db
@@ -4396,7 +4593,9 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
           color?: string;
         };
         const name = String(body.name ?? "").trim();
-        const ticker = String(body.ticker ?? "").trim().toUpperCase();
+        const ticker = String(body.ticker ?? "")
+          .trim()
+          .toUpperCase();
         if (!name || !ticker) return json({ error: "name and ticker are required" }, 400);
 
         const palette = ["amber", "violet", "rose", "sky"];
@@ -4426,11 +4625,13 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
       }
     }
 
-    const savedBenchmarkMatch = pathname.match(/^\/api\/portfolios\/([^/]+)\/benchmarks\/saved\/([^/]+)$/);
+    const savedBenchmarkMatch = pathname.match(
+      /^\/api\/portfolios\/([^/]+)\/benchmarks\/saved\/([^/]+)$/,
+    );
     if (savedBenchmarkMatch) {
       const [, portfolioId, benchmarkId] = savedBenchmarkMatch;
       const auth = await requirePortfolioAccess(request, env, portfolioId);
-        if (auth instanceof Response) return auth;
+      if (auth instanceof Response) return auth;
 
       if (method === "DELETE") {
         const { error } = await auth.db
@@ -4496,20 +4697,25 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
     if (recomputeMatch && method === "POST") {
       const portfolioId = recomputeMatch[1];
       const auth = await requirePortfolioAccess(request, env, portfolioId);
-        if (auth instanceof Response) return auth;
+      if (auth instanceof Response) return auth;
       console.log("[recompute] triggered for portfolio", portfolioId);
       await recomputeSnapshots(env, portfolioId);
       console.log("[recompute] done");
       return json({ ok: true });
     }
 
-    const transactionPreviewMatch = pathname.match(/^\/api\/portfolios\/([^/]+)\/transactions\/preview$/);
+    const transactionPreviewMatch = pathname.match(
+      /^\/api\/portfolios\/([^/]+)\/transactions\/preview$/,
+    );
     if (transactionPreviewMatch && method === "POST") {
       const portfolioId = transactionPreviewMatch[1];
       const auth = await requirePortfolioAccess(request, env, portfolioId);
-        if (auth instanceof Response) return auth;
+      if (auth instanceof Response) return auth;
       if (!env.GROK_NORMALIZATION_API_KEY) {
-        return json({ error: "Server misconfiguration: GROK_NORMALIZATION_API_KEY is missing" }, 500);
+        return json(
+          { error: "Server misconfiguration: GROK_NORMALIZATION_API_KEY is missing" },
+          500,
+        );
       }
 
       const body = (await request.json().catch(() => ({}))) as { csv?: string };
@@ -4547,7 +4753,10 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
         });
         if (!res.ok) {
           const text = await res.text();
-          return json({ error: `Normalization failed (${res.status}): ${text.slice(0, 300)}` }, 502);
+          return json(
+            { error: `Normalization failed (${res.status}): ${text.slice(0, 300)}` },
+            502,
+          );
         }
         const llmData = (await res.json()) as GrokChatResponse;
         const content: string = llmData.choices?.[0]?.message?.content ?? "";
@@ -4585,7 +4794,7 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
     if (transactionsMatch) {
       const portfolioId = transactionsMatch[1];
       const auth = await requirePortfolioAccess(request, env, portfolioId);
-        if (auth instanceof Response) return auth;
+      if (auth instanceof Response) return auth;
 
       if (method === "GET") {
         const { data, error } = await auth.db
@@ -4601,7 +4810,9 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
         if (!env.SNAPSHOT_QUEUE) {
           return json({ error: "Server misconfiguration: SNAPSHOT_QUEUE binding is missing" }, 500);
         }
-        const body = (await request.json().catch(() => ({}))) as { rows?: NormalisedTransactionRow[] };
+        const body = (await request.json().catch(() => ({}))) as {
+          rows?: NormalisedTransactionRow[];
+        };
         const normalizedRows = normalizeTransactionRows(Array.isArray(body.rows) ? body.rows : []);
         if (normalizedRows.length === 0) return json({ error: "rows are required" }, 400);
 
@@ -4611,7 +4822,9 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
           net_amount: row.net_amount == null ? null : parseFlexibleNumber(row.net_amount),
           commission: parseFlexibleNumber(row.commission ?? "0"),
         }));
-        const uniqueIsins = Array.from(new Set(parsedRows.map((row) => row.isin).filter(Boolean))) as string[];
+        const uniqueIsins = Array.from(
+          new Set(parsedRows.map((row) => row.isin).filter(Boolean)),
+        ) as string[];
         const assetEntries = await Promise.all(
           uniqueIsins.map(async (isin) => {
             try {
@@ -4628,7 +4841,10 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
           const asset = row.isin ? assetsByIsin.get(row.isin) : null;
           const primaryExchange = yahooExchangeToPrimary(asset?.exchange, asset?.ticker);
           if (primaryExchange) {
-            primaryExchangeCounts.set(primaryExchange, (primaryExchangeCounts.get(primaryExchange) ?? 0) + 1);
+            primaryExchangeCounts.set(
+              primaryExchange,
+              (primaryExchangeCounts.get(primaryExchange) ?? 0) + 1,
+            );
           }
           return {
             portfolio_id: portfolioId,
@@ -4646,9 +4862,14 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
         const { error } = await auth.db.from("transactions").insert(dbRows);
         if (error) return json({ error: error.message }, 500);
 
-        const primaryExchange = [...primaryExchangeCounts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0];
+        const primaryExchange = [...primaryExchangeCounts.entries()].sort(
+          (a, b) => b[1] - a[1],
+        )[0]?.[0];
         if (primaryExchange) {
-          await auth.db.from("portfolios").update({ primary_exchange: primaryExchange }).eq("id", portfolioId);
+          await auth.db
+            .from("portfolios")
+            .update({ primary_exchange: primaryExchange })
+            .eq("id", portfolioId);
         }
         await rebuildCurrentHoldings(env, portfolioId);
         await syncAndEnqueueGeography(env, portfolioId, "transaction_import");
@@ -4661,20 +4882,21 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
     if (chartMatch && method === "GET") {
       const portfolioId = chartMatch[1];
       const auth = await requirePortfolioAccess(request, env, portfolioId);
-        if (auth instanceof Response) return auth;
+      if (auth instanceof Response) return auth;
 
-      const [{ data: snapshots, error: snapshotsError }, { data: txns, error: txnsError }] = await Promise.all([
-        auth.db
-          .from("portfolio_snapshots")
-          .select("date, total_value, cash_balance, securities_value")
-          .eq("portfolio_id", portfolioId)
-          .order("date", { ascending: true }),
-        auth.db
-          .from("transactions")
-          .select("date, side, net_amount")
-          .eq("portfolio_id", portfolioId)
-          .order("date", { ascending: true }),
-      ]);
+      const [{ data: snapshots, error: snapshotsError }, { data: txns, error: txnsError }] =
+        await Promise.all([
+          auth.db
+            .from("portfolio_snapshots")
+            .select("date, total_value, cash_balance, securities_value")
+            .eq("portfolio_id", portfolioId)
+            .order("date", { ascending: true }),
+          auth.db
+            .from("transactions")
+            .select("date, side, net_amount")
+            .eq("portfolio_id", portfolioId)
+            .order("date", { ascending: true }),
+        ]);
       if (snapshotsError) return json({ error: snapshotsError.message }, 500);
       if (txnsError) return json({ error: txnsError.message }, 500);
       if (!snapshots || snapshots.length === 0) return json({ series: [] });
@@ -4693,7 +4915,8 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
         const date = String(snap.date);
         runningDeposits += flowByDate.get(date) ?? 0;
         const totalValue = Number(snap.total_value ?? 0);
-        const simpleReturn = runningDeposits > 0 ? ((totalValue - runningDeposits) / runningDeposits) * 100 : 0;
+        const simpleReturn =
+          runningDeposits > 0 ? ((totalValue - runningDeposits) / runningDeposits) * 100 : 0;
         return {
           date,
           total_value: totalValue,
@@ -4711,7 +4934,7 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
     if (lastPricesMatch && method === "GET") {
       const portfolioId = lastPricesMatch[1];
       const auth = await requirePortfolioAccess(request, env, portfolioId);
-        if (auth instanceof Response) return auth;
+      if (auth instanceof Response) return auth;
 
       const { data: holdings, error: holdingsError } = await auth.db
         .from("holdings")
@@ -4722,7 +4945,11 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
       const tickers = Array.from(
         new Set(
           (holdings ?? [])
-            .map((row) => String(row.ticker ?? "").trim().toUpperCase())
+            .map((row) =>
+              String(row.ticker ?? "")
+                .trim()
+                .toUpperCase(),
+            )
             .filter(Boolean),
         ),
       );
@@ -4753,7 +4980,7 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
     if (geographyMatch) {
       const portfolioId = geographyMatch[1];
       const auth = await requirePortfolioAccess(request, env, portfolioId);
-        if (auth instanceof Response) return auth;
+      if (auth instanceof Response) return auth;
 
       try {
         if (method === "GET") return json(await getPortfolioGeography(env, portfolioId));
@@ -4766,17 +4993,22 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
       }
     }
 
-    const geographyEnqueueMatch = pathname.match(/^\/api\/portfolios\/([^/]+)\/geography\/enqueue$/);
+    const geographyEnqueueMatch = pathname.match(
+      /^\/api\/portfolios\/([^/]+)\/geography\/enqueue$/,
+    );
     if (geographyEnqueueMatch && method === "POST") {
       const portfolioId = geographyEnqueueMatch[1];
       const auth = await requirePortfolioAccess(request, env, portfolioId);
-        if (auth instanceof Response) return auth;
+      if (auth instanceof Response) return auth;
 
       try {
         const result = await syncAndEnqueueGeography(env, portfolioId, "holding_change");
         return json(result);
       } catch (error) {
-        return json({ error: error instanceof Error ? error.message : "Geography enqueue failed" }, 500);
+        return json(
+          { error: error instanceof Error ? error.message : "Geography enqueue failed" },
+          500,
+        );
       }
     }
 
@@ -4784,36 +5016,48 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
     if (geographyRepairMatch && method === "POST") {
       const portfolioId = geographyRepairMatch[1];
       const auth = await requirePortfolioAccess(request, env, portfolioId);
-        if (auth instanceof Response) return auth;
+      if (auth instanceof Response) return auth;
 
       try {
         const result = await repairPortfolioGeography(env, portfolioId);
         return json(result);
       } catch (error) {
-        return json({ error: error instanceof Error ? error.message : "Geography repair failed" }, 500);
+        return json(
+          { error: error instanceof Error ? error.message : "Geography repair failed" },
+          500,
+        );
       }
     }
 
-    const geographyResearchMatch = pathname.match(/^\/api\/portfolios\/([^/]+)\/geography\/research$/);
+    const geographyResearchMatch = pathname.match(
+      /^\/api\/portfolios\/([^/]+)\/geography\/research$/,
+    );
     if (geographyResearchMatch && method === "POST") {
       const portfolioId = geographyResearchMatch[1];
       const auth = await requirePortfolioAccess(request, env, portfolioId);
-        if (auth instanceof Response) return auth;
+      if (auth instanceof Response) return auth;
 
       try {
-        const result = await researchPortfolioEtfGeography(env, portfolioId, { reason: "manual_retry" });
+        const result = await researchPortfolioEtfGeography(env, portfolioId, {
+          reason: "manual_retry",
+        });
         const geography = await getPortfolioGeography(env, portfolioId);
         return json({ ...result, geography });
       } catch (error) {
-        return json({ error: error instanceof Error ? error.message : "ETF geography research failed" }, 500);
+        return json(
+          { error: error instanceof Error ? error.message : "ETF geography research failed" },
+          500,
+        );
       }
     }
 
-    const transactionDeleteMatch = pathname.match(/^\/api\/portfolios\/([^/]+)\/transactions\/([^/]+)$/);
+    const transactionDeleteMatch = pathname.match(
+      /^\/api\/portfolios\/([^/]+)\/transactions\/([^/]+)$/,
+    );
     if (transactionDeleteMatch && (method === "PATCH" || method === "DELETE")) {
       const [, portfolioId, txnId] = transactionDeleteMatch;
       const auth = await requirePortfolioAccess(request, env, portfolioId);
-        if (auth instanceof Response) return auth;
+      if (auth instanceof Response) return auth;
       if (!env.SNAPSHOT_QUEUE) {
         return json({ error: "Server misconfiguration: SNAPSHOT_QUEUE binding is missing" }, 500);
       }
@@ -4844,7 +5088,8 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
             date: parsedRow.date,
             symbol: parsedRow.symbol,
             isin: parsedRow.isin,
-            yahoo_ticker: parsedRow.yahoo_ticker ?? (parsedRow.isin ? (asset?.ticker ?? null) : null),
+            yahoo_ticker:
+              parsedRow.yahoo_ticker ?? (parsedRow.isin ? (asset?.ticker ?? null) : null),
             side: parsedRow.side,
             quantity: parsedRow.quantity,
             net_amount: parsedRow.net_amount,
@@ -4857,7 +5102,10 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
         if (error) return json({ error: error.message }, 500);
         if (!data) return json({ error: "Transaction not found" }, 404);
         if (primaryExchange) {
-          await auth.db.from("portfolios").update({ primary_exchange: primaryExchange }).eq("id", portfolioId);
+          await auth.db
+            .from("portfolios")
+            .update({ primary_exchange: primaryExchange })
+            .eq("id", portfolioId);
         }
         await rebuildCurrentHoldings(env, portfolioId);
         await syncAndEnqueueGeography(env, portfolioId, "transaction_import");
@@ -4903,7 +5151,11 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
         const portfolioIds = Array.from(
           new Set((data ?? []).map((row) => String(row.portfolio_id ?? "")).filter(Boolean)),
         );
-        await Promise.all(portfolioIds.map((portfolioId) => syncAndEnqueueGeography(env, portfolioId, "holding_change")));
+        await Promise.all(
+          portfolioIds.map((portfolioId) =>
+            syncAndEnqueueGeography(env, portfolioId, "holding_change"),
+          ),
+        );
         return json(data, 201);
       }
     }
@@ -4961,7 +5213,7 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
     if (holdingMatch) {
       const id = holdingMatch[1];
       const auth = await requireAuth(request, env);
-        if (auth instanceof Response) return auth;
+      if (auth instanceof Response) return auth;
 
       // RLS ensures only holdings in the caller's portfolios are visible.
       const { data: existingHolding } = await auth.db
@@ -4978,12 +5230,20 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
         // Exclude portfolio_id so a holding cannot be moved into another portfolio here.
         const payload = pickColumns(body, HOLDING_WRITE_COLUMNS);
         delete payload.portfolio_id;
-        const { data, error } = await auth.db.from("holdings").update(payload).eq("id", id).select();
+        const { data, error } = await auth.db
+          .from("holdings")
+          .update(payload)
+          .eq("id", id)
+          .select();
         if (error) return json({ error: error.message }, 500);
         const portfolioIds = Array.from(
           new Set((data ?? []).map((row) => String(row.portfolio_id ?? "")).filter(Boolean)),
         );
-        await Promise.all(portfolioIds.map((portfolioId) => syncAndEnqueueGeography(env, portfolioId, "holding_change")));
+        await Promise.all(
+          portfolioIds.map((portfolioId) =>
+            syncAndEnqueueGeography(env, portfolioId, "holding_change"),
+          ),
+        );
         return json(data);
       }
       if (method === "DELETE") {
@@ -5016,7 +5276,10 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
 
       if (method === "POST") {
         if (!env.AGENT_RUNS_QUEUE) {
-          return json({ error: "Server misconfiguration: AGENT_RUNS_QUEUE binding is missing" }, 500);
+          return json(
+            { error: "Server misconfiguration: AGENT_RUNS_QUEUE binding is missing" },
+            500,
+          );
         }
 
         const auth = await requireAuth(request, env);
@@ -5050,7 +5313,7 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
         if (!body.allPortfolios) {
           for (const portfolioId of portfolioIds) {
             const accessError = await assertPortfolioAccess(auth.db, portfolioId);
-        if (accessError) return accessError;
+            if (accessError) return accessError;
           }
         }
 
@@ -5186,7 +5449,7 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
     if (pathname === "/api/agent/metrics") {
       if (method !== "GET") return json({ error: "Method not allowed" }, 405);
       const auth = await requireAuth(request, env);
-        if (auth instanceof Response) return auth;
+      if (auth instanceof Response) return auth;
 
       const hours = Math.max(1, Math.min(168, Number(url.searchParams.get("hours") ?? 24)));
       const fromIso = new Date(Date.now() - hours * 60 * 60 * 1000).toISOString();
@@ -5206,7 +5469,7 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
     if (pathname === "/api/agent/feed") {
       if (method !== "GET") return json({ error: "Method not allowed" }, 405);
       const auth = await requireAuth(request, env);
-        if (auth instanceof Response) return auth;
+      if (auth instanceof Response) return auth;
       const limit = Math.max(1, Math.min(200, Number(url.searchParams.get("limit") ?? 50)));
 
       const { data, error } = await auth.db
@@ -5221,11 +5484,10 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
       const insights = (data ?? [])
         .flatMap((run) => {
           const tokenUsage = (run.token_usage ?? {}) as Record<string, unknown>;
-          const main = (
-            tokenUsage.impact_stage ??
-            tokenUsage.main_agent ??
-            {}
-          ) as Record<string, unknown>;
+          const main = (tokenUsage.impact_stage ?? tokenUsage.main_agent ?? {}) as Record<
+            string,
+            unknown
+          >;
           const signals = Array.isArray(main.signals)
             ? (main.signals as Array<Record<string, unknown>>)
             : [];
@@ -5251,14 +5513,12 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
               headline: String(signal.title ?? "Agent signal"),
               body: String(signal.explanation ?? ""),
               confidence: Number(signal.confidence ?? 50),
-              risk_horizon:
-                signal.risk_horizon == null ? null : String(signal.risk_horizon),
+              risk_horizon: signal.risk_horizon == null ? null : String(signal.risk_horizon),
               evidence_ids: Array.isArray(signal.evidence_ids)
                 ? signal.evidence_ids.map((id) => String(id))
                 : [],
               change_type: String(signal.change_type ?? "new_information"),
-              delta_summary:
-                signal.delta_summary == null ? null : String(signal.delta_summary),
+              delta_summary: signal.delta_summary == null ? null : String(signal.delta_summary),
               questions_for_user: Array.isArray(main.questions_for_user)
                 ? main.questions_for_user.map((question) => String(question))
                 : [],
@@ -5282,7 +5542,7 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
     if (pathname === "/api/agent/alerts") {
       if (method !== "GET") return json({ error: "Method not allowed" }, 405);
       const auth = await requireAuth(request, env);
-        if (auth instanceof Response) return auth;
+      if (auth instanceof Response) return auth;
 
       const hours = Math.max(1, Math.min(168, Number(url.searchParams.get("hours") ?? 24)));
       const queueDepthThreshold = Math.max(
@@ -5318,15 +5578,13 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
         },
         {
           key: "success_rate_low",
-          triggered:
-            metrics.success_rate != null && metrics.success_rate <= successRateThreshold,
+          triggered: metrics.success_rate != null && metrics.success_rate <= successRateThreshold,
           value: metrics.success_rate,
           threshold: successRateThreshold,
         },
         {
           key: "p95_latency_high",
-          triggered:
-            metrics.duration_ms.p95 != null && metrics.duration_ms.p95 >= p95MsThreshold,
+          triggered: metrics.duration_ms.p95 != null && metrics.duration_ms.p95 >= p95MsThreshold,
           value: metrics.duration_ms.p95,
           threshold: p95MsThreshold,
         },
@@ -5373,7 +5631,7 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
     if (cancelRunMatch && method === "POST") {
       const runId = cancelRunMatch[1];
       const auth = await requireAuth(request, env);
-        if (auth instanceof Response) return auth;
+      if (auth instanceof Response) return auth;
       // Verify the run belongs to the caller before cancelling.
       const { data: run } = await auth.db
         .from("agent_runs")
@@ -5416,7 +5674,6 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
       }
     }
 
-
     if (method === "POST" && pathname === "/api/_debug/run-polymarket-fanout") {
       const adminError = requireAdmin(request, env);
       if (adminError) return adminError;
@@ -5446,7 +5703,10 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
         if (!portfolioId) {
           // Fanout path (weekly only — daily is chained off snapshots).
           if (type !== "weekly") {
-            return json({ error: "daily requires portfolio_id (daily is chained off snapshots)" }, 400);
+            return json(
+              { error: "daily requires portfolio_id (daily is chained off snapshots)" },
+              400,
+            );
           }
           const result = await runWeeklyRecapFanout(env, {
             now: new Date(),
@@ -5498,16 +5758,24 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
           })
           .select("id")
           .single();
-        if (createErr || !created) return json({ error: createErr?.message ?? "insert failed" }, 500);
+        if (createErr || !created)
+          return json({ error: createErr?.message ?? "insert failed" }, 500);
 
         try {
           const result = await generateRecap(env, String(created.id));
-          const { data: finalRow } = await client.from("recaps").select("*").eq("id", created.id).single();
+          const { data: finalRow } = await client
+            .from("recaps")
+            .select("*")
+            .eq("id", created.id)
+            .single();
           return json({ result, recap: finalRow }, 200);
         } catch (genErr) {
           await client
             .from("recaps")
-            .update({ status: "failed", error: genErr instanceof Error ? genErr.message : String(genErr) })
+            .update({
+              status: "failed",
+              error: genErr instanceof Error ? genErr.message : String(genErr),
+            })
             .eq("id", created.id);
           return json({ error: genErr instanceof Error ? genErr.message : String(genErr) }, 500);
         }
@@ -5525,7 +5793,7 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
       const portfolioId = url.searchParams.get("portfolio_id") ?? "";
       if (!portfolioId) return json({ error: "portfolio_id is required" }, 400);
       const auth = await requirePortfolioAccess(request, env, portfolioId);
-        if (auth instanceof Response) return auth;
+      if (auth instanceof Response) return auth;
 
       const limit = Math.min(50, Math.max(1, Number(url.searchParams.get("limit") ?? "20")));
 
@@ -5556,7 +5824,7 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
       const portfolioId = url.searchParams.get("portfolio_id") ?? "";
       if (!portfolioId) return json({ error: "portfolio_id is required" }, 400);
       const auth = await requirePortfolioAccess(request, env, portfolioId);
-        if (auth instanceof Response) return auth;
+      if (auth instanceof Response) return auth;
 
       const { data, error } = await auth.db
         .from("portfolio_polymarket_matches")
@@ -5572,10 +5840,9 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
         .eq("polymarket_markets.active", true)
         // Defense in depth against stale/resolved markets that haven't been
         // deactivated by the fanout yet — mirrors recaps.ts's watch-slide filter.
-        .or(
-          `end_date.is.null,end_date.gte.${new Date().toISOString()}`,
-          { referencedTable: "polymarket_markets" },
-        )
+        .or(`end_date.is.null,end_date.gte.${new Date().toISOString()}`, {
+          referencedTable: "polymarket_markets",
+        })
         .order("is_pinned", { ascending: false })
         .order("score", { ascending: false, nullsFirst: false })
         .limit(60);
@@ -5597,9 +5864,9 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
       // Need the userId (not just ownership) to attach the caller's own
       // per-slide feedback, so resolve it explicitly here.
       const auth = await requireAuth(request, env);
-        if (auth instanceof Response) return auth;
+      if (auth instanceof Response) return auth;
       const accessError = await assertPortfolioAccess(auth.db, portfolioId);
-        if (accessError) return accessError;
+      if (accessError) return accessError;
 
       const type = url.searchParams.get("type");
       let query = auth.db
@@ -5638,7 +5905,7 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
       const portfolioId = url.searchParams.get("portfolio_id") ?? "";
       if (!portfolioId) return json({ error: "portfolio_id is required" }, 400);
       const auth = await requirePortfolioAccess(request, env, portfolioId);
-        if (auth instanceof Response) return auth;
+      if (auth instanceof Response) return auth;
 
       const limit = Math.min(50, Math.max(1, Number(url.searchParams.get("limit") ?? "20")));
       const { data, error } = await auth.db
@@ -5656,7 +5923,7 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
     if (method === "POST" && recapSeenMatch) {
       const recapId = decodeURIComponent(recapSeenMatch[1]);
       const auth = await requireAuth(request, env);
-        if (auth instanceof Response) return auth;
+      if (auth instanceof Response) return auth;
 
       const { data: recap } = await auth.db
         .from("recaps")
@@ -5682,7 +5949,7 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
       const recapId = decodeURIComponent(recapFeedbackMatch[1]);
 
       const auth = await requireAuth(request, env);
-        if (auth instanceof Response) return auth;
+      if (auth instanceof Response) return auth;
 
       const client = auth.db;
       const { data: recap } = await client
@@ -5693,7 +5960,7 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
       if (!recap) return json({ error: "recap not found" }, 404);
 
       const accessError = await assertPortfolioAccess(auth.db, String(recap.portfolio_id));
-        if (accessError) return accessError;
+      if (accessError) return accessError;
 
       let body: { slide_index?: unknown; score?: unknown; comment?: unknown };
       try {
@@ -5705,7 +5972,11 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
       const slideIndex = Number(body.slide_index);
       const score = Number(body.score);
       const slideCount = Array.isArray(recap.slides) ? recap.slides.length : 0;
-      if (!Number.isInteger(slideIndex) || slideIndex < 0 || (slideCount > 0 && slideIndex >= slideCount)) {
+      if (
+        !Number.isInteger(slideIndex) ||
+        slideIndex < 0 ||
+        (slideCount > 0 && slideIndex >= slideCount)
+      ) {
         return json({ error: "slide_index out of range" }, 400);
       }
       if (score !== 1 && score !== -1) {
@@ -5751,8 +6022,7 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
             // not its 0-based array index — self-documenting in the LangSmith UI
             // and comparable across recaps. Each kind is unique within a recap.
             // Falls back to the index if the kind is somehow missing.
-            const slideKind =
-              Array.isArray(recap.slides) && recap.slides[slideIndex]?.kind;
+            const slideKind = Array.isArray(recap.slides) && recap.slides[slideIndex]?.kind;
             const feedbackKey =
               typeof slideKind === "string" ? `${slideKind}_score` : `slide_${slideIndex}_score`;
             await lsClient.createFeedback(langsmithRunId, feedbackKey, {
@@ -5767,11 +6037,7 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
             // tears down, or the feedback never sends.
             await lsClient.flush();
           } catch (err) {
-            console.error(
-              "[recaps] LangSmith createFeedback failed for run",
-              langsmithRunId,
-              err,
-            );
+            console.error("[recaps] LangSmith createFeedback failed for run", langsmithRunId, err);
           }
         }
       }
@@ -5780,11 +6046,12 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
     }
 
     // GET /api/polymarket/category?tag=finance|geopolitics|tech|economy&limit=30
-    // Returns volume-ranked markets for a given category tag, filtered by
-    // NON_FINANCIAL_RE. No portfolio context or LLM call — suitable for browsing.
+    // Returns volume-ranked markets for a given category tag, filtered by the
+    // shared eligibility gate plus the NON_FINANCIAL_RE backstop. No portfolio
+    // context or LLM call — suitable for browsing.
     if (method === "GET" && pathname === "/api/polymarket/category") {
       const auth = await requireAuth(request, env);
-        if (auth instanceof Response) return auth;
+      if (auth instanceof Response) return auth;
 
       const tagName = url.searchParams.get("tag") ?? "";
       const TAG_BY_NAME: Record<string, number> = {
@@ -5832,7 +6099,11 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
 
     return json({ error: "Not found" }, 404);
   },
-  async scheduled(controller: ScheduledController, env: Env, _ctx: ExecutionContext): Promise<void> {
+  async scheduled(
+    controller: ScheduledController,
+    env: Env,
+    _ctx: ExecutionContext,
+  ): Promise<void> {
     try {
       await runScheduledFanout(env, {
         now: new Date(controller.scheduledTime),
@@ -5915,7 +6186,10 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
                 }
               } catch (recapError) {
                 // Recap chaining is best-effort — never fail the snapshot ack over it.
-                console.error(`daily recap enqueue failed for portfolio ${message.body.portfolio_id}`, recapError);
+                console.error(
+                  `daily recap enqueue failed for portfolio ${message.body.portfolio_id}`,
+                  recapError,
+                );
               }
             }
           }
@@ -5951,14 +6225,21 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
       if (isRecapQueueMessage(message.body)) {
         const recapId = message.body.recapId;
         try {
-          await adminDb(env).from("recaps").update({ status: "running" }).eq("id", recapId).eq("status", "queued");
+          await adminDb(env)
+            .from("recaps")
+            .update({ status: "running" })
+            .eq("id", recapId)
+            .eq("status", "queued");
           await generateRecap(env, recapId);
           message.ack();
         } catch (error) {
           console.error(`recap queue failed for recap ${recapId}`, error);
           await adminDb(env)
             .from("recaps")
-            .update({ status: "failed", error: error instanceof Error ? error.message : String(error) })
+            .update({
+              status: "failed",
+              error: error instanceof Error ? error.message : String(error),
+            })
             .eq("id", recapId);
           // Mark failed and ack — deterministic failures shouldn't retry-storm Gemini.
           message.ack();
@@ -6060,9 +6341,7 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
           subPass1UserPrompt,
           env,
         );
-        const subPass1Output = normalizeSubAgentPlanningOutput(
-          extractJsonObject(subPass1Raw),
-        );
+        const subPass1Output = normalizeSubAgentPlanningOutput(extractJsonObject(subPass1Raw));
         if (subPass1Output.classifications.length === 0) {
           subPass1Output.classifications = context.theses.map((thesis) => ({
             thesis_id: thesis.id,
@@ -6074,10 +6353,7 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
         }
         subPass1Output.classifications = subPass1Output.classifications.map((classification) => {
           if (classification.signals_to_monitor.length >= 2) return classification;
-          const seeds = [
-            ...classification.claims_to_verify,
-            ...classification.established_facts,
-          ]
+          const seeds = [...classification.claims_to_verify, ...classification.established_facts]
             .map((value) => value.trim())
             .filter(Boolean)
             .slice(0, 2);
@@ -6128,7 +6404,8 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
             (input) => runWebSearchTool(env, input),
           );
         } catch (error) {
-          webSearchFallbackReason = error instanceof Error ? error.message : "xAI web search failed";
+          webSearchFallbackReason =
+            error instanceof Error ? error.message : "xAI web search failed";
           news = await runToolWithGuardrails(
             guardrails,
             toolCalls,
@@ -6206,7 +6483,9 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
             })
             .slice(0, 8);
           if (fallbackEvidence.length === 0) {
-            throw new Error("Model output missing required items: sub_agent.evidence_items is empty");
+            throw new Error(
+              "Model output missing required items: sub_agent.evidence_items is empty",
+            );
           }
           subOutput.evidence_items = fallbackEvidence;
           subOutput.missing_info = [

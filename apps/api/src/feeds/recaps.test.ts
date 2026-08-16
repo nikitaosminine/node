@@ -40,15 +40,19 @@ describe("recap Polymarket watch filter", () => {
     };
 
     dbFrom.mockImplementation((table: string) => {
-      if (table === "portfolios") return chainResult({ primary_exchange: "UNKNOWN", cash_value: 0 });
+      if (table === "portfolios")
+        return chainResult({ primary_exchange: "UNKNOWN", cash_value: 0 });
       if (table === "holdings") {
         const builder = chainResult([
           { id: "holding-1", ticker: "AAPL", name: "Apple", quantity: 1, asset_type: "stock" },
         ]);
-        builder.gt = () => Promise.resolve({
-          data: [{ id: "holding-1", ticker: "AAPL", name: "Apple", quantity: 1, asset_type: "stock" }],
-          error: null,
-        });
+        builder.gt = () =>
+          Promise.resolve({
+            data: [
+              { id: "holding-1", ticker: "AAPL", name: "Apple", quantity: 1, asset_type: "stock" },
+            ],
+            error: null,
+          });
         return builder;
       }
       if (table === "price_history") {
@@ -57,20 +61,25 @@ describe("recap Polymarket watch filter", () => {
           { yahoo_ticker: "AAPL", date: "2026-08-10", closing_price: 101 },
           { yahoo_ticker: "AAPL", date: "2026-08-14", closing_price: 102 },
         ]);
-        builder.order = () => Promise.resolve({
-          data: [
-            { yahoo_ticker: "AAPL", date: "2026-08-07", closing_price: 100 },
-            { yahoo_ticker: "AAPL", date: "2026-08-10", closing_price: 101 },
-            { yahoo_ticker: "AAPL", date: "2026-08-14", closing_price: 102 },
-          ],
-          error: null,
-        });
+        builder.order = () =>
+          Promise.resolve({
+            data: [
+              { yahoo_ticker: "AAPL", date: "2026-08-07", closing_price: 100 },
+              { yahoo_ticker: "AAPL", date: "2026-08-10", closing_price: 101 },
+              { yahoo_ticker: "AAPL", date: "2026-08-14", closing_price: 102 },
+            ],
+            error: null,
+          });
         return builder;
       }
       if (table === "saved_benchmarks") return chainResult([]);
       if (table === "portfolio_polymarket_matches") {
         return chainResult([
-          { is_pinned: false, score: 0.95, polymarket_markets: { ...eligibleMarket, liquidity: 333 } },
+          {
+            is_pinned: false,
+            score: 0.95,
+            polymarket_markets: { ...eligibleMarket, liquidity: 333 },
+          },
           { is_pinned: false, score: 0.9, polymarket_markets: eligibleMarket },
         ]);
       }

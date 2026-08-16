@@ -168,12 +168,8 @@ describe("isEligibleMarket", () => {
         now,
       ),
     ).toBe(false);
-    expect(
-      isEligibleMarket({ ...baseMarket, end_date: "not-a-date" }, now),
-    ).toBe(false);
-    expect(
-      isEligibleMarket({ ...baseMarket, liquidity: "not-a-number" }, now),
-    ).toBe(false);
+    expect(isEligibleMarket({ ...baseMarket, end_date: "not-a-date" }, now)).toBe(false);
+    expect(isEligibleMarket({ ...baseMarket, liquidity: "not-a-number" }, now)).toBe(false);
   });
 });
 
@@ -279,9 +275,7 @@ describe("fetchCandidateMarkets", () => {
       expect(url.searchParams.get("active")).toBe("true");
       expect(url.searchParams.get("closed")).toBe("false");
       expect(url.searchParams.getAll("exclude_tag_id").sort()).toEqual(
-        Object.values(EXCLUDE_TAG_IDS)
-          .map(String)
-          .sort(),
+        Object.values(EXCLUDE_TAG_IDS).map(String).sort(),
       );
     }
   });
@@ -319,6 +313,11 @@ describe("fetchCandidateMarkets", () => {
           })),
         };
       }
+      if (table === "portfolios") {
+        return {
+          select: vi.fn().mockResolvedValue({ data: [], error: null }),
+        };
+      }
       throw new Error(`Unexpected table: ${table}`);
     });
 
@@ -326,18 +325,19 @@ describe("fetchCandidateMarkets", () => {
     ineligibleEvent.markets[0].liquidity = 333;
     vi.stubGlobal(
       "fetch",
-      vi.fn(async () =>
-        new Response(JSON.stringify([ineligibleEvent]), {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        }),
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify([ineligibleEvent]), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          }),
       ),
     );
 
     await expect(runPolymarketFanout(env)).rejects.toThrow(
       "no eligible rotating candidates remained",
     );
-    expect(dbFrom).not.toHaveBeenCalledWith("portfolios");
+    expect(dbFrom).toHaveBeenCalledWith("portfolios");
   });
 });
 
