@@ -199,10 +199,13 @@ describe("aggregateMetrics", () => {
     expect(m.non_financial_leak_rate).toBeCloseTo(1 / 15);
     expect(m.event_over_cap_run_rate).toBeCloseTo(0.5);
     expect(m.runs_missing_context).toBe(0);
-    // Ratio counts only picks with a known event: run A 8/8, run B 4/6
-    // (the hallucinated pick has no event and must not depress the ratio).
+    // Ratio counts only enrichable picks: run A 8/8, run B 4/6 (the
+    // hallucinated pick can never be enriched and must not depress the ratio
+    // or the coverage — both fixture runs count as fully enriched).
+    expect(m.event_data_runs).toBe(2);
+    expect(m.event_partial_runs).toBe(0);
     expect(m.avg_unique_event_ratio).toBeCloseTo((1 + 4 / 6) / 2);
-    expect(m.avg_event_coverage).toBeCloseTo((1 + 6 / 7) / 2);
+    expect(m.avg_event_coverage).toBeCloseTo(1);
     expect(m.score_histogram["0.00-0.35"]).toBe(1);
     // Fallback runs contribute no picks/scores.
     expect(m.score_min).toBeCloseTo(0.2);
@@ -233,6 +236,22 @@ describe("aggregateMetrics", () => {
     expect(m.reason_anchored_rate).toBeCloseTo(1 / 6);
     // Pick-intrinsic rates still cover everything.
     expect(m.below_threshold_rate).toBeCloseTo(1 / 17);
+  });
+
+  it("excludes partially enriched runs from diversity metrics (fail closed)", () => {
+    const runA = fixtureDataset.runs.find((r) => r.run_id.endsWith("a"));
+    // Strip event_id from half the candidate pool: some picks still carry an
+    // event, so a naive ratio could be computed — but it would be biased, so
+    // the run must be excluded and counted instead.
+    const partial = {
+      ...runA,
+      candidates: runA.candidates.map((c, i) => (i % 2 === 0 ? { ...c, event_id: undefined } : c)),
+    };
+    const m = aggregateMetrics([computeRunMetrics(partial)]);
+    expect(m.event_data_runs).toBe(0);
+    expect(m.event_partial_runs).toBe(1);
+    expect(m.avg_unique_event_ratio).toBeNull();
+    expect(m.event_over_cap_run_rate).toBeNull();
   });
 
   it("handles an empty dataset without dividing by zero", () => {

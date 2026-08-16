@@ -213,6 +213,12 @@ export function computeRunMetrics(run) {
   const eventsOverCap = [...picksPerEvent.values()].filter((n) => n > MAX_PICKS_PER_EVENT).length;
   const maxPicksPerEvent = picksPerEvent.size > 0 ? Math.max(...picksPerEvent.values()) : 0;
 
+  // Picks that COULD carry an event_id: those actually present in the
+  // candidate pool. Hallucinated ids can never be enriched, so they don't
+  // count against event coverage (they're already counted as invalid).
+  const enrichablePicks =
+    candidateIds.size > 0 ? picks.filter((p) => candidateIds.has(p.condition_id)).length : 0;
+
   return {
     run_id: run.run_id,
     portfolio_id: run.portfolio_id,
@@ -233,7 +239,11 @@ export function computeRunMetrics(run) {
     reason_anchored: reasonAnchored,
     non_financial_picks: nonFinancial,
     scores,
-    event_coverage: picks.length > 0 ? picksWithKnownEvent / picks.length : 0,
+    enrichable_picks: enrichablePicks,
+    event_coverage: enrichablePicks > 0 ? picksWithKnownEvent / enrichablePicks : 0,
+    // Diversity ratios are only unbiased when every enrichable pick has its
+    // event — a partial sample can skew the ratio in either direction.
+    full_event_coverage: enrichablePicks > 0 && picksWithKnownEvent === enrichablePicks,
     picks_with_known_event: picksWithKnownEvent,
     unique_events: picksPerEvent.size,
     events_over_cap: eventsOverCap,
@@ -280,7 +290,14 @@ export function aggregateMetrics(runMetrics) {
     "0.80-1.00": allScores.filter((s) => s >= 0.8).length,
   };
 
-  const runsWithEventData = scoredRuns.filter((r) => r.event_coverage > 0);
+  // Fail closed on partial enrichment: diversity metrics use only runs where
+  // EVERY enrichable pick carries an event_id — a partially enriched run can
+  // bias the unique-event ratio in either direction (missed groupings inflate
+  // it; if divided by all picks, unknowns would deflate it instead).
+  // Partially enriched runs are excluded and counted (event_partial_runs).
+  const eventEligibleRuns = contextRuns.filter((r) => r.event_coverage > 0);
+  const runsWithEventData = eventEligibleRuns.filter((r) => r.full_event_coverage);
+  const eventPartialRuns = eventEligibleRuns.length - runsWithEventData.length;
 
   return {
     runs,
@@ -307,14 +324,13 @@ export function aggregateMetrics(runMetrics) {
     score_max: allScores.length > 0 ? allScores[allScores.length - 1] : null,
     score_histogram: histogram,
     event_data_runs: runsWithEventData.length,
-    // Averaged over runs with any event data. Coverage < 100% can only hide
-    // violations (an unknown-event pick can't be grouped), never invent them.
+    event_partial_runs: eventPartialRuns,
     event_over_cap_run_rate:
       runsWithEventData.length > 0
         ? runsWithEventData.filter((r) => r.events_over_cap > 0).length / runsWithEventData.length
         : null,
-    // Ratio over picks WITH a known event only, so partial enrichment doesn't
-    // read as (false) duplication. avg_event_coverage says how partial it was.
+    // On fully enriched runs, known-event picks == enrichable picks, so this
+    // is unique events per (non-hallucinated) pick — 100% = maximal diversity.
     avg_unique_event_ratio:
       runsWithEventData.length > 0
         ? runsWithEventData.reduce(
@@ -323,9 +339,10 @@ export function aggregateMetrics(runMetrics) {
             0,
           ) / runsWithEventData.length
         : null,
+    // Diagnostic: how complete enrichment was across runs with any event data.
     avg_event_coverage:
-      runsWithEventData.length > 0
-        ? runsWithEventData.reduce((s, r) => s + r.event_coverage, 0) / runsWithEventData.length
+      eventEligibleRuns.length > 0
+        ? eventEligibleRuns.reduce((s, r) => s + r.event_coverage, 0) / eventEligibleRuns.length
         : null,
   };
 }
@@ -511,7 +528,13 @@ export function formatReport(report, baseline = null) {
   lines.push(`Reason-anchored:        ${fmt(m.reason_anchored_rate, "pct")}  (reason names a profile holding)`);
   lines.push(`Non-financial leaks:    ${fmt(m.non_financial_leak_rate, "pct")}  (sports/entertainment/candidacy picks)`);
   if (m.event_data_runs > 0) {
-    lines.push(`Event diversity:        ${fmt(m.avg_unique_event_ratio, "pct")} unique-event ratio; ${fmt(m.event_over_cap_run_rate, "pct")} of runs break the 2-per-event cap (event data on ${m.event_data_runs}/${m.scored_runs} runs, ${fmt(m.avg_event_coverage, "pct")} pick coverage)`);
+    const partialNote =
+      m.event_partial_runs > 0
+        ? `; ${m.event_partial_runs} run(s) excluded for partial enrichment`
+        : "";
+    lines.push(`Event diversity:        ${fmt(m.avg_unique_event_ratio, "pct")} unique-event ratio; ${fmt(m.event_over_cap_run_rate, "pct")} of runs break the 2-per-event cap (fully enriched runs: ${m.event_data_runs}/${m.scored_runs}${partialNote})`);
+  } else if (m.event_partial_runs > 0) {
+    lines.push(`Event diversity:        n/a (${m.event_partial_runs} run(s) have only partial event enrichment — re-snapshot with Supabase creds for complete event data)`);
   } else {
     lines.push("Event diversity:        n/a (no event_id enrichment in this dataset)");
   }
