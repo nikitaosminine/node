@@ -733,44 +733,22 @@ export async function enqueueEtfConstituentsEnrichment(
     return { enqueued: [] };
   }
 
-  // Dedupe/backoff via geography_research_jobs: skip any holding with job
-  // activity inside the backoff window, whatever its status — a queued or
-  // running job is already on it, and a recent completed/failed one means
-  // research ran and found nothing (retry daily, not on every fanout).
-  const holdingIds = eligible.map((gap) => String(gap.holdingId));
-  const { data: jobRows, error: jobsError } = (await client
-    .from("geography_research_jobs")
-    .select("holding_id,updated_at,started_at")
-    .in("holding_id", holdingIds)) as {
-    data: Array<{
-      holding_id: string;
-      updated_at: string | null;
-      started_at: string | null;
-    }> | null;
-    error: { message: string } | null;
-  };
-  if (jobsError) {
-    throw new Error(
-      `[polymarket] constituents enrichment jobs lookup failed: ${jobsError.message}`,
-    );
-  }
-
-  const backoffCutoffMs = Date.now() - CONSTITUENT_ENRICHMENT_BACKOFF_HOURS * 3_600_000;
-  const recentlyActive = new Set<string>();
-  for (const job of jobRows ?? []) {
-    const activityMs = Date.parse(job.updated_at ?? job.started_at ?? "");
-    if (Number.isFinite(activityMs) && activityMs >= backoffCutoffMs) {
-      recentlyActive.add(String(job.holding_id));
-    }
-  }
-
-  const toEnqueue = eligible.filter((gap) => !recentlyActive.has(String(gap.holdingId)));
-  if (toEnqueue.length === 0) return { enqueued: [] };
-
-  const now = new Date().toISOString();
-  const { error: upsertError } = (await client.from("geography_research_jobs").upsert(
-    toEnqueue.map((gap) => ({
-      holding_id: gap.holdingId,
+  // Dedupe/backoff via geography_research_jobs, claimed ATOMICALLY per holding
+  // so overlapping fanouts cannot double-enqueue the same LLM job: a
+  // conditional UPDATE claims a stale row (any status — a recent
+  // completed/failed row means research ran and found nothing; retry daily,
+  // not on every fanout), and an INSERT claims a missing one, where a
+  // unique-violation means another fanout holds a recent claim.
+  const nowMs = Date.now();
+  const now = new Date(nowMs).toISOString();
+  const staleCutoff = new Date(
+    nowMs - CONSTITUENT_ENRICHMENT_BACKOFF_HOURS * 3_600_000,
+  ).toISOString();
+  const claimed: EtfConstituentGap[] = [];
+  for (const gap of eligible) {
+    const holdingId = String(gap.holdingId);
+    const jobRow = {
+      holding_id: holdingId,
       portfolio_id: portfolioId,
       status: "queued",
       reason: "polymarket_constituents",
@@ -778,17 +756,48 @@ export async function enqueueEtfConstituentsEnrichment(
       started_at: null,
       finished_at: null,
       updated_at: now,
-    })),
-    { onConflict: "holding_id" },
-  )) as { error: { message: string } | null };
-  if (upsertError) {
+    };
+    const { data: updatedRows, error: updateError } = (await client
+      .from("geography_research_jobs")
+      .update(jobRow)
+      .eq("holding_id", holdingId)
+      .or(`updated_at.is.null,updated_at.lt.${staleCutoff}`)
+      .select("holding_id")) as {
+      data: Array<{ holding_id: string }> | null;
+      error: { message: string } | null;
+    };
+    if (updateError) {
+      throw new Error(
+        `[polymarket] constituents enrichment claim failed: ${updateError.message}`,
+      );
+    }
+    if (updatedRows && updatedRows.length > 0) {
+      claimed.push(gap);
+      continue;
+    }
+    const { error: insertError } = (await client
+      .from("geography_research_jobs")
+      .insert(jobRow)) as { error: { message: string; code?: string } | null };
+    if (!insertError) {
+      claimed.push(gap);
+      continue;
+    }
+    // 23505 = unique violation: a row with recent activity already exists
+    // (or a concurrent fanout inserted first) — back off, don't double-enqueue.
+    if (insertError.code === "23505") continue;
     throw new Error(
-      `[polymarket] constituents enrichment job upsert failed: ${upsertError.message}`,
+      `[polymarket] constituents enrichment job insert failed: ${insertError.message}`,
     );
   }
+  if (claimed.length === 0) return { enqueued: [] };
 
-  await Promise.all(
-    toEnqueue.map((gap) =>
+  // Deliver, and make the claim reflect delivery: if a send rejects, release
+  // the claim so the next fanout retries immediately instead of the ETF
+  // sitting unenriched behind a 24h backoff with no message in flight. The
+  // status guard can't strand a concurrent geography-path message — that
+  // consumer re-upserts the row when it starts (markGeographyJobRunning).
+  const sendResults = await Promise.allSettled(
+    claimed.map((gap) =>
       env.GEOGRAPHY_QUEUE!.send({
         type: "geography_research",
         portfolio_id: portfolioId,
@@ -797,12 +806,33 @@ export async function enqueueEtfConstituentsEnrichment(
       }),
     ),
   );
-  for (const gap of toEnqueue) {
-    console.warn(
-      `[polymarket] ETF constituents coverage gap: ${gap.ticker} (${gap.isin}) has no etf_constituents row${gap.hasFallback ? " (hardcoded fallback used this run)" : ""} — enrichment enqueued`,
+  const enqueued: string[] = [];
+  for (const [index, result] of sendResults.entries()) {
+    const gap = claimed[index];
+    const holdingId = String(gap.holdingId);
+    if (result.status === "fulfilled") {
+      enqueued.push(holdingId);
+      console.warn(
+        `[polymarket] ETF constituents coverage gap: ${gap.ticker} (${gap.isin}) has no etf_constituents row${gap.hasFallback ? " (hardcoded fallback used this run)" : ""} — enrichment enqueued`,
+      );
+      continue;
+    }
+    console.error(
+      `[polymarket] constituents enrichment send failed for ${gap.ticker} (holding ${holdingId}) — releasing claim:`,
+      result.reason,
     );
+    const { error: releaseError } = (await client
+      .from("geography_research_jobs")
+      .delete()
+      .eq("holding_id", holdingId)
+      .eq("status", "queued")) as { error: { message: string } | null };
+    if (releaseError) {
+      console.error(
+        `[polymarket] constituents enrichment claim release failed for holding ${holdingId}: ${releaseError.message}`,
+      );
+    }
   }
-  return { enqueued: toEnqueue.map((gap) => String(gap.holdingId)) };
+  return { enqueued };
 }
 
 // ---------------------------------------------------------------------------

@@ -558,12 +558,18 @@ describe("ETF constituents in portfolio profiles", () => {
 
   function profileClient({
     constituentRows = [],
-    jobRows = [],
+    staleJobRow = false,
+    insertConflict = false,
   }: {
     constituentRows?: unknown[];
-    jobRows?: unknown[];
+    /** true = the conditional UPDATE claims an existing stale row */
+    staleJobRow?: boolean;
+    /** true = INSERT hits a unique violation (recent claim held elsewhere) */
+    insertConflict?: boolean;
   }) {
-    const jobUpserts: unknown[][] = [];
+    const jobClaims: unknown[] = [];
+    const jobInserts: unknown[] = [];
+    const jobDeletes: Array<Record<string, unknown>> = [];
     const client = {
       from: vi.fn((table: string) => {
         if (table === "holding_geography_allocations") {
@@ -586,19 +592,40 @@ describe("ETF constituents in portfolio profiles", () => {
         }
         if (table === "geography_research_jobs") {
           return {
-            select: vi.fn(() => ({
-              in: vi.fn().mockResolvedValue({ data: jobRows, error: null }),
+            update: vi.fn((row: unknown) => ({
+              eq: vi.fn((_col: string, holdingId: string) => ({
+                or: vi.fn(() => ({
+                  select: vi.fn(async () => {
+                    if (staleJobRow) {
+                      jobClaims.push(row);
+                      return { data: [{ holding_id: holdingId }], error: null };
+                    }
+                    return { data: [], error: null };
+                  }),
+                })),
+              })),
             })),
-            upsert: vi.fn(async (rows: unknown[]) => {
-              jobUpserts.push(rows);
+            insert: vi.fn(async (row: unknown) => {
+              if (insertConflict) {
+                return { error: { message: "duplicate key value", code: "23505" } };
+              }
+              jobInserts.push(row);
               return { error: null };
             }),
+            delete: vi.fn(() => ({
+              eq: vi.fn((col1: string, val1: string) => ({
+                eq: vi.fn(async (col2: string, val2: string) => {
+                  jobDeletes.push({ [col1]: val1, [col2]: val2 });
+                  return { error: null };
+                }),
+              })),
+            })),
           };
         }
         throw new Error(`Unexpected table: ${table}`);
       }),
     };
-    return { client, jobUpserts };
+    return { client, jobClaims, jobInserts, jobDeletes };
   }
 
   it("uses etf_constituents as the primary source, ahead of the hardcoded map", async () => {
@@ -738,23 +765,18 @@ describe("ETF constituents in portfolio profiles", () => {
       holding_id: "holding-vwce",
       reason: "polymarket_constituents",
     });
-    expect(first.jobUpserts).toEqual([
-      [
-        expect.objectContaining({
-          holding_id: "holding-vwce",
-          portfolio_id: "portfolio-1",
-          status: "queued",
-          reason: "polymarket_constituents",
-        }),
-      ],
+    expect(first.jobInserts).toEqual([
+      expect.objectContaining({
+        holding_id: "holding-vwce",
+        portfolio_id: "portfolio-1",
+        status: "queued",
+        reason: "polymarket_constituents",
+      }),
     ]);
 
-    // A later fanout sees the job row from the first enqueue — no re-send.
-    const second = profileClient({
-      jobRows: [
-        { holding_id: "holding-vwce", updated_at: new Date().toISOString(), started_at: null },
-      ],
-    });
+    // A later (or concurrently racing) fanout can't claim: the conditional
+    // UPDATE matches nothing and the INSERT hits the unique violation.
+    const second = profileClient({ insertConflict: true });
     const secondResult = await enqueueEtfConstituentsEnrichment(
       enrichEnv,
       second.client as never,
@@ -764,15 +786,12 @@ describe("ETF constituents in portfolio profiles", () => {
 
     expect(secondResult.enqueued).toEqual([]);
     expect(send).toHaveBeenCalledTimes(1);
-    expect(second.jobUpserts).toEqual([]);
+    expect(second.jobInserts).toEqual([]);
   });
 
-  it("re-enqueues once the backoff window has passed", async () => {
+  it("re-enqueues by claiming the stale row once the backoff window has passed", async () => {
     const send = vi.fn().mockResolvedValue(undefined);
-    const staleActivity = new Date(Date.now() - 25 * 3_600_000).toISOString();
-    const { client } = profileClient({
-      jobRows: [{ holding_id: "holding-vwce", updated_at: staleActivity, started_at: null }],
-    });
+    const { client, jobClaims, jobInserts } = profileClient({ staleJobRow: true });
 
     const result = await enqueueEtfConstituentsEnrichment(
       { ...env, GEOGRAPHY_QUEUE: { send } },
@@ -791,6 +810,36 @@ describe("ETF constituents in portfolio profiles", () => {
 
     expect(result.enqueued).toEqual(["holding-vwce"]);
     expect(send).toHaveBeenCalledTimes(1);
+    expect(jobClaims).toEqual([
+      expect.objectContaining({ holding_id: "holding-vwce", status: "queued" }),
+    ]);
+    expect(jobInserts).toEqual([]);
+  });
+
+  it("releases the claim when queue delivery fails so the next fanout can retry", async () => {
+    const send = vi.fn().mockRejectedValue(new Error("queue unavailable"));
+    const { client, jobInserts, jobDeletes } = profileClient({});
+
+    const result = await enqueueEtfConstituentsEnrichment(
+      { ...env, GEOGRAPHY_QUEUE: { send } },
+      client as never,
+      "portfolio-1",
+      [
+        {
+          holdingId: "holding-vwce",
+          ticker: "VWCE.DE",
+          isin: "IE00BK5BQT80",
+          name: "Vanguard FTSE All-World",
+          hasFallback: false,
+        },
+      ],
+    );
+
+    // The claim was taken, delivery failed, and the claim was released — the
+    // holding is NOT reported as enqueued and no 24h suppression row remains.
+    expect(jobInserts).toHaveLength(1);
+    expect(result.enqueued).toEqual([]);
+    expect(jobDeletes).toEqual([{ holding_id: "holding-vwce", status: "queued" }]);
   });
 
   it("never enqueues an ETF without an ISIN or when the queue is unbound", async () => {
