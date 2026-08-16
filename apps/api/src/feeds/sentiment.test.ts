@@ -5,7 +5,6 @@ import {
   buildSentimentPrompt,
   computeEwma,
   invokeSentimentGrok,
-  MAX_SCORED_CLUSTER_IDS,
   mergeEvidenceClusterIds,
   mergeScoredClusterIds,
   parseSentimentResponse,
@@ -14,6 +13,7 @@ import {
 } from "./sentiment";
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.unstubAllGlobals();
 });
 
@@ -168,6 +168,24 @@ describe("invokeSentimentGrok", () => {
       "No Grok API key available",
     );
   });
+
+  it("aborts a hanging request at the scoring timeout", async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.fn(
+      (_input: RequestInfo | URL, init?: RequestInit) =>
+        new Promise<Response>((_, reject) => {
+          init?.signal?.addEventListener("abort", () => reject(new Error("aborted")));
+        }),
+    );
+
+    const resultPromise = scoreClusterSentiments(env, [target], fetchMock);
+    await vi.advanceTimersByTimeAsync(15_000);
+
+    await expect(resultPromise).resolves.toMatchObject({
+      sentiments: [],
+      error: "Grok sentiment scoring timed out",
+    });
+  });
 });
 
 describe("scoreClusterSentiments (degrade gracefully)", () => {
@@ -317,14 +335,15 @@ describe("mergeScoredClusterIds", () => {
     expect(merged.map((r) => r.id)).toEqual(["new-1", "still-valid"]);
   });
 
-  it("keeps a defensive cap even when every entry is within the TTL window", () => {
-    const existing = Array.from({ length: MAX_SCORED_CLUSTER_IDS }, (_, i) => ({
+  it("retains every in-window entry instead of evicting valid dedupe ids", () => {
+    const existing = Array.from({ length: 2001 }, (_, i) => ({
       id: `old-${i}`,
       scoredAt: new Date(now - 1000).toISOString(),
     }));
     const merged = mergeScoredClusterIds(existing, ["new-1"], now, ttlMs);
-    expect(merged).toHaveLength(MAX_SCORED_CLUSTER_IDS);
+    expect(merged).toHaveLength(2002);
     expect(merged[0].id).toBe("new-1");
+    expect(merged.at(-1)?.id).toBe("old-2000");
   });
 
   it("retains dedupe coverage for clusters evicted from the 10-id display list, regardless of volume", () => {

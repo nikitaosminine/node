@@ -169,10 +169,16 @@ function stubFanoutHttp(options: {
         },
       ]);
     }
+    if (url.pathname === "/rest/v1/company_sentiment_pending" && method === "GET") {
+      return jsonResponse([]);
+    }
     if (url.pathname === "/rest/v1/portfolio_news_matches" && method === "POST") {
       return jsonResponse(null, 201);
     }
     if (url.pathname === "/rest/v1/rpc/try_acquire_company_sentiment_lock" && method === "POST") {
+      return jsonResponse(true, 200);
+    }
+    if (url.pathname === "/rest/v1/rpc/enqueue_company_sentiment_pending" && method === "POST") {
       return jsonResponse(true, 200);
     }
     if (url.pathname === "/rest/v1/rpc/apply_company_sentiment_batch" && method === "POST") {
@@ -334,8 +340,12 @@ describe("runNewsFanout sentiment pipeline (end-to-end over stubbed HTTP)", () =
       expect(row).not.toHaveProperty("sentiments");
     }
 
-    // The rolling-score step is skipped entirely (no reads, no writes).
-    expect(captured.some((r) => r.pathname === "/rest/v1/company_sentiment")).toBe(false);
+    expect(
+      captured.some((r) => r.pathname === "/rest/v1/company_sentiment" && r.method === "GET"),
+    ).toBe(true);
+    expect(
+      captured.some((r) => r.pathname === "/rest/v1/rpc/apply_company_sentiment_batch"),
+    ).toBe(false);
   });
 
   it("does not fold the answered member of a partially answered cluster into EWMA", async () => {

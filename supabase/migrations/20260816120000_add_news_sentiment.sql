@@ -38,11 +38,7 @@ create table if not exists public.company_sentiment (
   scored_cluster_ids    jsonb not null default '[]'::jsonb,
   -- full re-observation dedupe set: array of {id, scoredAt} for every
   -- news_clusters.id already folded into this company's EWMA. Pruned by age
-  -- rather than count (see MAX_SCORED_CLUSTER_IDS in feeds/sentiment.ts) — a
-  -- cluster older than the news TTL window can never resurface as an Exa
-  -- result again, so it's safe to drop from the dedupe set once it ages out.
-  -- Kept separate from evidence_cluster_ids so the small display cap can't
-  -- evict ids the EWMA still needs to recognize as already observed.
+  -- using the news TTL window.
   updated_at            timestamptz not null default now()
 );
 
@@ -98,6 +94,60 @@ create policy "Service role can manage company sentiment lock"
   to service_role
   using (true)
   with check (true);
+
+create table if not exists public.company_sentiment_pending (
+  company_key  text not null,
+  cluster_id   text not null,
+  company_name text not null,
+  ticker       text,
+  isin         text,
+  score        numeric(5, 4) not null check (score >= -1 and score <= 1),
+  rationale    text not null default '',
+  observed_at timestamptz not null default now(),
+  primary key (company_key, cluster_id)
+);
+
+alter table public.company_sentiment_pending enable row level security;
+
+drop policy if exists "Service role can manage pending company sentiment"
+  on public.company_sentiment_pending;
+create policy "Service role can manage pending company sentiment"
+  on public.company_sentiment_pending for all
+  to service_role
+  using (true)
+  with check (true);
+
+create or replace function public.enqueue_company_sentiment_pending(
+  p_rows jsonb
+) returns boolean
+language plpgsql
+set search_path = ''
+as $$
+begin
+  insert into public.company_sentiment_pending (
+    company_key, cluster_id, company_name, ticker, isin, score, rationale, observed_at
+  )
+  select
+    r.company_key, r.cluster_id, r.company_name, r.ticker, r.isin,
+    r.score, r.rationale, r.observed_at
+  from jsonb_to_recordset(p_rows) as r(
+    company_key text,
+    cluster_id text,
+    company_name text,
+    ticker text,
+    isin text,
+    score numeric,
+    rationale text,
+    observed_at timestamptz
+  )
+  on conflict (company_key, cluster_id) do nothing;
+
+  return true;
+end;
+$$;
+
+revoke all on function public.enqueue_company_sentiment_pending(jsonb) from public;
+grant execute on function public.enqueue_company_sentiment_pending(jsonb) to service_role;
 
 -- Atomically takes the singleton lock row if it is unheld or its holder's
 -- lease has expired; returns false if another holder currently owns it. The
@@ -186,6 +236,18 @@ begin
         evidence_cluster_ids = excluded.evidence_cluster_ids,
         scored_cluster_ids = excluded.scored_cluster_ids,
         updated_at = excluded.updated_at;
+
+  delete from public.company_sentiment_pending p
+  where exists (
+    select 1
+    from jsonb_to_recordset(p_rows) as r(
+      company_key text,
+      scored_cluster_ids jsonb
+    )
+    cross join lateral jsonb_array_elements(coalesce(r.scored_cluster_ids, '[]'::jsonb)) as ids(value)
+    where r.company_key = p.company_key
+      and ids.value->>'id' = p.cluster_id
+  );
 
   return true;
 end;

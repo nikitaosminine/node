@@ -41,6 +41,8 @@ interface GrokChatResponse {
 }
 
 const DEFAULT_SENTIMENT_MODEL = "grok-4-1-fast-non-reasoning";
+const SENTIMENT_GROK_TIMEOUT_MS = 15_000;
+type SentimentFetch = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 
 function getGrokBaseUrl(env: Env): string {
   return (env.GROK_API_BASE_URL || "https://api.x.ai/v1").replace(/\/$/, "");
@@ -90,26 +92,38 @@ export async function invokeSentimentGrok(
   env: Env,
   systemPrompt: string,
   userPrompt: string,
+  fetchImpl: SentimentFetch = fetch,
 ): Promise<string> {
   const apiKey = env.GROK_MAIN_API_KEY ?? env.GROK_SUB_API_KEY ?? env.GROK_NORMALIZATION_API_KEY;
   if (!apiKey) throw new Error("[sentiment] No Grok API key available");
 
-  const res = await fetch(`${getGrokBaseUrl(env)}/chat/completions`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model: env.SENTIMENT_GROK_MODEL || DEFAULT_SENTIMENT_MODEL,
-      temperature: 0.1,
-      response_format: { type: "json_object" },
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: userPrompt },
-      ],
-    }),
-  });
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), SENTIMENT_GROK_TIMEOUT_MS);
+  let res: Response;
+  try {
+    res = await fetchImpl(`${getGrokBaseUrl(env)}/chat/completions`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: env.SENTIMENT_GROK_MODEL || DEFAULT_SENTIMENT_MODEL,
+        temperature: 0.1,
+        response_format: { type: "json_object" },
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: userPrompt },
+        ],
+      }),
+      signal: controller.signal,
+    });
+  } catch (err) {
+    if (controller.signal.aborted) throw new Error("Grok sentiment scoring timed out");
+    throw err;
+  } finally {
+    clearTimeout(timeout);
+  }
 
   if (!res.ok) {
     const body = await res.text().catch(() => "");
@@ -202,6 +216,7 @@ export function parseSentimentResponse(
 export async function scoreClusterSentiments(
   env: Env,
   targets: SentimentTarget[],
+  fetchImpl?: SentimentFetch,
 ): Promise<{ sentiments: ClusterSentiment[]; error: string | null }> {
   if (targets.length === 0) return { sentiments: [], error: null };
 
@@ -209,7 +224,7 @@ export async function scoreClusterSentiments(
   if (pairIndex.size === 0) return { sentiments: [], error: null };
 
   try {
-    const raw = await invokeSentimentGrok(env, systemPrompt, userPrompt);
+    const raw = await invokeSentimentGrok(env, systemPrompt, userPrompt, fetchImpl);
     return { sentiments: parseSentimentResponse(raw, pairIndex), error: null };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -292,20 +307,6 @@ export function mergeEvidenceClusterIds(existing: string[], fresh: string[]): st
   return capIds(existing, fresh, MAX_EVIDENCE_CLUSTER_IDS);
 }
 
-// scored_cluster_ids is the EWMA re-observation dedupe set. A fixed count
-// cap here is unsafe: a heavily-covered company can genuinely accumulate
-// more distinct in-window clusters than any comfortable constant bounds
-// (RESULTS_PER_COMPANY=25 per fanout x an hourly cron adds up fast), and
-// once a cap evicts an id the article resurfaces as a "new" observation and
-// re-fires the EWMA — the exact bug this dedupe set exists to prevent. So
-// entries are pruned by age instead of count: a cluster older than the news
-// TTL window can never resurface as an Exa result again (news.ts bounds its
-// search window the same way via NEWS_WINDOW_MS), so it's safe to drop from
-// the dedupe set once it ages out. MAX_SCORED_CLUSTER_IDS is kept only as a
-// defensive backstop against unbounded growth from clock skew or a stuck
-// pruning bug — it should never bind in practice.
-export const MAX_SCORED_CLUSTER_IDS = 2000;
-
 export interface ScoredClusterRecord {
   id: string;
   scoredAt: string;
@@ -323,5 +324,5 @@ export function mergeScoredClusterIds(
     ...existing.filter((r) => !freshSet.has(r.id)),
   ];
   const withinWindow = merged.filter((r) => now - new Date(r.scoredAt).getTime() <= ttlMs);
-  return withinWindow.slice(0, MAX_SCORED_CLUSTER_IDS);
+  return withinWindow;
 }
