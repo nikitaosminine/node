@@ -5549,6 +5549,11 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
         )
         .eq("portfolio_id", portfolioId)
         .eq("polymarket_markets.active", true)
+        // Defense in depth against stale/resolved markets that haven't been
+        // deactivated by the fanout yet — mirrors recaps.ts's watch-slide filter.
+        .or(
+          `polymarket_markets.end_date.is.null,polymarket_markets.end_date.gte.${new Date().toISOString()}`,
+        )
         .order("is_pinned", { ascending: false })
         .order("score", { ascending: false, nullsFirst: false })
         .limit(30);
@@ -5782,6 +5787,9 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
         )
         .contains("tags", JSON.stringify([{ id: tagId }]))
         .eq("active", true)
+        // Defense in depth against stale/resolved markets that haven't been
+        // deactivated by the fanout yet — mirrors recaps.ts's watch-slide filter.
+        .or(`end_date.is.null,end_date.gte.${new Date().toISOString()}`)
         .order("volume_24hr", { ascending: false })
         .limit(limit * 2); // fetch extra to have room after client-side filter
 
