@@ -250,6 +250,13 @@ const SECTOR_TOPICS: Record<string, { label: string; query: string; terms: strin
   },
 };
 
+// Canonical sector vocabulary for LLM-facing prompts — display-cased
+// SECTOR_TOPICS keys, so every label round-trips through the trim+lowercase
+// lookup in deriveMarketTopics.
+export const MARKET_SECTOR_LABELS: string[] = Object.keys(SECTOR_TOPICS).map((key) =>
+  key.replace(/(^|\s)\p{L}/gu, (c) => c.toUpperCase()),
+);
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------

@@ -346,18 +346,25 @@ async function buildMarketWorkList(
   }
 
   // Best-effort taxonomy seeds — 2 batched reads, each individually guarded so
-  // a rejected read (network, not just a Supabase {error}) degrades that seed
-  // only: static name/ticker overrides in deriveMarketTopics must always run.
+  // a failed read (a resolved Supabase {error} or a genuine rejection) degrades
+  // that seed only: static name/ticker overrides in deriveMarketTopics must
+  // always run.
   const isins = [...new Set([...etfs.values()].map((e) => e.isin).filter(Boolean))] as string[];
   const holdingIds = fundHoldings.map((h) => h.id);
 
   const constituentsByIsin = new Map<string, EtfConstituentRow>();
   if (isins.length > 0) {
     try {
-      const { data } = await client
+      const { data, error } = await client
         .from("etf_constituents")
         .select("etf_isin,constituents,top_sectors")
         .in("etf_isin", isins);
+      if (error) {
+        console.warn(
+          "[news] etf_constituents read failed (static overrides still apply):",
+          error.message,
+        );
+      }
       for (const row of (data as EtfConstituentRow[] | null) ?? []) {
         constituentsByIsin.set(row.etf_isin, row);
       }
@@ -368,10 +375,16 @@ async function buildMarketWorkList(
 
   const countryWeightsByHolding = new Map<string, GeographyRow[]>();
   try {
-    const { data } = await client
+    const { data, error } = await client
       .from("holding_geography_allocations")
       .select("holding_id,country_code,country_name,weight_pct")
       .in("holding_id", holdingIds);
+    if (error) {
+      console.warn(
+        "[news] geography allocations read failed (static overrides still apply):",
+        error.message,
+      );
+    }
     for (const row of (data as GeographyRow[] | null) ?? []) {
       const list = countryWeightsByHolding.get(row.holding_id) ?? [];
       list.push(row);

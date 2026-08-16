@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  MARKET_SECTOR_LABELS,
   MAX_TOPICS_PER_ETF,
   deriveMarketTopics,
   mentionsTopic,
@@ -122,6 +123,31 @@ describe("deriveMarketTopics — data-driven fallback", () => {
 
   it("returns no topics for an unknown ETF with no data", () => {
     expect(deriveMarketTopics({ ticker: "ZZZ.PA", isin: null, name: "Mystery Fund" })).toEqual([]);
+  });
+
+  it("derives a curated sector topic for every label in MARKET_SECTOR_LABELS", () => {
+    expect(MARKET_SECTOR_LABELS).toEqual([
+      "Technology",
+      "Financials",
+      "Energy",
+      "Healthcare",
+      "Industrials",
+      "Consumer Discretionary",
+      "Consumer Staples",
+      "Utilities",
+      "Materials",
+      "Communication Services",
+    ]);
+    for (const label of MARKET_SECTOR_LABELS) {
+      const topics = deriveMarketTopics(
+        { ticker: "ZZZ.PA", isin: null, name: "Mystery Fund" },
+        { topSectors: [{ sector: label, weight_pct: 60 }] },
+      );
+      expect(topicKeys(topics)).toEqual([
+        `sector-${label.toLowerCase().replace(/\s+/g, "-")}`,
+      ]);
+      expect(topics[0].sectors).toEqual([label]);
+    }
   });
 });
 

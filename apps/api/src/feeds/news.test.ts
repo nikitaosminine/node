@@ -46,6 +46,8 @@ interface CapturedState {
   holdings: Array<Record<string, any>>;
   etfConstituents: Array<Record<string, any>>;
   constituentsReject: boolean;
+  constituentsError: boolean;
+  geographyError: boolean;
 }
 
 function installDbMock(state: CapturedState): void {
@@ -61,13 +63,23 @@ function installDbMock(state: CapturedState): void {
           select: () => ({
             in: async () => {
               if (state.constituentsReject) throw new Error("constituents read: network down");
+              if (state.constituentsError) {
+                return { data: null, error: { message: "TypeError: fetch failed" }, status: 0 };
+              }
               return { data: state.etfConstituents, error: null };
             },
           }),
         };
       case "holding_geography_allocations":
         return {
-          select: () => ({ in: async () => ({ data: [], error: null }) }),
+          select: () => ({
+            in: async () => {
+              if (state.geographyError) {
+                return { data: null, error: { message: "TypeError: fetch failed" }, status: 0 };
+              }
+              return { data: [], error: null };
+            },
+          }),
         };
       case "news_clusters":
         return {
@@ -166,6 +178,8 @@ describe("runNewsFanout — ETF-derived market coverage", () => {
       holdings: HOLDINGS,
       etfConstituents: [],
       constituentsReject: false,
+      constituentsError: false,
+      geographyError: false,
     };
     installDbMock(state);
     installFetchMock(state);
@@ -316,6 +330,28 @@ describe("runNewsFanout — ETF-derived market coverage", () => {
     expect(result.marketTopicsQueried).toBe(1);
     expect(result.errors).toEqual([]);
     expect(state.clusterRows.find((r) => r.cluster_key === "exa-market-1")).toBeDefined();
+  });
+
+  it("warns and still derives static-override topics when a taxonomy read resolves with an error", async () => {
+    // supabase-js v2 converts network failures into resolved { data: null, error }
+    // results rather than rejections — the guards must log those too.
+    state.constituentsError = true;
+    state.geographyError = true;
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    try {
+      const result = await runNewsFanout(env);
+
+      expect(result.marketTopicsQueried).toBe(1);
+      expect(result.errors).toEqual([]);
+      expect(state.clusterRows.find((r) => r.cluster_key === "exa-market-1")).toBeDefined();
+
+      const messages = warn.mock.calls.map((c) => c.map(String).join(" "));
+      expect(messages.some((m) => m.includes("etf_constituents read failed"))).toBe(true);
+      expect(messages.some((m) => m.includes("geography allocations read failed"))).toBe(true);
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it("merges relevance terms when multiple ETFs derive the same topic", async () => {
