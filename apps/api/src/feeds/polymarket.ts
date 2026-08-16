@@ -185,7 +185,6 @@ const CACHE_TTL_HOURS = 6;
 // days comfortably covers weekly/monthly movement comparisons.
 export const PRICE_HISTORY_RETENTION_DAYS = 90;
 
-
 // ---------------------------------------------------------------------------
 // Non-financial market filter — applied before Grok to prevent LLM from
 // wasting tokens on sports/entertainment/individual political candidacies.
