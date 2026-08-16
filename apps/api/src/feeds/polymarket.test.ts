@@ -9,6 +9,8 @@ vi.mock("@supabase/supabase-js", () => ({
 import {
   NON_FINANCIAL_RE,
   TAG_IDS,
+  buildPortfolioProfile,
+  enqueueEtfConstituentsEnrichment,
   fetchCandidateMarkets,
   invokePolymarketGrok,
   isNearCertainMarket,
@@ -597,6 +599,339 @@ describe("Polymarket Grok curation", () => {
       curation: { portfoliosWithoutHoldings: 1 },
       errors: [],
     });
+  });
+});
+
+describe("ETF constituents in portfolio profiles", () => {
+  const vwceHolding = {
+    id: "holding-vwce",
+    ticker: "VWCE.DE",
+    isin: "IE00BK5BQT80",
+    asset_type: "ETF",
+    name: "Vanguard FTSE All-World",
+    quantity: 10,
+  };
+
+  function profileClient({
+    constituentRows = [],
+    staleJobRow = false,
+    insertConflict = false,
+  }: {
+    constituentRows?: unknown[];
+    /** true = the conditional UPDATE claims an existing stale row */
+    staleJobRow?: boolean;
+    /** true = INSERT hits a unique violation (recent claim held elsewhere) */
+    insertConflict?: boolean;
+  }) {
+    const jobClaims: unknown[] = [];
+    const jobInserts: unknown[] = [];
+    const jobDeletes: Array<Record<string, unknown>> = [];
+    const client = {
+      from: vi.fn((table: string) => {
+        if (table === "holding_geography_allocations") {
+          return {
+            select: vi.fn(() => ({
+              eq: vi.fn(() => ({
+                order: vi.fn(() => ({
+                  limit: vi.fn().mockResolvedValue({ data: [], error: null }),
+                })),
+              })),
+            })),
+          };
+        }
+        if (table === "etf_constituents") {
+          return {
+            select: vi.fn(() => ({
+              in: vi.fn().mockResolvedValue({ data: constituentRows, error: null }),
+            })),
+          };
+        }
+        if (table === "geography_research_jobs") {
+          return {
+            update: vi.fn((row: unknown) => ({
+              eq: vi.fn((_col: string, holdingId: string) => ({
+                or: vi.fn(() => ({
+                  select: vi.fn(async () => {
+                    if (staleJobRow) {
+                      jobClaims.push(row);
+                      return { data: [{ holding_id: holdingId }], error: null };
+                    }
+                    return { data: [], error: null };
+                  }),
+                })),
+              })),
+            })),
+            insert: vi.fn(async (row: unknown) => {
+              if (insertConflict) {
+                return { error: { message: "duplicate key value", code: "23505" } };
+              }
+              jobInserts.push(row);
+              return { error: null };
+            }),
+            delete: vi.fn(() => ({
+              eq: vi.fn((col1: string, val1: string) => ({
+                eq: vi.fn(async (col2: string, val2: string) => {
+                  jobDeletes.push({ [col1]: val1, [col2]: val2 });
+                  return { error: null };
+                }),
+              })),
+            })),
+          };
+        }
+        throw new Error(`Unexpected table: ${table}`);
+      }),
+    };
+    return { client, jobClaims, jobInserts, jobDeletes };
+  }
+
+  it("uses etf_constituents as the primary source, ahead of the hardcoded map", async () => {
+    // PUST.PA is in the hardcoded fallback map — a DB row must still win.
+    const { client } = profileClient({
+      constituentRows: [
+        {
+          etf_isin: "LU1829221024",
+          constituents: [
+            { ticker: "NVDA", name: "NVIDIA" },
+            { ticker: "TSM", name: "TSMC" },
+          ],
+          top_sectors: [{ sector: "Technology", weight_pct: 60 }],
+        },
+      ],
+    });
+
+    const { profile, profileSummary, constituentGaps } = await buildPortfolioProfile(
+      client as never,
+      "portfolio-1",
+      [
+        {
+          id: "holding-pust",
+          ticker: "PUST.PA",
+          isin: "LU1829221024",
+          asset_type: "ETF",
+          name: "Amundi NASDAQ-100",
+          quantity: 5,
+        },
+      ],
+    );
+
+    expect(profile.etfDescriptions).toEqual(["PUST.PA (Amundi NASDAQ-100: NVDA, TSM)"]);
+    expect(profileSummary).toContain("NVDA, TSM");
+    expect(profile.sectors).toEqual(["Technology"]);
+    expect(constituentGaps).toEqual([]);
+  });
+
+  it("includes constituents for a non-founder ETF once enrichment has run", async () => {
+    // VWCE is NOT in the hardcoded map — after the enqueued research job
+    // populates etf_constituents, the profile must pick the row up.
+    const { client } = profileClient({
+      constituentRows: [
+        {
+          etf_isin: "IE00BK5BQT80",
+          constituents: [
+            { ticker: "AAPL", name: "Apple" },
+            { ticker: "MSFT", name: "Microsoft" },
+            { ticker: "NVDA", name: "NVIDIA" },
+          ],
+          top_sectors: [{ sector: "Technology", weight_pct: 30 }],
+        },
+      ],
+    });
+
+    const { profile, constituentGaps } = await buildPortfolioProfile(
+      client as never,
+      "portfolio-2",
+      [vwceHolding],
+    );
+
+    expect(profile.etfDescriptions).toEqual([
+      "VWCE.DE (Vanguard FTSE All-World: AAPL, MSFT, NVDA)",
+    ]);
+    expect(constituentGaps).toEqual([]);
+  });
+
+  it("degrades to ticker + name and reports a gap for a not-yet-enriched ETF", async () => {
+    const { client } = profileClient({});
+
+    const { profile, constituentGaps } = await buildPortfolioProfile(
+      client as never,
+      "portfolio-1",
+      [vwceHolding],
+    );
+
+    expect(profile.etfDescriptions).toEqual(["VWCE.DE (Vanguard FTSE All-World)"]);
+    expect(constituentGaps).toEqual([
+      {
+        holdingId: "holding-vwce",
+        ticker: "VWCE.DE",
+        isin: "IE00BK5BQT80",
+        name: "Vanguard FTSE All-World",
+        hasFallback: false,
+      },
+    ]);
+  });
+
+  it("reports a gap even when the hardcoded fallback still covers the ETF", async () => {
+    const { client } = profileClient({});
+
+    const { profile, constituentGaps } = await buildPortfolioProfile(
+      client as never,
+      "portfolio-1",
+      [
+        {
+          id: "holding-pust",
+          ticker: "PUST.PA",
+          isin: "LU1829221024",
+          asset_type: "ETF",
+          name: "Amundi NASDAQ-100",
+          quantity: 5,
+        },
+      ],
+    );
+
+    // Fallback text bridges the gap this run, but enrichment is still requested.
+    expect(profile.etfDescriptions[0]).toContain("Amundi NASDAQ-100: NVDA");
+    expect(constituentGaps).toHaveLength(1);
+    expect(constituentGaps[0]).toMatchObject({ holdingId: "holding-pust", hasFallback: true });
+  });
+
+  it("enqueues enrichment exactly once and backs off on recent job activity", async () => {
+    const send = vi.fn().mockResolvedValue(undefined);
+    const enrichEnv = { ...env, GEOGRAPHY_QUEUE: { send } };
+    const gap = {
+      holdingId: "holding-vwce",
+      ticker: "VWCE.DE",
+      isin: "IE00BK5BQT80",
+      name: "Vanguard FTSE All-World",
+      hasFallback: false,
+    };
+
+    const first = profileClient({});
+    const firstResult = await enqueueEtfConstituentsEnrichment(
+      enrichEnv,
+      first.client as never,
+      "portfolio-1",
+      [gap],
+    );
+
+    expect(firstResult.enqueued).toEqual(["holding-vwce"]);
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(send).toHaveBeenCalledWith({
+      type: "geography_research",
+      portfolio_id: "portfolio-1",
+      holding_id: "holding-vwce",
+      reason: "polymarket_constituents",
+    });
+    expect(first.jobInserts).toEqual([
+      expect.objectContaining({
+        holding_id: "holding-vwce",
+        portfolio_id: "portfolio-1",
+        status: "queued",
+        reason: "polymarket_constituents",
+      }),
+    ]);
+
+    // A later (or concurrently racing) fanout can't claim: the conditional
+    // UPDATE matches nothing and the INSERT hits the unique violation.
+    const second = profileClient({ insertConflict: true });
+    const secondResult = await enqueueEtfConstituentsEnrichment(
+      enrichEnv,
+      second.client as never,
+      "portfolio-1",
+      [gap],
+    );
+
+    expect(secondResult.enqueued).toEqual([]);
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(second.jobInserts).toEqual([]);
+  });
+
+  it("re-enqueues by claiming the stale row once the backoff window has passed", async () => {
+    const send = vi.fn().mockResolvedValue(undefined);
+    const { client, jobClaims, jobInserts } = profileClient({ staleJobRow: true });
+
+    const result = await enqueueEtfConstituentsEnrichment(
+      { ...env, GEOGRAPHY_QUEUE: { send } },
+      client as never,
+      "portfolio-1",
+      [
+        {
+          holdingId: "holding-vwce",
+          ticker: "VWCE.DE",
+          isin: "IE00BK5BQT80",
+          name: "Vanguard FTSE All-World",
+          hasFallback: false,
+        },
+      ],
+    );
+
+    expect(result.enqueued).toEqual(["holding-vwce"]);
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(jobClaims).toEqual([
+      expect.objectContaining({ holding_id: "holding-vwce", status: "queued" }),
+    ]);
+    expect(jobInserts).toEqual([]);
+  });
+
+  it("releases the claim when queue delivery fails so the next fanout can retry", async () => {
+    const send = vi.fn().mockRejectedValue(new Error("queue unavailable"));
+    const { client, jobInserts, jobDeletes } = profileClient({});
+
+    const result = await enqueueEtfConstituentsEnrichment(
+      { ...env, GEOGRAPHY_QUEUE: { send } },
+      client as never,
+      "portfolio-1",
+      [
+        {
+          holdingId: "holding-vwce",
+          ticker: "VWCE.DE",
+          isin: "IE00BK5BQT80",
+          name: "Vanguard FTSE All-World",
+          hasFallback: false,
+        },
+      ],
+    );
+
+    // The claim was taken, delivery failed, and the claim was released — the
+    // holding is NOT reported as enqueued and no 24h suppression row remains.
+    expect(jobInserts).toHaveLength(1);
+    expect(result.enqueued).toEqual([]);
+    expect(jobDeletes).toEqual([{ holding_id: "holding-vwce", status: "queued" }]);
+  });
+
+  it("never enqueues an ETF without an ISIN or when the queue is unbound", async () => {
+    const send = vi.fn();
+    const noIsin = await enqueueEtfConstituentsEnrichment(
+      { ...env, GEOGRAPHY_QUEUE: { send } },
+      profileClient({}).client as never,
+      "portfolio-1",
+      [
+        {
+          holdingId: "holding-x",
+          ticker: "MYSTERY",
+          isin: null,
+          name: "Mystery Fund",
+          hasFallback: false,
+        },
+      ],
+    );
+    expect(noIsin.enqueued).toEqual([]);
+    expect(send).not.toHaveBeenCalled();
+
+    const noQueue = await enqueueEtfConstituentsEnrichment(
+      env,
+      profileClient({}).client as never,
+      "portfolio-1",
+      [
+        {
+          holdingId: "holding-vwce",
+          ticker: "VWCE.DE",
+          isin: "IE00BK5BQT80",
+          name: "Vanguard FTSE All-World",
+          hasFallback: false,
+        },
+      ],
+    );
+    expect(noQueue.enqueued).toEqual([]);
   });
 });
 

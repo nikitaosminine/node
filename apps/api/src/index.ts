@@ -466,7 +466,15 @@ interface GeographyQueueMessage {
   portfolio_id: string;
   holding_id?: string;
   holding_ids?: string[];
-  reason?: "holding_change" | "transaction_import" | "snapshot_rebuild" | "manual_retry" | "monthly_refresh";
+  reason?:
+    | "holding_change"
+    | "transaction_import"
+    | "snapshot_rebuild"
+    | "manual_retry"
+    | "monthly_refresh"
+    // Polymarket profile build found an ETF with no etf_constituents row —
+    // re-research even if geography allocations already cover the holding.
+    | "polymarket_constituents";
 }
 
 type WorkerQueueMessage =
@@ -1572,7 +1580,7 @@ function completedUnknownGeographyReason(result: {
   return parts.join(" · ");
 }
 
-async function researchPortfolioEtfGeography(
+export async function researchPortfolioEtfGeography(
   env: Env,
   portfolioId: string,
   options: { holdingIds?: string[]; onlyPending?: boolean; reason?: GeographyQueueMessage["reason"] } = {},
@@ -1649,6 +1657,14 @@ async function researchPortfolioEtfGeography(
       );
       const primary = result.allocations[0] ?? null;
       if (result.allocations.length > 0) resolved += 1;
+
+      const hasExistingAllocations = (allocationsByHolding.get(holding.id) ?? []).length > 0;
+      if (result.allocations.length === 0 && hasExistingAllocations) {
+        await markGeographyJobCompleted(client, holding.id, {
+          lastError: completedUnknownGeographyReason(result),
+        });
+        continue;
+      }
 
       await client
         .from("holdings")
@@ -5919,7 +5935,9 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
         try {
           await researchPortfolioEtfGeography(env, message.body.portfolio_id, {
             holdingIds,
-            onlyPending: true,
+            // Constituent-gap jobs target holdings whose geography is often
+            // already covered — onlyPending would skip them without running.
+            onlyPending: message.body.reason !== "polymarket_constituents",
             reason: message.body.reason,
           });
           message.ack();
