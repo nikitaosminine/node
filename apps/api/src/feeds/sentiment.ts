@@ -146,14 +146,17 @@ export function parseSentimentResponse(
       : [];
 
   const out: ClusterSentiment[] = [];
+  const seenIndices = new Set<number>();
   for (const item of scores) {
     if (!item || typeof item !== "object") continue;
     const rec = item as Record<string, unknown>;
     const i = typeof rec.i === "number" ? rec.i : Number(rec.i);
     const sentiment = typeof rec.sentiment === "number" ? rec.sentiment : Number(rec.sentiment);
     if (!Number.isFinite(i) || !Number.isFinite(sentiment)) continue;
+    if (seenIndices.has(i)) continue;
     const ref = pairIndex.get(i);
     if (!ref) continue;
+    seenIndices.add(i);
 
     out.push({
       clusterKey: ref.clusterKey,
@@ -219,12 +222,18 @@ export function computeEwma(
 // Aggregate this run's per-cluster scores into one observation per company
 // (mean across every cluster that mentioned it this run) before feeding
 // computeEwma — a company mentioned in 3 clusters this run gets one rolling
-// update, not three compounding ones.
+// update, not three compounding ones. Clusters already recorded in that
+// company's prior evidence_cluster_ids are re-fetches surfacing again within
+// the 7-day window, not new observations, so they are excluded; a company
+// with nothing new this run is omitted entirely (its rolling row is left
+// untouched).
 export function aggregateObservationsByCompany(
   sentiments: ClusterSentiment[],
+  priorEvidenceByCompany?: Map<string, Set<string>>,
 ): Map<string, { observedScore: number; clusterKeys: string[] }> {
   const byCompany = new Map<string, { scores: number[]; clusterKeys: string[] }>();
   for (const s of sentiments) {
+    if (priorEvidenceByCompany?.get(s.companyKey)?.has(s.clusterKey)) continue;
     let acc = byCompany.get(s.companyKey);
     if (!acc) {
       acc = { scores: [], clusterKeys: [] };
