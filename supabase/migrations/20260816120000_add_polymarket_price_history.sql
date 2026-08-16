@@ -31,6 +31,9 @@ create table if not exists public.polymarket_price_history (
 create index if not exists polymarket_price_history_condition_snapshotted_idx
   on public.polymarket_price_history (condition_id, snapshotted_at desc);
 
+create index if not exists polymarket_price_history_snapshotted_at_idx
+  on public.polymarket_price_history (snapshotted_at);
+
 alter table public.polymarket_price_history enable row level security;
 
 drop policy if exists "Authenticated users can read polymarket price history"
