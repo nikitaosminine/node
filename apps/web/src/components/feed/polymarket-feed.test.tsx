@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { PolymarketFeed } from "@/components/feed/polymarket-feed";
+import { MarketRow, PolymarketFeed } from "@/components/feed/polymarket-feed";
+import { isFallbackMatch } from "@/lib/polymarket-freshness";
 
 const { getSessionMock } = vi.hoisted(() => ({ getSessionMock: vi.fn() }));
 const TEST_NOW = Date.parse("2026-08-16T12:00:00.000Z");
@@ -10,15 +11,6 @@ vi.mock("@/integrations/supabase/client", () => ({
     auth: { getSession: getSessionMock },
   },
 }));
-
-vi.mock("@/lib/polymarket-freshness", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("@/lib/polymarket-freshness")>();
-  return {
-    ...actual,
-    isFallbackMatch: (match: { score: number | null; reason: string | null }) =>
-      match.score === 0 && match.reason === "Volume fallback",
-  };
-});
 
 type MarketInput = {
   condition_id: string;
@@ -95,7 +87,7 @@ describe("PolymarketFeed", () => {
       end_date: "2026-08-16T11:00:00.000Z",
     });
     mockFeedResponse([
-      match(fallback, 0, "Volume fallback"),
+      match(fallback, 0, null),
       match(curated, 0.8, "Relevant to your holdings"),
     ]);
 
@@ -108,7 +100,6 @@ describe("PolymarketFeed", () => {
     const fallbackRow = screen.getByText("Fallback market").closest("a");
     expect(fallbackRow).not.toBeNull();
     expect(fallbackRow).toHaveClass("opacity-70");
-    expect(within(fallbackRow as HTMLElement).queryByText("Volume fallback")).toBeNull();
 
     const curatedRow = screen.getByText("Curated market").closest("a");
     expect(curatedRow).not.toBeNull();
@@ -116,6 +107,34 @@ describe("PolymarketFeed", () => {
       within(curatedRow as HTMLElement).getByText("Relevant to your holdings"),
     ).toBeVisible();
     expect(screen.queryByText("Resolved")).toBeNull();
+  });
+
+  it("suppresses a non-null reason when the real fallback predicate marks the row", () => {
+    const fallbackFixture = match(
+      market({
+        condition_id: "fallback-reason",
+        question: "Fallback reason market",
+        fetched_at: "2026-08-16T11:55:00.000Z",
+        end_date: "2026-08-17T12:00:00.000Z",
+      }),
+      0,
+      null,
+    );
+    const fallbackReason = "Volume fallback";
+
+    expect(isFallbackMatch(fallbackFixture)).toBe(true);
+    render(
+      <MarketRow
+        market={fallbackFixture.polymarket_markets}
+        isPinned={false}
+        reason={fallbackReason}
+        muted={isFallbackMatch(fallbackFixture)}
+      />,
+    );
+
+    const fallbackRow = screen.getByText("Fallback reason market").closest("a");
+    expect(fallbackRow).not.toBeNull();
+    expect(within(fallbackRow as HTMLElement).queryByText(fallbackReason)).toBeNull();
   });
 
   it("derives freshness from the visible rows after search filtering", async () => {

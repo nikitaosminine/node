@@ -146,7 +146,7 @@ function ProbabilityBar({ pairs }: { pairs: Array<{ label: string; prob: number 
 // Market row — used for both personalized and category tabs
 // ---------------------------------------------------------------------------
 
-function MarketRow({
+export function MarketRow({
   market,
   isPinned,
   reason,
