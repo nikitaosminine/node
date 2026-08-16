@@ -158,6 +158,9 @@ describe("computeRunMetrics", () => {
     // picks from omitted candidates would be miscounted as invalid ids.
     const partial = { ...runA, candidates: runA.candidates.slice(0, 5) };
     expect(computeRunMetrics(partial).missing_context).toBe(true);
+    // No Worker-reported pool size → completeness unverifiable → fail closed.
+    const countless = { ...runA, candidate_count: null };
+    expect(computeRunMetrics(countless).missing_context).toBe(true);
     // candidate_count above the 60-candidate batch cap is fine as long as
     // the prompt's 60 lines all parsed.
     const bigPool = {

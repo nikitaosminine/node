@@ -107,8 +107,8 @@ export function normalizeLangsmithRun(parent, child) {
     reasoning_effort: inputs.reasoning_effort ?? null,
     // Only the Worker-reported pool size counts as ground truth; never
     // substitute the parsed candidate count, or hasFullContext would compare
-    // a partially parsed list against itself and always pass. null = the
-    // integrity check honestly has nothing to verify against.
+    // a partially parsed list against itself and always pass. null = context
+    // completeness is unverifiable and the run is excluded (fail closed).
     candidate_count: typeof inputs.candidate_count === "number" ? inputs.candidate_count : null,
     profile_summary: profileSummary,
     candidates,
@@ -156,7 +156,12 @@ export function isFallbackRun(run) {
 // unknown — the run must not enter context-dependent denominators.
 function hasFullContext(run, candidates) {
   if (!run.profile_summary || candidates.length === 0) return false;
-  if (typeof run.candidate_count !== "number") return true; // nothing to check against
+  // Fail closed: without the Worker-reported pool size, completeness of the
+  // parsed list can't be verified, so the run must not enter the
+  // context-dependent rates or judge precision. Worker traces always carry
+  // candidate_count; a count-less run means a malformed/hand-built row, and
+  // the report's missing-context warning makes the exclusion visible.
+  if (typeof run.candidate_count !== "number") return false;
   return candidates.length >= Math.min(run.candidate_count, ROTATING_BATCH_SIZE);
 }
 
