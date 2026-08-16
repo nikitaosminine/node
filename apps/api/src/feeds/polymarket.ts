@@ -153,14 +153,32 @@ export interface PolymarketFanoutResult {
 // ---------------------------------------------------------------------------
 
 export const TAG_IDS = {
-  politics: 2,
   geopolitics: 100265,
   economy: 100328,
   finance: 120,
   crypto: 21,
   business: 107,
   tech: 1401,
-  stocks: 604,
+} as const;
+
+// Gamma's own noise labels, stripped at the source via `exclude_tag_id` on the
+// fetch URL. Verified live against the Gamma API (design doc 1A-122 P2/P5):
+// series-type price-ladder tags Polymarket itself flags as junk, plus the
+// broad Sports/Entertainment/Culture/Awards umbrella tags.
+export const EXCLUDE_TAG_IDS = {
+  hideFromNew: 102169,
+  hitPrice: 102134,
+  upOrDown: 102127,
+  financeUpdown: 104152,
+  weekly: 102264,
+  daily: 102281,
+  dailyClose: 103665,
+  recurring: 101757,
+  multiStrikes: 102516,
+  sports: 1,
+  entertainment: 315,
+  culture: 596,
+  awards: 18,
 } as const;
 
 const ROTATING_BATCH_SIZE = 60; // max candidate markets sent to Grok per portfolio (event-deduped by highest-Yes bucket)
@@ -179,17 +197,17 @@ const POLYMARKET_GROK_REASONING_EFFORTS = new Set<PolymarketGrokReasoningEffort>
 const CACHE_TTL_HOURS = 6;
 
 // ---------------------------------------------------------------------------
-// Non-financial market filter — applied before Grok to prevent LLM from
-// wasting tokens on sports/entertainment/individual political candidacies.
-// Exported so the /api/polymarket/category endpoint in index.ts can reuse it.
+// Non-financial market filter — a slimmed backstop for the category-browse
+// path only (`/api/polymarket/category`), where no LLM runs. The personalized
+// fanout path no longer applies this: it relies on source-side tag exclusion
+// (EXCLUDE_TAG_IDS) plus Grok as the semantic judge (design doc 1A-122 P2).
+// Kept to clear sports/culture patterns only — political-nomination noise is
+// now handled by dropping `politics` from TAG_IDS and excluding Sports/
+// Entertainment/Culture/Awards at the source.
 // ---------------------------------------------------------------------------
 
 export const NON_FINANCIAL_RE =
-  /\b(fifa|world cup|super bowl|nfl|nba|nhl|mlb|premier league|la liga|bundesliga|serie a|champions league|olympic|euro 202[0-9]|euros 202[0-9]|wimbledon|grand prix|formula.?1\b|f1 race|moto ?gp|cricket|rugby world|march madness|stanley cup|gold cup|copa am[eé]rica|esports|grammy|oscar|emmy|golden globe|box office|celebrity|reality (tv|show)|presidential nomination|republican nomination|democratic nomination|win the .{0,30} nomination|become .{0,20} nominee|primary election|senate seat|congressional seat|gubernatorial|win the .{0,20} primary|win the \d{4} .{0,30} presidential election|win the \d{4} us presidential|us president in \d{4})\b/i;
-
-export function isNonFinancialQuestion(question: string): boolean {
-  return NON_FINANCIAL_RE.test(question);
-}
+  /\b(fifa|world cup|super bowl|nfl|nba|nhl|mlb|premier league|la liga|bundesliga|serie a|champions league|olympic|euro 202[0-9]|euros 202[0-9]|wimbledon|grand prix|formula.?1\b|f1 race|moto ?gp|cricket|rugby world|march madness|stanley cup|gold cup|copa am[eé]rica|esports|grammy|oscar|emmy|golden globe|box office|celebrity|reality (tv|show))\b/i;
 
 // ---------------------------------------------------------------------------
 // Short-duration filter — weekly/daily price-target markets ("Will MSFT close
@@ -223,6 +241,56 @@ export function isNearCertainMarket(outcomePrices: number[] | null | undefined):
   if (!outcomePrices || outcomePrices.length === 0) return false;
   const topProb = Math.max(...outcomePrices, 0);
   return topProb >= MAX_CERTAIN_PROB;
+}
+
+// ---------------------------------------------------------------------------
+// Liquidity floor — the first use of the stored-but-previously-unused
+// `liquidity` column. Snapshot evidence (design doc 1A-122 P3): among the
+// eligible pool, median liquidity is $333; a $2k floor removes the dead,
+// untradeable tail without touching the current top-60 (AI-arena markets at
+// $203-$800 liquidity are the only real casualties). Deliberately no 24h
+// volume floor — volume is spiky day-to-day and stays a ranking signal only.
+// ---------------------------------------------------------------------------
+
+export const MIN_LIQUIDITY_USD = 2000;
+
+export function isBelowLiquidityFloor(liquidity: number | string | null | undefined): boolean {
+  if (liquidity == null) return false;
+  const value = Number(liquidity);
+  if (!Number.isFinite(value)) return false;
+  return value < MIN_LIQUIDITY_USD;
+}
+
+// ---------------------------------------------------------------------------
+// Single eligibility gate — applied identically across every read path
+// (fanout candidate pool, /api/polymarket/category, recaps watch slide) so a
+// market is never "too junky to personalize but fine to browse" (design doc
+// 1A-122 P3). Unifies what were three separate per-path checks:
+//   - end_date > now (resolved markets never render)
+//   - duration >= MIN_MARKET_DURATION_DAYS (isShortTermMarket)
+//   - leading outcome < MAX_CERTAIN_PROB (isNearCertainMarket)
+//   - liquidity >= MIN_LIQUIDITY_USD (isBelowLiquidityFloor)
+// Missing metadata (no end_date, no start_date, no liquidity) never fails a
+// check on its own — matches the existing "unknown duration passes" policy so
+// we never over-filter on incomplete Gamma data.
+// ---------------------------------------------------------------------------
+
+export interface MarketEligibilityInput {
+  start_date?: string | null;
+  end_date?: string | null;
+  outcome_prices?: number[] | null;
+  liquidity?: number | string | null;
+}
+
+export function isEligibleMarket(market: MarketEligibilityInput, now: Date = new Date()): boolean {
+  if (market.end_date) {
+    const endMs = new Date(market.end_date).getTime();
+    if (Number.isFinite(endMs) && endMs <= now.getTime()) return false;
+  }
+  if (isShortTermMarket(market.start_date, market.end_date)) return false;
+  if (isNearCertainMarket(market.outcome_prices)) return false;
+  if (isBelowLiquidityFloor(market.liquidity)) return false;
+  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -422,6 +490,12 @@ function flattenEvent(event: GammaEvent): FlatMarket[] {
 // Candidate pool fetch (tag-filtered only — no broad pool)
 // ---------------------------------------------------------------------------
 
+function excludeTagIdQuery(): string {
+  return Object.values(EXCLUDE_TAG_IDS)
+    .map((id) => `exclude_tag_id=${id}`)
+    .join("&");
+}
+
 export async function fetchCandidateMarkets(env: Env): Promise<Map<string, FlatMarket>> {
   const base = gammaBase(env);
   const marketMap = new Map<string, FlatMarket>();
@@ -431,13 +505,12 @@ export async function fetchCandidateMarkets(env: Env): Promise<Map<string, FlatM
   for (const [tagName, tagId] of Object.entries(TAG_IDS)) {
     try {
       const events = await fetchGammaJson<GammaEvent[]>(
-        `${base}/events?tag_id=${tagId}&active=true&closed=false&order=volume24hr&ascending=false&limit=30`,
+        `${base}/events?tag_id=${tagId}&${excludeTagIdQuery()}&active=true&closed=false&order=volume24hr&ascending=false&limit=30`,
       );
       successfulTags++;
       let added = 0;
       for (const event of events) {
         for (const market of flattenEvent(event)) {
-          if (isNonFinancialQuestion(market.question)) continue;
           if (!marketMap.has(market.condition_id)) {
             marketMap.set(market.condition_id, market);
             added++;
@@ -965,11 +1038,11 @@ export async function runPolymarketFanout(
   // the meaningful one ("Will 0 cuts happen?" at 67% Yes).
   // Drop near-certain markets (see isNearCertainMarket) so noise like
   // "Will MSFT hit $435 in May? 100% Yes" never reaches Grok.
+  const fanoutNow = new Date();
   const consensusByEvent = new Map<string, FlatMarket>();
   for (const m of allMarkets) {
-    // Drop weekly/daily price-target gambling markets (short duration)
-    if (isShortTermMarket(m.start_date, m.end_date)) continue;
-    if (isNearCertainMarket(m.outcome_prices)) continue;
+    if (pinnedConditionIds.has(m.condition_id)) continue;
+    if (!isEligibleMarket(m, fanoutNow)) continue;
     const key = m.event_id || m.condition_id;
     const existing = consensusByEvent.get(key);
     if (!existing || getYesProb(m) > getYesProb(existing)) {

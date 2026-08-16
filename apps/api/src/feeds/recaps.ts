@@ -41,6 +41,7 @@ import type {
   Direction,
 } from "./recap-types";
 import { NEWS_INCLUDE_DOMAINS, NEWS_INCLUDE_DOMAINS_SECONDARY } from "./news";
+import { isEligibleMarket } from "./polymarket";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnySupabaseClient = SupabaseClient<any, any, any>;
@@ -509,22 +510,27 @@ async function gatherContext(
     .filter((x): x is { label: string; changePct: number } => x.changePct != null);
 
   // --- watch (slide 4): top portfolio-relevant Polymarket markets ---
-  // Select by relevance (is_pinned then score) — drop the near-term end_date
-  // filter that was excluding the portfolio's highest-relevance markets
-  // (Fed rate hike 0.82, no rate cuts 0.80, inflation 0.72, recession 0.68…
-  // all Dec-2026 end dates). Keep end_date only as context "by when".
-  const { data: watchRows } = await client
+  // Select by relevance (is_pinned then score), then apply the same shared
+  // isEligibleMarket gate as the fanout candidate path and the category
+  // endpoint (design doc 1A-122 P3) — end_date > now, duration >= 14d,
+  // near-certain < 0.97, liquidity >= $2k. Over-fetch since some rows will
+  // be filtered out post-query.
+  const { data: watchRowsRaw } = await client
     .from("portfolio_polymarket_matches")
     .select(
       `is_pinned, score,
-       polymarket_markets!inner(question, event_slug, outcome_prices, end_date, active)`,
+       polymarket_markets!inner(question, event_slug, outcome_prices, end_date, start_date, liquidity, active)`,
     )
     .eq("portfolio_id", recap.portfolio_id)
     .eq("polymarket_markets.active", true)
-    .gte("polymarket_markets.end_date", new Date().toISOString())
     .order("is_pinned", { ascending: false })
     .order("score", { ascending: false, nullsFirst: false })
-    .limit(5);
+    .limit(20);
+
+  const watchRows = (watchRowsRaw ?? [])
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    .filter((r) => isEligibleMarket((r as any).polymarket_markets ?? {}))
+    .slice(0, 5);
 
   // Geography exposure for the watch prompt (US% and notable ETFs).
   const { data: geoRows } = await client

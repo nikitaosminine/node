@@ -28,8 +28,7 @@ import {
   runPolymarketFanout,
   NON_FINANCIAL_RE,
   TAG_IDS,
-  isShortTermMarket,
-  isNearCertainMarket,
+  isEligibleMarket,
 } from "./feeds/polymarket";
 import { generateRecap } from "./feeds/recaps";
 import { langsmithClient } from "./llm/langsmith";
@@ -5818,14 +5817,12 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
 
       if (error) return json({ error: error.message }, 500);
 
-      // Apply the same filters as the personalized rotating path: strip
-      // sports/entertainment noise (NON_FINANCIAL_RE), weekly/daily
-      // price-gambling markets (isShortTermMarket), and markets that are
-      // resolved-in-all-but-name (isNearCertainMarket).
+      // Apply the same eligibility gate as the personalized rotating path
+      // (isEligibleMarket: end_date/duration/near-certain/liquidity), plus the
+      // slimmed NON_FINANCIAL_RE backstop that only this LLM-free path needs.
       const filtered = (data ?? [])
         .filter((m) => !NON_FINANCIAL_RE.test(m.question ?? ""))
-        .filter((m) => !isShortTermMarket(m.start_date, m.end_date))
-        .filter((m) => !isNearCertainMarket(m.outcome_prices))
+        .filter((m) => isEligibleMarket(m))
         .slice(0, limit);
 
       return json(filtered, 200);
