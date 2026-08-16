@@ -66,20 +66,47 @@ const MARKET_RESULTS_KEPT = 12;
 // A domain with zero Firecrawl coverage just returns an empty list (no failure
 // mode, no credits billed).
 export const NEWS_INCLUDE_DOMAINS = [
-  "ft.com", "economist.com", "wsj.com", "bloomberg.com", "reuters.com", "apnews.com",
-  "barrons.com", "marketwatch.com", "cnbc.com", "seekingalpha.com",
-  "morningstar.com", "imf.org", "worldbank.org", "bis.org", "ecb.europa.eu",
-  "banque-france.fr", "sec.gov", "amf-france.org", "oecd.org", "alphaville.ft.com",
-  "institutionalinvestor.com", "pensions-investments.com",
-  "zerohedge.com", "calculatedriskblog.com", "lesechos.fr", "latribune.fr",
-  "boursier.com", "boursorama.com", "challenges.fr", "euronews.com",
+  "ft.com",
+  "economist.com",
+  "wsj.com",
+  "bloomberg.com",
+  "reuters.com",
+  "apnews.com",
+  "barrons.com",
+  "marketwatch.com",
+  "cnbc.com",
+  "seekingalpha.com",
+  "morningstar.com",
+  "imf.org",
+  "worldbank.org",
+  "bis.org",
+  "ecb.europa.eu",
+  "banque-france.fr",
+  "sec.gov",
+  "amf-france.org",
+  "oecd.org",
+  "alphaville.ft.com",
+  "institutionalinvestor.com",
+  "pensions-investments.com",
+  "zerohedge.com",
+  "calculatedriskblog.com",
+  "lesechos.fr",
+  "latribune.fr",
+  "boursier.com",
+  "boursorama.com",
+  "challenges.fr",
+  "euronews.com",
 ];
 
 // Secondary (broader / small-cap-friendly) allowlist — only searched when the
 // premium list yields too few on-target results for a company. Tune as needed.
 export const NEWS_INCLUDE_DOMAINS_SECONDARY = [
-  "investir.lesechos.fr", "capital.fr", "usinenouvelle.com", "agefi.fr",
-  "tradingsat.com", "bfmtv.com",
+  "investir.lesechos.fr",
+  "capital.fr",
+  "usinenouvelle.com",
+  "agefi.fr",
+  "tradingsat.com",
+  "bfmtv.com",
 ];
 
 // Trigger a secondary search when fewer than this many on-target results come
@@ -91,12 +118,28 @@ const MIN_ONTARGET = 4;
 // The provider score is relevance (rank), NOT authority, so quality ranking
 // must be explicit.
 const SOURCE_TIER: Record<string, number> = {
-  "reuters.com": 1, "bloomberg.com": 1, "ft.com": 1, "wsj.com": 1, "economist.com": 1, "apnews.com": 1,
+  "reuters.com": 1,
+  "bloomberg.com": 1,
+  "ft.com": 1,
+  "wsj.com": 1,
+  "economist.com": 1,
+  "apnews.com": 1,
   // Top French sources — human-written, high quality for this portfolio.
-  "lesechos.fr": 1, "boursier.com": 1, "boursorama.com": 1,
-  "barrons.com": 2, "cnbc.com": 2, "marketwatch.com": 2, "latribune.fr": 2,
-  "sec.gov": 2, "ecb.europa.eu": 2, "imf.org": 2, "amf-france.org": 2,
-  "seekingalpha.com": 3, "morningstar.com": 3, "challenges.fr": 3, "euronews.com": 3,
+  "lesechos.fr": 1,
+  "boursier.com": 1,
+  "boursorama.com": 1,
+  "barrons.com": 2,
+  "cnbc.com": 2,
+  "marketwatch.com": 2,
+  "latribune.fr": 2,
+  "sec.gov": 2,
+  "ecb.europa.eu": 2,
+  "imf.org": 2,
+  "amf-france.org": 2,
+  "seekingalpha.com": 3,
+  "morningstar.com": 3,
+  "challenges.fr": 3,
+  "euronews.com": 3,
 };
 function sourceTier(source: string): number {
   return SOURCE_TIER[source.replace(/^www\./i, "")] ?? 99;
@@ -105,9 +148,39 @@ function sourceTier(source: string): number {
 // English stopwords + filler — dropped from title signatures so dedup compares
 // the distinctive tokens of a story.
 const STOPWORDS = new Set([
-  "the", "a", "an", "of", "for", "to", "in", "on", "and", "or", "as", "at", "by",
-  "from", "with", "is", "are", "be", "its", "it", "that", "this", "se", "sa",
-  "inc", "ltd", "plc", "corp", "co", "group", "news", "update", "latest",
+  "the",
+  "a",
+  "an",
+  "of",
+  "for",
+  "to",
+  "in",
+  "on",
+  "and",
+  "or",
+  "as",
+  "at",
+  "by",
+  "from",
+  "with",
+  "is",
+  "are",
+  "be",
+  "its",
+  "it",
+  "that",
+  "this",
+  "se",
+  "sa",
+  "inc",
+  "ltd",
+  "plc",
+  "corp",
+  "co",
+  "group",
+  "news",
+  "update",
+  "latest",
 ]);
 
 // ---------------------------------------------------------------------------
@@ -128,8 +201,19 @@ function canonicalKey(h: HoldingRow): string {
 
 // Map exchange suffix → ISO 2-letter country code for the Firecrawl search location
 const EXCHANGE_COUNTRY: Record<string, string> = {
-  PA: "FR", DE: "DE", AS: "NL", MI: "IT", L: "GB", SW: "CH",
-  MC: "ES", BE: "BE", VI: "AT", CO: "DK", HE: "FI", ST: "SE", OL: "NO",
+  PA: "FR",
+  DE: "DE",
+  AS: "NL",
+  MI: "IT",
+  L: "GB",
+  SW: "CH",
+  MC: "ES",
+  BE: "BE",
+  VI: "AT",
+  CO: "DK",
+  HE: "FI",
+  ST: "SE",
+  OL: "NO",
 };
 
 function deriveUserLocation(workList: Map<string, CompanyEntry>): string {
@@ -158,7 +242,8 @@ function hostname(url: string): string {
 // Drop stock-quote / price-chart / data pages with no editorial content, even
 // when they sit on an allowed news domain and pass category:"news".
 // Catches e.g. "Legrand ADR Stock Quote - MarketWatch" and markets.ft.com data pages.
-const LOW_VALUE_TITLE = /stock quote|share price|markets data|stock price|\bADR\b.*\bquote\b|cours de bourse|quote \(|price target|^subscribe to (read|continue)|^log ?in|^sign ?in/i;
+const LOW_VALUE_TITLE =
+  /stock quote|share price|markets data|stock price|\bADR\b.*\bquote\b|cours de bourse|quote \(|price target|^subscribe to (read|continue)|^log ?in|^sign ?in/i;
 const LOW_VALUE_PATH = /\/(quote|quotes|cours|stock-quote|share-price|chart)\b/i;
 
 function isLowValuePage(title: string, url: string): boolean {
@@ -466,7 +551,11 @@ function buildClusterRow(
 // Score: providerScore × recencyDecay × holdingsBooster (hybrid; each signal once)
 // ---------------------------------------------------------------------------
 
-function computeMatchScore(providerScore: number, publishedAt: string, holdingsHit: number): number {
+function computeMatchScore(
+  providerScore: number,
+  publishedAt: string,
+  holdingsHit: number,
+): number {
   // Missing score → 0.5: the result came from this company's query, so a format
   // quirk shouldn't zero it out.
   const relevance = Math.min(1, Math.max(0, Number.isFinite(providerScore) ? providerScore : 0.5));
@@ -509,7 +598,10 @@ function titleSignature(title: string, companyNames: string[]): Set<string> {
   let t = title.toLowerCase();
   t = t.replace(/\s+[–\-|]\s+[^–\-|]*$/u, " "); // trailing " – Bloomberg" / " | Seeking Alpha"
   t = t.replace(/\([^)]*\)/g, " "); // (TTE:NYSE)
-  t = t.replace(/\$/g, " ").replace(/(\d)\s*b\b/g, "$1 billion").replace(/(\d)\s*m\b/g, "$1 million");
+  t = t
+    .replace(/\$/g, " ")
+    .replace(/(\d)\s*b\b/g, "$1 billion")
+    .replace(/(\d)\s*m\b/g, "$1 million");
   for (const name of companyNames) {
     const core = coreName(name);
     if (core) t = t.split(core).join(" ");
@@ -673,7 +765,9 @@ export async function runNewsFanout(env: Env): Promise<{
     errors.push(`market work-list: ${msg}`);
   }
   const marketEntries = [...marketList.values()]
-    .sort((a, b) => (a.canonicalKey < b.canonicalKey ? -1 : a.canonicalKey > b.canonicalKey ? 1 : 0))
+    .sort((a, b) =>
+      a.canonicalKey < b.canonicalKey ? -1 : a.canonicalKey > b.canonicalKey ? 1 : 0,
+    )
     .slice(0, MAX_MARKET_TOPICS);
   // Drop capped-away entries so later match/dedup phases can't reference them.
   marketList = new Map(marketEntries.map((e) => [e.canonicalKey, e]));
@@ -816,9 +910,15 @@ export async function runNewsFanout(env: Env): Promise<{
     // Extract mapped results, tallying the shared drop counters. Firecrawl
     // errors surface either as thrown non-2xx statuses or as an in-body
     // success:false/error — normalize both to null + errors[] entry.
-    const mapped = (response: FirecrawlSearchResponse, label: string): NewsSearchResult[] | null => {
+    const mapped = (
+      response: FirecrawlSearchResponse,
+      label: string,
+    ): NewsSearchResult[] | null => {
       if (response.success === false || response.error) {
-        console.error(`[news] Firecrawl API error for "${label}":`, response.error ?? "success=false");
+        console.error(
+          `[news] Firecrawl API error for "${label}":`,
+          response.error ?? "success=false",
+        );
         return null;
       }
       const { results, googleWrappedDropped: dropped } = mapFirecrawlNewsResults(
@@ -930,15 +1030,24 @@ export async function runNewsFanout(env: Env): Promise<{
     const { data: existingRows, error: preReadError } = await client
       .from("news_clusters")
       .select("cluster_key,entities")
-      .in("cluster_key", survivors.map((p) => p.result.url));
+      .in(
+        "cluster_key",
+        survivors.map((p) => p.result.url),
+      );
     if (preReadError) {
       errors.push(`cluster entities pre-read: ${preReadError.message}`);
       console.error("[news] cluster entities pre-read failed:", preReadError.message);
     }
-    const rows = (existingRows as Array<{
-      cluster_key: string;
-      entities: { isins?: string[]; tickers?: string[]; countries?: string[]; sectors?: string[] } | null;
-    }> | null) ?? [];
+    const rows =
+      (existingRows as Array<{
+        cluster_key: string;
+        entities: {
+          isins?: string[];
+          tickers?: string[];
+          countries?: string[];
+          sectors?: string[];
+        } | null;
+      }> | null) ?? [];
     for (const row of rows) {
       const pending = pendingClusters.get(row.cluster_key);
       if (!pending || !row.entities) continue;
@@ -958,10 +1067,13 @@ export async function runNewsFanout(env: Env): Promise<{
 
   if (clusterRows.length > 0) {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const { data: upserted, error: clusterBatchError } = await (client as any)
+    const { data: upserted, error: clusterBatchError } = (await (client as any)
       .from("news_clusters")
       .upsert(clusterRows, { onConflict: "cluster_key" })
-      .select("id, cluster_key") as { data: Array<{ id: string; cluster_key: string }> | null; error: { message: string } | null };
+      .select("id, cluster_key")) as {
+      data: Array<{ id: string; cluster_key: string }> | null;
+      error: { message: string } | null;
+    };
 
     if (clusterBatchError) {
       errors.push(`batch cluster upsert: ${clusterBatchError.message}`);

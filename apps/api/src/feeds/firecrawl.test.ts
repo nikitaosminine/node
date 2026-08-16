@@ -82,10 +82,7 @@ describe("resolvePublishedAt", () => {
   it("prefers metadata ISO timestamps over the relative date", () => {
     const iso = "2026-08-14T09:30:00.000Z";
     expect(
-      resolvePublishedAt(
-        { date: "5 days ago", metadata: { "article:published_time": iso } },
-        NOW,
-      ),
+      resolvePublishedAt({ date: "5 days ago", metadata: { "article:published_time": iso } }, NOW),
     ).toBe(iso);
   });
 
@@ -98,9 +95,9 @@ describe("resolvePublishedAt", () => {
 
   it("takes the first entry of an array-valued metadata key", () => {
     const iso = "2026-08-12T08:00:00.000Z";
-    expect(
-      resolvePublishedAt({ metadata: { "article:published_time": [iso, "junk"] } }, NOW),
-    ).toBe(iso);
+    expect(resolvePublishedAt({ metadata: { "article:published_time": [iso, "junk"] } }, NOW)).toBe(
+      iso,
+    );
   });
 
   it("ignores unparseable metadata values and falls back to the relative date", () => {
@@ -283,9 +280,7 @@ describe("firecrawlSearchNews", () => {
   });
 
   it("fails fast on deterministic 4xx", async () => {
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValue(new Response("bad request", { status: 400 }));
+    const fetchMock = vi.fn().mockResolvedValue(new Response("bad request", { status: 400 }));
     vi.stubGlobal("fetch", fetchMock);
 
     await expect(

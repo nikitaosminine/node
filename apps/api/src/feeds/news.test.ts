@@ -219,9 +219,7 @@ describe("runNewsFanout — ETF-derived market coverage", () => {
     ).toBeUndefined();
 
     // Market match: matched_etfs/matched_topics filled, no company fields.
-    const marketMatch = state.matchRows.find((m) =>
-      Array.isArray(m.match_reason.matched_etfs),
-    );
+    const marketMatch = state.matchRows.find((m) => Array.isArray(m.match_reason.matched_etfs));
     expect(marketMatch).toBeDefined();
     expect(marketMatch!.portfolio_id).toBe("portfolio-1");
     expect(marketMatch!.match_reason).toEqual({
@@ -245,9 +243,7 @@ describe("runNewsFanout — ETF-derived market coverage", () => {
       sectors: [],
     });
 
-    const companyMatch = state.matchRows.find((m) =>
-      Array.isArray(m.match_reason.matched_tickers),
-    );
+    const companyMatch = state.matchRows.find((m) => Array.isArray(m.match_reason.matched_tickers));
     expect(companyMatch).toBeDefined();
     expect(companyMatch!.match_reason).toEqual({
       matched_tickers: ["AIR.PA"],
@@ -413,10 +409,7 @@ describe("runNewsFanout — ETF-derived market coverage", () => {
     // Both portfolios hold an ETF mapping to the shared topic and both match
     // the story only the second ETF's constituent terms could keep.
     const avgoMatches = state.matchRows.filter((m) => m.cluster_id === `cluster-${avgoIdx}`);
-    expect(avgoMatches.map((m) => m.portfolio_id).sort()).toEqual([
-      "portfolio-1",
-      "portfolio-2",
-    ]);
+    expect(avgoMatches.map((m) => m.portfolio_id).sort()).toEqual(["portfolio-1", "portfolio-2"]);
   });
 
   it("sends the Firecrawl production request shape with per-kind limits", async () => {

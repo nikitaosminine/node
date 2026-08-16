@@ -118,7 +118,7 @@ NEXT_PUBLIC_MIXPANEL_TOKEN=                  # optional
 ```
 
 API secrets (set via `npx wrangler secret put`):
-`SUPABASE_SERVICE_KEY`, `SUPABASE_ANON_KEY`, `GROK_MAIN_API_KEY`, `GROK_SUB_API_KEY`, `GROK_NORMALIZATION_API_KEY`, `FRED_API_KEY`, `EXA_SEARCH` (recaps), `FIRECRAWL_API_KEY` (news fanout; `fc-`-prefixed), `GEMINI_API_KEY`, `ADMIN_SECRET`
+`SUPABASE_SERVICE_KEY`, `SUPABASE_ANON_KEY`, `GROK_MAIN_API_KEY`, `GROK_SUB_API_KEY`, `GROK_NORMALIZATION_API_KEY`, `FRED_API_KEY`, `EXA_SEARCH` (recaps), `FIRECRAWL_API_KEY` (see `apps/api/wrangler.toml`), `GEMINI_API_KEY`, `ADMIN_SECRET`
 
 ## Beta access
 
