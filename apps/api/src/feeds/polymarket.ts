@@ -847,7 +847,18 @@ export async function runPolymarketFanout(
       const holdings: HoldingRow[] = (holdingsData as HoldingRow[] | null) ?? [];
 
       if (holdings.length === 0) {
-        // Portfolio has no holdings — skip scoring entirely
+        // Portfolio has no holdings — sweep legacy pinned rows, skip scoring
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const { error: legacySweepError } = (await (client as any)
+          .from("portfolio_polymarket_matches")
+          .delete()
+          .eq("portfolio_id", portfolioId)
+          .eq("is_pinned", true)) as { error: { message: string } | null };
+        if (legacySweepError) {
+          throw new Error(
+            `[polymarket] legacy pinned-match sweep failed for portfolio ${portfolioId}: ${legacySweepError.message}`,
+          );
+        }
         curation.portfoliosWithoutHoldings++;
         portfoliosProcessed++;
         continue;

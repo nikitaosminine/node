@@ -529,6 +529,75 @@ describe("Polymarket Grok curation", () => {
       errors: ["portfolio portfolio-2: Grok scoring returned 0 results — using volume fallback"],
     });
   });
+
+  it("sweeps legacy pinned rows for portfolios without holdings", async () => {
+    const deleteFilters: Array<[string, unknown]> = [];
+    const matchUpsert = vi.fn().mockResolvedValue({ error: null });
+
+    dbFrom.mockImplementation((table: string) => {
+      if (table === "polymarket_markets") {
+        return {
+          upsert: vi.fn().mockResolvedValue({ error: null }),
+          update: vi.fn(() => ({
+            eq: vi.fn(() => ({
+              or: vi.fn(() => ({
+                select: vi.fn().mockResolvedValue({ data: [], error: null }),
+              })),
+            })),
+          })),
+        };
+      }
+      if (table === "portfolios") {
+        return {
+          select: vi.fn().mockResolvedValue({
+            data: [{ id: "portfolio-empty", user_id: "user-1" }],
+            error: null,
+          }),
+        };
+      }
+      if (table === "holdings") {
+        return {
+          select: vi.fn(() => ({
+            eq: vi.fn(() => ({
+              gt: vi.fn().mockResolvedValue({ data: [], error: null }),
+            })),
+          })),
+        };
+      }
+      if (table === "portfolio_polymarket_matches") {
+        const eq = vi.fn((column: string, value: unknown) => {
+          deleteFilters.push([column, value]);
+          return Object.assign(Promise.resolve({ error: null }), { eq });
+        });
+        return { upsert: matchUpsert, delete: vi.fn(() => ({ eq })) };
+      }
+      throw new Error(`Unexpected table: ${table}`);
+    });
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify([gammaEvent()]), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          }),
+      ),
+    );
+
+    const result = await runPolymarketFanout(env);
+
+    expect(deleteFilters).toEqual([
+      ["portfolio_id", "portfolio-empty"],
+      ["is_pinned", true],
+    ]);
+    expect(matchUpsert).not.toHaveBeenCalled();
+    expect(result).toMatchObject({
+      portfoliosProcessed: 1,
+      curation: { portfoliosWithoutHoldings: 1 },
+      errors: [],
+    });
+  });
 });
 
 describe("upsertThenPrunePortfolioMatches", () => {
