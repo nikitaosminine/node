@@ -43,6 +43,9 @@ interface CapturedState {
   matchRows: Array<Record<string, any>>;
   searchQueries: string[];
   existingClusters: Array<Record<string, any>>;
+  holdings: Array<Record<string, any>>;
+  etfConstituents: Array<Record<string, any>>;
+  constituentsReject: boolean;
 }
 
 function installDbMock(state: CapturedState): void {
@@ -50,12 +53,17 @@ function installDbMock(state: CapturedState): void {
     switch (table) {
       case "holdings":
         return {
-          select: () => ({ gt: async () => ({ data: HOLDINGS, error: null }) }),
+          select: () => ({ gt: async () => ({ data: state.holdings, error: null }) }),
         };
       case "etf_constituents":
-        // Empty on purpose — the taxonomy must not hard-depend on it.
+        // Empty by default — the taxonomy must not hard-depend on it.
         return {
-          select: () => ({ in: async () => ({ data: [], error: null }) }),
+          select: () => ({
+            in: async () => {
+              if (state.constituentsReject) throw new Error("constituents read: network down");
+              return { data: state.etfConstituents, error: null };
+            },
+          }),
         };
       case "holding_geography_allocations":
         return {
@@ -150,7 +158,15 @@ describe("runNewsFanout — ETF-derived market coverage", () => {
   let state: CapturedState;
 
   beforeEach(() => {
-    state = { clusterRows: [], matchRows: [], searchQueries: [], existingClusters: [] };
+    state = {
+      clusterRows: [],
+      matchRows: [],
+      searchQueries: [],
+      existingClusters: [],
+      holdings: HOLDINGS,
+      etfConstituents: [],
+      constituentsReject: false,
+    };
     installDbMock(state);
     installFetchMock(state);
   });
@@ -288,5 +304,66 @@ describe("runNewsFanout — ETF-derived market coverage", () => {
       matched_etfs: ["PUST.PA"],
       matched_topics: ["US tech market"],
     });
+  });
+
+  it("still derives static-override topics when a taxonomy read rejects", async () => {
+    state.constituentsReject = true;
+
+    const result = await runNewsFanout(env);
+
+    // The rejected optional read degrades that seed only — the Nasdaq ETF's
+    // static override still produces its market topic and clusters.
+    expect(result.marketTopicsQueried).toBe(1);
+    expect(result.errors).toEqual([]);
+    expect(state.clusterRows.find((r) => r.cluster_key === "exa-market-1")).toBeDefined();
+  });
+
+  it("merges relevance terms when multiple ETFs derive the same topic", async () => {
+    state.holdings = [
+      ...HOLDINGS,
+      {
+        id: "h-xnas",
+        ticker: "XNAS.DE",
+        isin: "IE00XNAS0001",
+        asset_type: "ETF",
+        name: "Xtrackers Nasdaq 100 UCITS ETF",
+        quantity: 3,
+        portfolio_id: "portfolio-2",
+      },
+    ];
+    // Only the second Nasdaq ETF knows Broadcom as a top constituent.
+    state.etfConstituents = [
+      {
+        etf_isin: "IE00XNAS0001",
+        constituents: [{ ticker: "AVGO", name: "Broadcom Inc" }],
+        top_sectors: null,
+      },
+    ];
+    installFetchMock(state, {
+      marketResults: [
+        {
+          id: "exa-avgo",
+          url: "https://www.cnbc.com/broadcom-orders",
+          title: "Broadcom surges on record custom accelerator orders",
+          publishedDate: RECENT,
+          score: 0.65,
+        },
+      ],
+    });
+
+    const result = await runNewsFanout(env);
+
+    // One shared topic (not two), whose merged terms keep the Broadcom story.
+    expect(result.marketTopicsQueried).toBe(1);
+    const avgoIdx = state.clusterRows.findIndex((r) => r.cluster_key === "exa-avgo");
+    expect(avgoIdx).toBeGreaterThanOrEqual(0);
+
+    // Both portfolios hold an ETF mapping to the shared topic and both match
+    // the story only the second ETF's constituent terms could keep.
+    const avgoMatches = state.matchRows.filter((m) => m.cluster_id === `cluster-${avgoIdx}`);
+    expect(avgoMatches.map((m) => m.portfolio_id).sort()).toEqual([
+      "portfolio-1",
+      "portfolio-2",
+    ]);
   });
 });

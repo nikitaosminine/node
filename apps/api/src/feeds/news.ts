@@ -345,23 +345,29 @@ async function buildMarketWorkList(
     if (h.ticker) holder.etfTickers.add(h.ticker.toUpperCase());
   }
 
-  // Best-effort taxonomy seeds — 2 batched reads, errors ignored on purpose.
+  // Best-effort taxonomy seeds — 2 batched reads, each individually guarded so
+  // a rejected read (network, not just a Supabase {error}) degrades that seed
+  // only: static name/ticker overrides in deriveMarketTopics must always run.
   const isins = [...new Set([...etfs.values()].map((e) => e.isin).filter(Boolean))] as string[];
   const holdingIds = fundHoldings.map((h) => h.id);
 
   const constituentsByIsin = new Map<string, EtfConstituentRow>();
   if (isins.length > 0) {
-    const { data } = await client
-      .from("etf_constituents")
-      .select("etf_isin,constituents,top_sectors")
-      .in("etf_isin", isins);
-    for (const row of (data as EtfConstituentRow[] | null) ?? []) {
-      constituentsByIsin.set(row.etf_isin, row);
+    try {
+      const { data } = await client
+        .from("etf_constituents")
+        .select("etf_isin,constituents,top_sectors")
+        .in("etf_isin", isins);
+      for (const row of (data as EtfConstituentRow[] | null) ?? []) {
+        constituentsByIsin.set(row.etf_isin, row);
+      }
+    } catch (err) {
+      console.warn("[news] etf_constituents read failed (static overrides still apply):", err);
     }
   }
 
   const countryWeightsByHolding = new Map<string, GeographyRow[]>();
-  {
+  try {
     const { data } = await client
       .from("holding_geography_allocations")
       .select("holding_id,country_code,country_name,weight_pct")
@@ -371,6 +377,8 @@ async function buildMarketWorkList(
       list.push(row);
       countryWeightsByHolding.set(row.holding_id, list);
     }
+  } catch (err) {
+    console.warn("[news] geography allocations read failed (static overrides still apply):", err);
   }
 
   for (const etf of etfs.values()) {
@@ -411,6 +419,13 @@ async function buildMarketWorkList(
       if (!entry) {
         entry = { canonicalKey: key, topic, holders: new Map() };
         marketList.set(key, entry);
+      } else {
+        // Same topic derived from another ETF: union the relevance terms so a
+        // headline mentioning only the later ETF's top constituents still
+        // passes mentionsTopic for every holder of this topic.
+        entry.topic.relevanceTerms = [
+          ...new Set([...entry.topic.relevanceTerms, ...topic.relevanceTerms]),
+        ];
       }
       for (const [portfolioId, holder] of etf.holders) {
         let merged = entry.holders.get(portfolioId);
@@ -994,6 +1009,11 @@ export async function runNewsFanout(env: Env): Promise<{
   // The upsert below is last-writer-wins on the whole row: without this union a
   // cluster re-fetched by a different search (company vs market topic) would
   // erase the entities written by an earlier run.
+  // Read-merge-write is not atomic across CONCURRENT fanouts (scheduled + admin
+  // debug overlapping). That race is accepted: runs are minutes apart on 3 fixed
+  // cron slots, admin runs are rare and manual, a lost union self-heals on the
+  // next run's pre-read, and a DB-side jsonb merge would need a new RPC/trigger
+  // migration that this feature deliberately avoids.
   if (survivors.length > 0) {
     const { data: existingRows, error: preReadError } = await client
       .from("news_clusters")
