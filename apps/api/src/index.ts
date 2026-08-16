@@ -5396,6 +5396,22 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
     }
 
 
+    // GET /api/_debug/company-sentiment — inspect rolling per-company scores.
+    if (method === "GET" && pathname === "/api/_debug/company-sentiment") {
+      const adminError = requireAdmin(request, env);
+      if (adminError) return adminError;
+      try {
+        const { data, error } = await adminDb(env)
+          .from("company_sentiment")
+          .select("*")
+          .order("updated_at", { ascending: false });
+        if (error) return json({ error: error.message }, 500);
+        return json({ companies: data ?? [] }, 200);
+      } catch (err) {
+        return json({ error: err instanceof Error ? err.message : String(err) }, 500);
+      }
+    }
+
     if (method === "POST" && pathname === "/api/_debug/run-polymarket-fanout") {
       const adminError = requireAdmin(request, env);
       if (adminError) return adminError;

@@ -1,4 +1,13 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
+import {
+  aggregateObservationsByCompany,
+  computeEwma,
+  mergeEvidenceClusterIds,
+  scoreClusterSentiments,
+  type ClusterSentiment,
+  type SentimentCompanyRef,
+  type SentimentTarget,
+} from "./sentiment";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnySupabaseClient = SupabaseClient<any, any, any>;
@@ -11,6 +20,11 @@ interface Env {
   SUPABASE_URL: string;
   SUPABASE_SERVICE_KEY: string;
   EXA_SEARCH?: string;
+  GROK_MAIN_API_KEY?: string;
+  GROK_SUB_API_KEY?: string;
+  GROK_NORMALIZATION_API_KEY?: string;
+  GROK_API_BASE_URL?: string;
+  SENTIMENT_GROK_MODEL?: string;
 }
 
 interface HoldingRow {
@@ -387,7 +401,14 @@ async function exaFetchSummaries(
 // a given article (published_at is fixed), so re-fetching computes the same value.
 // ---------------------------------------------------------------------------
 
-function buildClusterRow(result: ExaSearchResult, tickers: string[], isins: string[], summary: string) {
+function buildClusterRow(
+  result: ExaSearchResult,
+  tickers: string[],
+  isins: string[],
+  summary: string,
+  sentiments: ClusterSentiment[],
+  companiesByKey: Map<string, SentimentCompanyRef>,
+) {
   const url = result.url!;
   return {
     cluster_key: result.id ?? url,
@@ -403,6 +424,20 @@ function buildClusterRow(result: ExaSearchResult, tickers: string[], isins: stri
     },
     see_also: [] as unknown[],
     entities: { isins, tickers, countries: [] as string[], sectors: [] as string[] },
+    // Per-(cluster, company) sentiment from the batched Grok scoring call. Empty
+    // when scoring failed or hasn't run yet — reintroduces the field V1
+    // deliberately dropped (see migration 20260520195025 comment).
+    sentiments: sentiments.map((s) => {
+      const ref = companiesByKey.get(s.companyKey);
+      return {
+        company_key: s.companyKey,
+        company_name: ref?.name ?? null,
+        tickers: ref?.tickers ?? [],
+        isins: ref?.isins ?? [],
+        score: s.score,
+        rationale: s.rationale,
+      };
+    }),
     published_at: result.publishedDate!,
     fetched_at: new Date().toISOString(),
     expires_at: new Date(new Date(result.publishedDate!).getTime() + NEWS_WINDOW_MS).toISOString(),
@@ -526,11 +561,14 @@ function dedupeByStory(
 // Subrequest budget (free plan cap = 50):
 //   1  holdings query
 //   N  Exa calls (one per distinct company, N=4 today)
-//   1  batch cluster upsert (all at once)
+//   1  batch cluster upsert (sentiments jsonb folded into this row — 0 extra)
 //   1  batch match upsert
 //   1  sweep
+//   1  Grok sentiment scoring call (skipped if no survivors)
+//   1  company_sentiment prior-score lookup (skipped if nothing scored)
+//   1  company_sentiment batch upsert (skipped if nothing scored)
 //   ─────────────────
-//   N+4  total  (8 today, well under 50)
+//   N+7  total worst case (11 today, well under 50)
 // ---------------------------------------------------------------------------
 
 interface PendingCluster {
@@ -557,6 +595,8 @@ export async function runNewsFanout(env: Env): Promise<{
   secondarySearches: number;
   dedupedAway: number;
   expiredSwept: number;
+  clustersScored: number;
+  companiesRescored: number;
   errors: string[];
 }> {
   const errors: string[] = [];
@@ -573,6 +613,8 @@ export async function runNewsFanout(env: Env): Promise<{
       secondarySearches: 0,
       dedupedAway: 0,
       expiredSwept: 0,
+      clustersScored: 0,
+      companiesRescored: 0,
       errors: ["EXA_SEARCH not configured"],
     };
   }
@@ -716,12 +758,65 @@ export async function runNewsFanout(env: Env): Promise<{
     }
   }
 
-  // --- Batch cluster upsert (1 subrequest) -----------------------------------
-  const clusterRows = survivors.map((p) =>
-    buildClusterRow(p.result, [...p.tickers], [...p.isins], summaryByUrl.get(p.result.url!) ?? ""),
+  // --- Sentiment scoring: one batched Grok call for every survivor's ---------
+  // (cluster, company) pairs (1 subrequest). Never throws — a failure here
+  // must not block the feed from populating (see scoreClusterSentiments).
+  const companiesByKey = new Map<string, SentimentCompanyRef>();
+  const sentimentTargets: SentimentTarget[] = survivors.map((p) => {
+    const clusterKey = p.result.id ?? p.result.url!;
+    const companies: SentimentCompanyRef[] = [...p.companyKeys].map((ck) => {
+      const entry = workList.get(ck);
+      const holderTickers = new Set<string>();
+      const holderIsins = new Set<string>();
+      for (const holder of entry?.holders.values() ?? []) {
+        holder.tickers.forEach((t) => holderTickers.add(t));
+        holder.isins.forEach((i) => holderIsins.add(i));
+      }
+      const ref: SentimentCompanyRef = {
+        canonicalKey: ck,
+        name: entry?.query ?? ck,
+        tickers: [...holderTickers],
+        isins: [...holderIsins],
+      };
+      companiesByKey.set(ck, ref);
+      return ref;
+    });
+    return {
+      clusterKey,
+      title: p.result.title ?? "",
+      summary: summaryByUrl.get(p.result.url!) ?? "",
+      companies,
+    };
+  });
+
+  const { sentiments: clusterSentiments, error: sentimentError } = await scoreClusterSentiments(
+    env,
+    sentimentTargets,
   );
+  if (sentimentError) errors.push(`sentiment scoring: ${sentimentError}`);
+
+  const sentimentsByClusterKey = new Map<string, ClusterSentiment[]>();
+  for (const s of clusterSentiments) {
+    const arr = sentimentsByClusterKey.get(s.clusterKey);
+    if (arr) arr.push(s);
+    else sentimentsByClusterKey.set(s.clusterKey, [s]);
+  }
+
+  // --- Batch cluster upsert (1 subrequest) -----------------------------------
+  const clusterRows = survivors.map((p) => {
+    const clusterKey = p.result.id ?? p.result.url!;
+    return buildClusterRow(
+      p.result,
+      [...p.tickers],
+      [...p.isins],
+      summaryByUrl.get(p.result.url!) ?? "",
+      sentimentsByClusterKey.get(clusterKey) ?? [],
+      companiesByKey,
+    );
+  });
   let clustersUpserted = 0;
   const clusterMap = new Map<string, ClusterAccum>();
+  const clusterKeyToId = new Map<string, string>();
 
   if (clusterRows.length > 0) {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -742,9 +837,72 @@ export async function runNewsFanout(env: Env): Promise<{
             exaScore: pending.exaScore,
             companyKeys: pending.companyKeys,
           });
+          clusterKeyToId.set(row.cluster_key, row.id);
         }
       }
       clustersUpserted = clusterMap.size;
+    }
+  }
+
+  // --- Rolling per-company sentiment (EWMA) — up to 2 subrequests ------------
+  // Skipped entirely (0 subrequests) when nothing was scored, e.g. sentiment
+  // scoring failed above; the feed above is already fully populated by now.
+  let companiesRescored = 0;
+  // Swap the survivor-scoped clusterKey for the durable DB cluster id so
+  // company_sentiment.evidence_cluster_ids reference real, queryable rows.
+  const idBackedSentiments: ClusterSentiment[] = clusterSentiments
+    .map((s) => {
+      const clusterId = clusterKeyToId.get(s.clusterKey);
+      return clusterId ? { ...s, clusterKey: clusterId } : null;
+    })
+    .filter((s): s is ClusterSentiment => s !== null);
+
+  if (idBackedSentiments.length > 0) {
+    const observationsByCompany = aggregateObservationsByCompany(idBackedSentiments);
+    const companyKeys = [...observationsByCompany.keys()];
+
+    try {
+      const { data: priorRows, error: priorError } = await client
+        .from("company_sentiment")
+        .select("company_key, score, evidence_cluster_ids")
+        .in("company_key", companyKeys);
+
+      if (priorError) throw new Error(priorError.message);
+
+      const priorByKey = new Map<string, { score: number; evidence_cluster_ids: string[] }>(
+        (priorRows ?? []).map((r: { company_key: string; score: number; evidence_cluster_ids: string[] | null }) => [
+          r.company_key,
+          { score: r.score, evidence_cluster_ids: r.evidence_cluster_ids ?? [] },
+        ]),
+      );
+
+      const companySentimentRows = companyKeys.map((companyKey) => {
+        const obs = observationsByCompany.get(companyKey)!;
+        const prior = priorByKey.get(companyKey) ?? null;
+        const { score, trend } = computeEwma(prior?.score ?? null, obs.observedScore);
+        const ref = companiesByKey.get(companyKey);
+        return {
+          company_key: companyKey,
+          company_name: ref?.name ?? companyKey,
+          ticker: ref?.tickers[0] ?? null,
+          isin: ref?.isins[0] ?? null,
+          score,
+          trend,
+          evidence_cluster_ids: mergeEvidenceClusterIds(prior?.evidence_cluster_ids ?? [], obs.clusterKeys),
+          updated_at: new Date().toISOString(),
+        };
+      });
+
+      const { error: companyUpsertError } = await client
+        .from("company_sentiment")
+        .upsert(companySentimentRows, { onConflict: "company_key" });
+
+      if (companyUpsertError) throw new Error(companyUpsertError.message);
+      companiesRescored = companySentimentRows.length;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error("[news] rolling company sentiment update failed:", msg);
+      errors.push(`company sentiment: ${msg}`);
     }
   }
 
@@ -834,6 +992,8 @@ export async function runNewsFanout(env: Env): Promise<{
     secondarySearches,
     dedupedAway,
     expiredSwept: expiredSwept ?? 0,
+    clustersScored: sentimentsByClusterKey.size,
+    companiesRescored,
     errors,
   };
 

@@ -92,7 +92,7 @@ Page-wrapper padding and the `@container` containment rule live in `apps/web/DES
 
 Supabase PostgreSQL. RLS is enabled on all tables — queries from the frontend use the anon key and are row-restricted by policy. The Worker uses the service key to perform cross-user operations (snapshots, fanout).
 
-Key tables: `profiles`, `portfolios`, `holdings`, `theses`, `agent_runs`, `transactions`, `holdings_geography`, `news_feed`, `polymarket_feed`, `recaps`, `allowed_emails`.
+Key tables: `profiles`, `portfolios`, `holdings`, `theses`, `agent_runs`, `transactions`, `holdings_geography`, `news_feed`, `polymarket_feed`, `recaps`, `allowed_emails`, `news_clusters` (per-story `sentiments` jsonb), `company_sentiment` (rolling per-company EWMA, recomputed at the end of every news fanout — see `apps/api/src/feeds/sentiment.ts`).
 
 Migration files: `supabase/migrations/` — timestamped SQL, applied in order.
 
