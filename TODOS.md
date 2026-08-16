@@ -39,8 +39,8 @@ Library) since `c5271ff`, run with `npm test` from `apps/web`, and CI runs that 
 **What:** Give `apps/api` a Worker-compatible test setup — `@cloudflare/vitest-pool-workers` plus a
 `vitest.config.ts` — and cover the request handlers. Vitest itself is already a devDependency with
 a `npm test` script, but there is no config and the existing tests (`src/llm/gemini.test.ts`,
-`src/feeds/polymarket.test.ts`, `src/feeds/market-topics.test.ts`, `src/feeds/news.test.ts`) are
-pure-helper suites that need no Workers runtime. Once tests exist that are worth gating on, add a
+`src/feeds/polymarket.test.ts`, `src/feeds/market-topics.test.ts`, `src/feeds/news.test.ts`,
+`src/feeds/etf-constituents.test.ts`) are pure-helper suites that need no Workers runtime. Once tests exist that are worth gating on, add a
 `npm test` step to the `check-api` CI job, which today runs only `npm run typecheck`.
 
 **Why:** The feedback endpoint, traceable wrappers, and upsert logic are the natural first targets.
