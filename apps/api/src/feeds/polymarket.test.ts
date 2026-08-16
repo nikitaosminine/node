@@ -402,9 +402,7 @@ describe("Polymarket Grok curation", () => {
           }),
           delete: vi.fn(() => ({
             eq: vi.fn(() => ({
-              eq: vi.fn(() => ({
-                not: vi.fn().mockResolvedValue({ error: null }),
-              })),
+              not: vi.fn().mockResolvedValue({ error: null }),
             })),
           })),
         };
@@ -538,7 +536,6 @@ describe("upsertThenPrunePortfolioMatches", () => {
     condition_id: "0xmarket",
     score: 0.8,
     reason: "Rate sensitivity",
-    is_pinned: false,
   };
 
   it("never prunes existing rows when the replacement upsert fails", async () => {
@@ -563,9 +560,8 @@ describe("upsertThenPrunePortfolioMatches", () => {
       calls.push("prune");
       return { error: null };
     });
-    const secondEq = vi.fn(() => ({ not }));
-    const firstEq = vi.fn(() => ({ eq: secondEq }));
-    const remove = vi.fn(() => ({ eq: firstEq }));
+    const eq = vi.fn(() => ({ not }));
+    const remove = vi.fn(() => ({ eq }));
     const client = {
       from: vi.fn().mockReturnValueOnce({ upsert }).mockReturnValueOnce({ delete: remove }),
     };
@@ -573,6 +569,12 @@ describe("upsertThenPrunePortfolioMatches", () => {
     await upsertThenPrunePortfolioMatches(client as never, "portfolio-1", [selection]);
 
     expect(calls).toEqual(["upsert", "prune"]);
+    expect(upsert).toHaveBeenCalledWith(
+      [{ portfolio_id: "portfolio-1", ...selection, is_pinned: false }],
+      { onConflict: "portfolio_id,condition_id" },
+    );
+    expect(eq).toHaveBeenCalledTimes(1);
+    expect(eq).toHaveBeenCalledWith("portfolio_id", "portfolio-1");
     expect(not).toHaveBeenCalledWith("condition_id", "in", '("0xmarket")');
   });
 

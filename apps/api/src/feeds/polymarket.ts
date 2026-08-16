@@ -531,7 +531,6 @@ interface PortfolioMarketSelection {
   condition_id: string;
   score: number | null;
   reason: string | null;
-  is_pinned: boolean;
 }
 
 function postgrestInList(values: string[]): string {
@@ -554,14 +553,10 @@ export async function upsertThenPrunePortfolioMatches(
     );
   }
 
-  const isPinned = selections[0].is_pinned;
-  if (selections.some((selection) => selection.is_pinned !== isPinned)) {
-    throw new Error("[polymarket] replacement selection mixes pinned and rotating rows");
-  }
-
   const rows = selections.map((selection) => ({
     portfolio_id: portfolioId,
     ...selection,
+    is_pinned: false,
   }));
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -572,7 +567,7 @@ export async function upsertThenPrunePortfolioMatches(
   };
   if (upsertError) {
     throw new Error(
-      `[polymarket] ${isPinned ? "pinned" : "rotating"} match upsert failed for portfolio ${portfolioId}: ${upsertError.message}`,
+      `[polymarket] match upsert failed for portfolio ${portfolioId}: ${upsertError.message}`,
     );
   }
 
@@ -584,7 +579,6 @@ export async function upsertThenPrunePortfolioMatches(
     .from("portfolio_polymarket_matches")
     .delete()
     .eq("portfolio_id", portfolioId)
-    .eq("is_pinned", isPinned)
     .not(
       "condition_id",
       "in",
@@ -594,7 +588,7 @@ export async function upsertThenPrunePortfolioMatches(
   };
   if (pruneError) {
     throw new Error(
-      `[polymarket] ${isPinned ? "pinned" : "rotating"} stale-match prune failed for portfolio ${portfolioId}: ${pruneError.message}`,
+      `[polymarket] stale-match prune failed for portfolio ${portfolioId}: ${pruneError.message}`,
     );
   }
 }
@@ -1007,7 +1001,6 @@ export async function runPolymarketFanout(
         condition_id: item.condition_id,
         score: item.score,
         reason: item.reason || null,
-        is_pinned: false,
       }));
       await upsertThenPrunePortfolioMatches(client, portfolioId, rotatingRows);
       curation.rotatingMatchesWritten += rotatingRows.length;
