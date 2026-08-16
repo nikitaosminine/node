@@ -5552,7 +5552,8 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
         // Defense in depth against stale/resolved markets that haven't been
         // deactivated by the fanout yet — mirrors recaps.ts's watch-slide filter.
         .or(
-          `polymarket_markets.end_date.is.null,polymarket_markets.end_date.gte.${new Date().toISOString()}`,
+          `end_date.is.null,end_date.gte.${new Date().toISOString()}`,
+          { referencedTable: "polymarket_markets" },
         )
         .order("is_pinned", { ascending: false })
         .order("score", { ascending: false, nullsFirst: false })
