@@ -92,6 +92,19 @@ describe("parseSentimentResponse (strict JSON)", () => {
     const raw = JSON.stringify({ scores: [{ i: 1, rationale: "no score" }] });
     expect(parseSentimentResponse(raw, pairIndex)).toEqual([]);
   });
+
+  it("keeps only the first entry when the same pair index repeats", () => {
+    const { pairIndex } = buildSentimentPrompt([target]);
+    const raw = JSON.stringify({
+      scores: [
+        { i: 1, sentiment: 0.4, rationale: "first" },
+        { i: 1, sentiment: -0.9, rationale: "duplicate" },
+      ],
+    });
+    expect(parseSentimentResponse(raw, pairIndex)).toEqual([
+      { clusterKey: "cluster-1", companyKey: "ticker:ACME", score: 0.4, rationale: "first" },
+    ]);
+  });
 });
 
 describe("invokeSentimentGrok", () => {
@@ -178,6 +191,29 @@ describe("aggregateObservationsByCompany", () => {
     ]);
     expect(result.get("ticker:ACME")).toEqual({ observedScore: 0.5, clusterKeys: ["c1", "c2"] });
     expect(result.get("ticker:BETA")).toEqual({ observedScore: -0.4, clusterKeys: ["c3"] });
+  });
+
+  it("excludes clusters already recorded as prior evidence for that company", () => {
+    const result = aggregateObservationsByCompany(
+      [
+        { clusterKey: "c1", companyKey: "ticker:ACME", score: 0.2, rationale: "" },
+        { clusterKey: "c2", companyKey: "ticker:ACME", score: 0.8, rationale: "" },
+      ],
+      new Map([["ticker:ACME", new Set(["c1"])]]),
+    );
+    expect(result.get("ticker:ACME")).toEqual({ observedScore: 0.8, clusterKeys: ["c2"] });
+  });
+
+  it("omits a company whose clusters were all previously observed", () => {
+    const result = aggregateObservationsByCompany(
+      [
+        { clusterKey: "c1", companyKey: "ticker:ACME", score: 0.2, rationale: "" },
+        { clusterKey: "c1", companyKey: "ticker:BETA", score: -0.4, rationale: "" },
+      ],
+      new Map([["ticker:ACME", new Set(["c1", "c2"])]]),
+    );
+    expect(result.has("ticker:ACME")).toBe(false);
+    expect(result.get("ticker:BETA")).toEqual({ observedScore: -0.4, clusterKeys: ["c1"] });
   });
 });
 

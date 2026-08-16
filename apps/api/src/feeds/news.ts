@@ -401,12 +401,12 @@ async function exaFetchSummaries(
 // a given article (published_at is fixed), so re-fetching computes the same value.
 // ---------------------------------------------------------------------------
 
-function buildClusterRow(
+export function buildClusterRow(
   result: ExaSearchResult,
   tickers: string[],
   isins: string[],
   summary: string,
-  sentiments: ClusterSentiment[],
+  sentiments: ClusterSentiment[] | null,
   companiesByKey: Map<string, SentimentCompanyRef>,
 ) {
   const url = result.url!;
@@ -424,20 +424,28 @@ function buildClusterRow(
     },
     see_also: [] as unknown[],
     entities: { isins, tickers, countries: [] as string[], sectors: [] as string[] },
-    // Per-(cluster, company) sentiment from the batched Grok scoring call. Empty
-    // when scoring failed or hasn't run yet — reintroduces the field V1
-    // deliberately dropped (see migration 20260520195025 comment).
-    sentiments: sentiments.map((s) => {
-      const ref = companiesByKey.get(s.companyKey);
-      return {
-        company_key: s.companyKey,
-        company_name: ref?.name ?? null,
-        tickers: ref?.tickers ?? [],
-        isins: ref?.isins ?? [],
-        score: s.score,
-        rationale: s.rationale,
-      };
-    }),
+    // Per-(cluster, company) sentiment from the batched Grok scoring call —
+    // reintroduces the field V1 deliberately dropped (see migration
+    // 20260520195025 comment). null = scoring failed this run: the key is
+    // omitted so the conflict upsert leaves any previously stored sentiments
+    // untouched (fresh rows fall back to the column default '[]'). An empty
+    // array is a legitimate "scored, nothing returned for this cluster" result
+    // and is written as-is.
+    ...(sentiments === null
+      ? {}
+      : {
+          sentiments: sentiments.map((s) => {
+            const ref = companiesByKey.get(s.companyKey);
+            return {
+              company_key: s.companyKey,
+              company_name: ref?.name ?? null,
+              tickers: ref?.tickers ?? [],
+              isins: ref?.isins ?? [],
+              score: s.score,
+              rationale: s.rationale,
+            };
+          }),
+        }),
     published_at: result.publishedDate!,
     fetched_at: new Date().toISOString(),
     expires_at: new Date(new Date(result.publishedDate!).getTime() + NEWS_WINDOW_MS).toISOString(),
@@ -810,7 +818,7 @@ export async function runNewsFanout(env: Env): Promise<{
       [...p.tickers],
       [...p.isins],
       summaryByUrl.get(p.result.url!) ?? "",
-      sentimentsByClusterKey.get(clusterKey) ?? [],
+      sentimentError ? null : (sentimentsByClusterKey.get(clusterKey) ?? []),
       companiesByKey,
     );
   });
@@ -858,8 +866,7 @@ export async function runNewsFanout(env: Env): Promise<{
     .filter((s): s is ClusterSentiment => s !== null);
 
   if (idBackedSentiments.length > 0) {
-    const observationsByCompany = aggregateObservationsByCompany(idBackedSentiments);
-    const companyKeys = [...observationsByCompany.keys()];
+    const companyKeys = [...new Set(idBackedSentiments.map((s) => s.companyKey))];
 
     try {
       const { data: priorRows, error: priorError } = await client
@@ -876,8 +883,16 @@ export async function runNewsFanout(env: Env): Promise<{
         ]),
       );
 
-      const companySentimentRows = companyKeys.map((companyKey) => {
-        const obs = observationsByCompany.get(companyKey)!;
+      // A cluster already recorded as evidence for a company is the same
+      // article re-surfacing across fanout runs within the 7-day window — it
+      // must not move that company's EWMA again. Companies with nothing new
+      // this run are dropped here and their rows left untouched.
+      const priorEvidenceByCompany = new Map<string, Set<string>>(
+        [...priorByKey].map(([companyKey, prior]) => [companyKey, new Set(prior.evidence_cluster_ids)]),
+      );
+      const observationsByCompany = aggregateObservationsByCompany(idBackedSentiments, priorEvidenceByCompany);
+
+      const companySentimentRows = [...observationsByCompany].map(([companyKey, obs]) => {
         const prior = priorByKey.get(companyKey) ?? null;
         const { score, trend } = computeEwma(prior?.score ?? null, obs.observedScore);
         const ref = companiesByKey.get(companyKey);
@@ -893,12 +908,14 @@ export async function runNewsFanout(env: Env): Promise<{
         };
       });
 
-      const { error: companyUpsertError } = await client
-        .from("company_sentiment")
-        .upsert(companySentimentRows, { onConflict: "company_key" });
+      if (companySentimentRows.length > 0) {
+        const { error: companyUpsertError } = await client
+          .from("company_sentiment")
+          .upsert(companySentimentRows, { onConflict: "company_key" });
 
-      if (companyUpsertError) throw new Error(companyUpsertError.message);
-      companiesRescored = companySentimentRows.length;
+        if (companyUpsertError) throw new Error(companyUpsertError.message);
+        companiesRescored = companySentimentRows.length;
+      }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error("[news] rolling company sentiment update failed:", msg);
