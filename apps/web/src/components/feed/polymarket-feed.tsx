@@ -377,12 +377,24 @@ export function PolymarketFeed({ portfolioId }: PolymarketFeedProps) {
   const currentError = isPersonalized ? personalizedError : categoryError;
   const showSkeleton = isLoading && !hasData;
 
+  const filterMarket = (question: string) =>
+    !search.trim() || question.toLowerCase().includes(search.toLowerCase());
+  const pinnedFiltered = isPersonalized
+    ? personalizedData.pinned.filter((m) => filterMarket(m.polymarket_markets.question))
+    : [];
+  const rotatingFiltered = isPersonalized
+    ? personalizedData.rotating.filter((m) => filterMarket(m.polymarket_markets.question))
+    : [];
+  const categoryFiltered = isPersonalized
+    ? []
+    : categoryMarkets.filter((m) => filterMarket(m.question));
+
   // Freshness derives from the data itself (`fetched_at` on rendered rows), not
   // client fetch time — prices refresh at most hourly regardless of when the
   // browser last polled.
   const freshnessSourceMarkets = isPersonalized
-    ? [...personalizedData.pinned, ...personalizedData.rotating].map((m) => m.polymarket_markets)
-    : categoryMarkets;
+    ? [...pinnedFiltered, ...rotatingFiltered].map((m) => m.polymarket_markets)
+    : categoryFiltered;
   const dataAsOf = maxFetchedAt(freshnessSourceMarkets.map((m) => m.fetched_at));
   const dataIsStale = isStale(dataAsOf, nowTick);
   const ageLabel = dataAsOf ? formatAge(dataAsOf, nowTick) : null;
@@ -418,10 +430,6 @@ export function PolymarketFeed({ portfolioId }: PolymarketFeedProps) {
     </div>
   );
 
-  // Client-side search filter applied to displayed markets
-  const filterMarket = (question: string) =>
-    !search.trim() || question.toLowerCase().includes(search.toLowerCase());
-
   // Body content (only rendered when not showing skeletons)
   let body: ReactNode;
   if (currentError && !hasData) {
@@ -441,16 +449,9 @@ export function PolymarketFeed({ portfolioId }: PolymarketFeedProps) {
       </li>
     );
   } else if (isPersonalized) {
-    const pinnedFiltered = personalizedData.pinned.filter((m) =>
-      filterMarket(m.polymarket_markets.question),
-    );
-    const rotatingFiltered = personalizedData.rotating.filter((m) =>
-      filterMarket(m.polymarket_markets.question),
-    );
     // Curation failed for this batch: the fanout fell back to top-by-volume rows.
     // Detected read-side (score=0 + reason=null) until the `source` column ships.
-    const rotatingIsFallback =
-      personalizedData.rotating.length > 0 && personalizedData.rotating.every(isFallbackMatch);
+    const rotatingHasFallback = rotatingFiltered.some(isFallbackMatch);
     body = (
       <>
         {pinnedFiltered.map((match) => (
@@ -461,7 +462,7 @@ export function PolymarketFeed({ portfolioId }: PolymarketFeedProps) {
             reason={match.reason}
           />
         ))}
-        {rotatingIsFallback && rotatingFiltered.length > 0 && (
+        {rotatingHasFallback && (
           <li className="px-5 py-2 text-[10px] font-semibold uppercase tracking-[0.12em] text-foreground-muted/60">
             Trending on Polymarket — personalization is catching up
           </li>
@@ -471,8 +472,8 @@ export function PolymarketFeed({ portfolioId }: PolymarketFeedProps) {
             key={match.polymarket_markets.condition_id}
             market={match.polymarket_markets}
             isPinned={false}
-            reason={rotatingIsFallback ? null : match.reason}
-            muted={rotatingIsFallback}
+            reason={isFallbackMatch(match) ? null : match.reason}
+            muted={isFallbackMatch(match)}
           />
         ))}
         {pinnedFiltered.length === 0 && rotatingFiltered.length === 0 && (
@@ -483,10 +484,9 @@ export function PolymarketFeed({ portfolioId }: PolymarketFeedProps) {
       </>
     );
   } else {
-    const filtered = categoryMarkets.filter((m) => filterMarket(m.question));
     body =
-      filtered.length > 0 ? (
-        filtered.map((market) => (
+      categoryFiltered.length > 0 ? (
+        categoryFiltered.map((market) => (
           <MarketRow key={market.condition_id} market={market} isPinned={false} reason={null} />
         ))
       ) : (
