@@ -84,12 +84,6 @@
       "mechanism": "Generic macro uncertainty with no named mechanism.",
       "question": "Will the US enter a recession by end of 2026?",
       "model": "fixture-ground-truth"
-    },
-    "b5d38112625f357a348bfbe0ae35bc40472d40c27686063f9eedbe6eb3f6d4d1": {
-      "relevant": false,
-      "mechanism": "Market not in the candidate pool — hallucinated pick.",
-      "question": null,
-      "model": "fixture-ground-truth"
     }
   }
 }

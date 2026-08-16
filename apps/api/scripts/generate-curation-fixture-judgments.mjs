@@ -13,7 +13,7 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { JUDGE_RUBRIC_VERSION, judgeCacheKey } from "./eval-curation-lib.mjs";
+import { JUDGE_RUBRIC_VERSION, isJudgeablePick, judgeCacheKey } from "./eval-curation-lib.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const FIXTURES_DIR = resolve(__dirname, "..", "evals", "curation", "fixtures");
@@ -39,7 +39,9 @@ const LABELS = {
     "0xucl1": { relevant: false, mechanism: "Geographic overlap only — a football result moves no held asset." },
     "0xoil1": { relevant: false, mechanism: "No reason given and no direct link to Japan/EM Asia industrials stated." },
     "0xrec1": { relevant: false, mechanism: "Generic macro uncertainty with no named mechanism." },
-    "0xdeadbeef": { relevant: false, mechanism: "Market not in the candidate pool — hallucinated pick." },
+    // 0xdeadbeef (hallucinated id) is intentionally unlabeled: it is not in
+    // the candidate pool, so it is unjudgeable (isJudgeablePick) and counted
+    // via invalid_pick_rate instead.
   },
 };
 
@@ -53,6 +55,7 @@ for (const run of dataset.runs) {
   if (!labels) continue;
   const questionById = new Map(run.candidates.map((c) => [c.condition_id, c.question]));
   for (const pick of run.picks) {
+    if (!isJudgeablePick(run, pick)) continue; // unjudgeable — no verdict to record
     const label = labels[pick.condition_id];
     if (!label) {
       throw new Error(`No label for run ${run.run_id} pick ${pick.condition_id} — add one to LABELS`);

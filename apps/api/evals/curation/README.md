@@ -76,9 +76,10 @@ pick-level metrics and reported as a rate.
 | **Missing reasons** | picks with an empty `reason`. Reasons render in the feed UI, so empties are user-visible. | ↓ lower |
 | **Reason-anchored rate** | share of non-empty reasons that name at least one ticker/ETF from the portfolio profile (regex over ticker-ish tokens). Cheap proxy for "the reason cites a specific holding, not generic macro". | ↑ higher |
 | **Non-financial leak rate** | picks whose question matches `NON_FINANCIAL_RE` (sports / entertainment / individual candidacies — the same regex the Worker uses as a pre-filter). These should be ~0; any leak means the prompt's reject rules failed. | ↓ lower |
-| **Unique-event ratio** | unique Polymarket events / picks, averaged over runs with event data. 100% = maximal diversity. Requires `event_id` enrichment at snapshot time. | ↑ higher |
-| **Runs breaking 2-per-event cap** | share of runs where >2 picks share one event, violating the prompt's diversity instruction (server-side dedup later collapses them, so violations silently waste pick slots). | ↓ lower |
-| **Judge relevance precision** | LLM-judge verdicts: relevant picks / judged picks. The judge gets the profile, the market question, and the model's stated reason, and must name a concrete financial mechanism to say "relevant" (rubric in `scripts/eval-curation-lib.mjs:buildJudgePrompt`; geography-overlap, sports, candidacies, and bare "macro uncertainty" are defined as not relevant). **This is the headline quality number.** | ↑ higher |
+| **Unique-event ratio** | unique Polymarket events / picks **with a known event**, averaged over runs with event data. 100% = maximal diversity. Requires `event_id` enrichment at snapshot time; the report also prints pick coverage so partial enrichment is visible. | ↑ higher |
+| **Runs breaking 2-per-event cap** | share of runs where >2 picks share one event, violating the prompt's diversity instruction (server-side dedup later collapses them, so violations silently waste pick slots). Under partial event coverage this can only undercount violations, never invent them. | ↓ lower |
+| **Runs missing context** | runs whose picks exist but whose `grok.score` child trace was missing/unparseable, so the profile and candidate pool are unknown. Their invalid-id / non-financial / anchored-reason numbers are blind spots and their picks are not judged — the report warns when this is non-zero. | ↓ lower |
+| **Judge relevance precision** | LLM-judge verdicts: relevant picks / judged picks. The judge gets the profile, the market question, and the model's stated reason, and must name a concrete financial mechanism to say "relevant" (rubric in `scripts/eval-curation-lib.mjs:buildJudgePrompt`; geography-overlap, sports, candidacies, and bare "macro uncertainty" are defined as not relevant). Picks whose content is unknown (hallucinated ids, missing-context runs) are counted as *unjudgeable*, not judged. **This is the headline quality number.** | ↑ higher |
 | **Mean per-run precision** | precision computed per run, then averaged — keeps one pick-heavy run from dominating the aggregate. | ↑ higher |
 
 ### Comparing runs
@@ -97,7 +98,7 @@ pick-level metrics and reported as a rate.
 ```bash
 LANGSMITH_API_KEY=... npm run eval:curation -- snapshot --label pre-<change>
 npm run eval:curation -- --dataset pre-<change> --judge grok --save-baseline pre-<change>
-git add evals/curation/baselines/pre-<change>.json   # baseline = aggregate numbers only, safe to commit
+git add evals/curation/baselines/pre-<change>.json   # baselines are written aggregate-only (no per-run/portfolio ids), safe to commit
 ```
 
 After the change is deployed and a few fanouts have run, snapshot `post-<change>`

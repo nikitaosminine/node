@@ -191,6 +191,10 @@ export function computeRunMetrics(run) {
     run_id: run.run_id,
     portfolio_id: run.portfolio_id,
     fallback: isFallbackRun(run),
+    // Picks exist but the grok.score child (profile + candidate pool) was
+    // missing/unparseable — invalid-id, non-financial, and anchored-reason
+    // checks could not run, so this run's clean numbers mean "unknown".
+    missing_context: picks.length > 0 && (candidates.length === 0 || !run.profile_summary),
     error: run.error ?? null,
     candidate_count: run.candidate_count ?? candidates.length,
     pick_count: picks.length,
@@ -202,6 +206,7 @@ export function computeRunMetrics(run) {
     non_financial_picks: nonFinancial,
     scores,
     event_coverage: picks.length > 0 ? picksWithKnownEvent / picks.length : 0,
+    picks_with_known_event: picksWithKnownEvent,
     unique_events: picksPerEvent.size,
     events_over_cap: eventsOverCap,
     max_picks_per_event: maxPicksPerEvent,
@@ -246,6 +251,7 @@ export function aggregateMetrics(runMetrics) {
     fallback_runs: fallbackRuns.length,
     fallback_rate: runs > 0 ? fallbackRuns.length / runs : 0,
     error_runs: errorRuns.length,
+    runs_missing_context: runMetrics.filter((r) => r.missing_context).length,
     distinct_portfolios: new Set(runMetrics.map((r) => r.portfolio_id).filter(Boolean)).size,
     avg_picks_per_scored_run: scoredRuns.length > 0 ? totalPicks / scoredRuns.length : 0,
     total_picks: totalPicks,
@@ -261,16 +267,25 @@ export function aggregateMetrics(runMetrics) {
     score_max: allScores.length > 0 ? allScores[allScores.length - 1] : null,
     score_histogram: histogram,
     event_data_runs: runsWithEventData.length,
+    // Averaged over runs with any event data. Coverage < 100% can only hide
+    // violations (an unknown-event pick can't be grouped), never invent them.
     event_over_cap_run_rate:
       runsWithEventData.length > 0
         ? runsWithEventData.filter((r) => r.events_over_cap > 0).length / runsWithEventData.length
         : null,
+    // Ratio over picks WITH a known event only, so partial enrichment doesn't
+    // read as (false) duplication. avg_event_coverage says how partial it was.
     avg_unique_event_ratio:
       runsWithEventData.length > 0
         ? runsWithEventData.reduce(
-            (s, r) => s + (r.pick_count > 0 ? r.unique_events / r.pick_count : 0),
+            (s, r) =>
+              s + (r.picks_with_known_event > 0 ? r.unique_events / r.picks_with_known_event : 0),
             0,
           ) / runsWithEventData.length
+        : null,
+    avg_event_coverage:
+      runsWithEventData.length > 0
+        ? runsWithEventData.reduce((s, r) => s + r.event_coverage, 0) / runsWithEventData.length
         : null,
   };
 }
@@ -333,12 +348,25 @@ export function parseJudgeResponse(raw) {
   return null;
 }
 
+// A pick is judgeable only when we know what the model saw: the portfolio
+// profile and the market's question text. Hallucinated condition_ids (no
+// question) and runs missing their grok.score child are counted separately —
+// a relevance verdict on "(unknown)" content would be meaningless and would
+// poison the verdict cache.
+export function isJudgeablePick(run, pick) {
+  if (!run.profile_summary) return false;
+  return (run.candidates ?? []).some(
+    (c) => c.condition_id === pick.condition_id && typeof c.question === "string",
+  );
+}
+
 // Fold judge verdicts into per-run + aggregate precision numbers.
 // `verdictFor(run, pick)` returns {relevant} | null (null = unjudged).
 export function computeJudgeMetrics(dataset, verdictFor) {
   let judged = 0;
   let relevant = 0;
   let unjudged = 0;
+  let unjudgeable = 0;
   const perRun = [];
 
   for (const run of dataset.runs) {
@@ -346,6 +374,10 @@ export function computeJudgeMetrics(dataset, verdictFor) {
     let runJudged = 0;
     let runRelevant = 0;
     for (const pick of run.picks) {
+      if (!isJudgeablePick(run, pick)) {
+        unjudgeable += 1;
+        continue;
+      }
       const verdict = verdictFor(run, pick);
       if (!verdict) {
         unjudged += 1;
@@ -369,6 +401,7 @@ export function computeJudgeMetrics(dataset, verdictFor) {
   return {
     judged,
     unjudged,
+    unjudgeable,
     relevant,
     precision: judged > 0 ? relevant / judged : null,
     mean_run_precision:
@@ -417,6 +450,11 @@ export function formatReport(report, baseline = null) {
   lines.push(`Dataset:            ${report.dataset.label} (${report.dataset.source})`);
   lines.push(`Runs:               ${m.runs} (${m.scored_runs} scored, ${m.fallback_runs} fallback, ${m.error_runs} errored)`);
   lines.push(`Portfolios:         ${m.distinct_portfolios}`);
+  if (m.runs_missing_context > 0) {
+    lines.push(
+      `⚠️  ${m.runs_missing_context} run(s) have picks but no grok.score child (profile/candidate pool unknown) — their invalid-id, non-financial, and anchored-reason numbers are blind spots, and their picks are not judged.`,
+    );
+  }
   lines.push("");
   lines.push("Structural metrics");
   lines.push("------------------");
@@ -431,7 +469,7 @@ export function formatReport(report, baseline = null) {
   lines.push(`Reason-anchored:        ${fmt(m.reason_anchored_rate, "pct")}  (reason names a profile holding)`);
   lines.push(`Non-financial leaks:    ${fmt(m.non_financial_leak_rate, "pct")}  (sports/entertainment/candidacy picks)`);
   if (m.event_data_runs > 0) {
-    lines.push(`Event diversity:        ${fmt(m.avg_unique_event_ratio, "pct")} unique-event ratio; ${fmt(m.event_over_cap_run_rate, "pct")} of runs break the 2-per-event cap (event data on ${m.event_data_runs}/${m.scored_runs} runs)`);
+    lines.push(`Event diversity:        ${fmt(m.avg_unique_event_ratio, "pct")} unique-event ratio; ${fmt(m.event_over_cap_run_rate, "pct")} of runs break the 2-per-event cap (event data on ${m.event_data_runs}/${m.scored_runs} runs, ${fmt(m.avg_event_coverage, "pct")} pick coverage)`);
   } else {
     lines.push("Event diversity:        n/a (no event_id enrichment in this dataset)");
   }
@@ -443,6 +481,9 @@ export function formatReport(report, baseline = null) {
     lines.push(`Mean per-run precision: ${fmt(report.judge.mean_run_precision, "pct")}`);
     if (report.judge.unjudged > 0) {
       lines.push(`Unjudged picks:         ${report.judge.unjudged}  (no cached verdict and no judge API key/mode)`);
+    }
+    if (report.judge.unjudgeable > 0) {
+      lines.push(`Unjudgeable picks:      ${report.judge.unjudgeable}  (hallucinated id or missing grok.score context — see invalid-id/missing-context counts)`);
     }
     lines.push(`Judge source:           ${report.judge.mode}${report.judge.api_calls ? ` (${report.judge.api_calls} API calls, ${report.judge.cache_hits} cache hits)` : ` (${report.judge.cache_hits} cache hits)`}`);
   } else {

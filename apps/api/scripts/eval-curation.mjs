@@ -42,6 +42,7 @@ import {
   computeJudgeMetrics,
   computeRunMetrics,
   isFallbackRun,
+  isJudgeablePick,
   judgeCacheKey,
   normalizeLangsmithRun,
   parseJudgeResponse,
@@ -423,6 +424,9 @@ async function runJudge(dataset, mode) {
     if (isFallbackRun(run)) continue;
     const questionById = new Map(run.candidates.map((c) => [c.condition_id, c.question]));
     for (const pick of run.picks) {
+      // Never judge (or cache a verdict for) content we don't have — see
+      // isJudgeablePick. computeJudgeMetrics counts these as unjudgeable.
+      if (!isJudgeablePick(run, pick)) continue;
       const question = questionById.get(pick.condition_id) ?? null;
       const key = judgeCacheKey({
         profileSummary: run.profile_summary,
@@ -542,10 +546,29 @@ async function commandReport(args) {
     }
     mkdirSync(BASELINES_DIR, { recursive: true });
     const baselinePath = resolve(BASELINES_DIR, `${args.saveBaseline}.json`);
-    writeFileSync(
-      baselinePath,
-      JSON.stringify({ baseline_label: args.saveBaseline, ...report }, null, 2) + "\n",
-    );
+    // Baselines are meant to be committed, so keep them aggregate-only: no
+    // per_run rows (portfolio/run ids), no judge.per_run, no local dataset
+    // path. Everything the --baseline comparison reads is here.
+    const baseline = {
+      baseline_label: args.saveBaseline,
+      generated_at: report.generated_at,
+      dataset: {
+        label: report.dataset.label,
+        source: report.dataset.source,
+        created_at: report.dataset.created_at,
+      },
+      metrics: report.metrics,
+      judge: {
+        mode: judge.mode,
+        judged: judge.judged,
+        unjudged: judge.unjudged,
+        unjudgeable: judge.unjudgeable ?? 0,
+        relevant: judge.relevant,
+        precision: judge.precision,
+        mean_run_precision: judge.mean_run_precision,
+      },
+    };
+    writeFileSync(baselinePath, JSON.stringify(baseline, null, 2) + "\n");
     if (!args.json) console.log(`Saved baseline: ${baselinePath}`);
   }
 

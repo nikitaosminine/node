@@ -8,6 +8,7 @@ import {
   computeRunMetrics,
   extractProfileAnchors,
   isFallbackRun,
+  isJudgeablePick,
   judgeCacheKey,
   normalizeLangsmithRun,
   parseCurationUserPrompt,
@@ -124,6 +125,24 @@ describe("computeRunMetrics", () => {
     expect(m.unique_events).toBe(8);
   });
 
+  it("flags runs whose picks lack grok.score context", () => {
+    const contextless = {
+      run_id: "x",
+      profile_summary: null,
+      candidates: [],
+      picks: [{ condition_id: "0x1", score: 0.8, reason: "r" }],
+      error: null,
+    };
+    const m = computeRunMetrics(contextless);
+    expect(m.missing_context).toBe(true);
+    expect(m.fallback).toBe(false);
+    // With no candidate pool the invalid-id check cannot run — must not
+    // report a falsely clean zero as if it were verified.
+    expect(m.invalid_picks).toBe(0);
+    expect(aggregateMetrics([m]).runs_missing_context).toBe(1);
+    expect(computeRunMetrics(fixtureDataset.runs[0]).missing_context).toBe(false);
+  });
+
   it("marks empty-pick and errored runs as fallback", () => {
     const runC = fixtureDataset.runs.find((r) => r.run_id.endsWith("c"));
     const runD = fixtureDataset.runs.find((r) => r.run_id.endsWith("d"));
@@ -147,6 +166,11 @@ describe("aggregateMetrics", () => {
     expect(m.missing_reason_rate).toBeCloseTo(1 / 15);
     expect(m.non_financial_leak_rate).toBeCloseTo(1 / 15);
     expect(m.event_over_cap_run_rate).toBeCloseTo(0.5);
+    expect(m.runs_missing_context).toBe(0);
+    // Ratio counts only picks with a known event: run A 8/8, run B 4/6
+    // (the hallucinated pick has no event and must not depress the ratio).
+    expect(m.avg_unique_event_ratio).toBeCloseTo((1 + 4 / 6) / 2);
+    expect(m.avg_event_coverage).toBeCloseTo((1 + 6 / 7) / 2);
     expect(m.score_histogram["0.00-0.35"]).toBe(1);
     // Fallback runs contribute no picks/scores.
     expect(m.score_min).toBeCloseTo(0.2);
@@ -193,10 +217,22 @@ describe("judge plumbing", () => {
       return fixtureJudgments.verdicts[key] ?? null;
     };
     const jm = computeJudgeMetrics(fixtureDataset, verdictFor);
-    expect(jm.judged).toBe(15);
+    // 0xdeadbeef (hallucinated id, no candidate question) is unjudgeable.
+    expect(jm.judged).toBe(14);
+    expect(jm.unjudgeable).toBe(1);
     expect(jm.unjudged).toBe(0);
-    expect(jm.precision).toBeCloseTo(10 / 15); // run A: 7/8, run B: 3/7
-    expect(jm.mean_run_precision).toBeCloseTo((7 / 8 + 3 / 7) / 2);
+    expect(jm.precision).toBeCloseTo(10 / 14); // run A: 7/8, run B: 3/6
+    expect(jm.mean_run_precision).toBeCloseTo((7 / 8 + 3 / 6) / 2);
+  });
+
+  it("never judges picks whose context is missing", () => {
+    const run = fixtureDataset.runs.find((r) => r.run_id.endsWith("b"));
+    const hallucinated = run.picks.find((p) => p.condition_id === "0xdeadbeef");
+    expect(isJudgeablePick(run, hallucinated)).toBe(false);
+    expect(isJudgeablePick(run, run.picks[0])).toBe(true);
+    // Run with picks but no grok.score child context at all:
+    const contextless = { profile_summary: null, candidates: [], picks: [{ condition_id: "0x1" }] };
+    expect(isJudgeablePick(contextless, contextless.picks[0])).toBe(false);
   });
 });
 
