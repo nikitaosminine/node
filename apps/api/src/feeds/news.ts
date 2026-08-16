@@ -1,5 +1,6 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { deriveMarketTopics, mentionsTopic, type MarketTopic } from "./market-topics";
+import { isFundLike } from "./portfolio-profile";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnySupabaseClient = SupabaseClient<any, any, any>;
@@ -138,12 +139,6 @@ const STOPWORDS = new Set([
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-// Is an asset fund-like (ETF/mutual fund)? Mirrors geography.ts without a cross-import.
-function isFundLike(assetType: string | null | undefined, name = ""): boolean {
-  const value = `${assetType ?? ""} ${name}`.toLowerCase();
-  return /\betf\b|exchange traded fund|mutual\s*fund|\bfund\b|\bucits\b/.test(value);
 }
 
 function normalizeName(name: string): string {
@@ -290,7 +285,6 @@ async function buildGlobalWorkList(
 
 interface MarketHolder {
   etfTickers: Set<string>;
-  etfIsins: Set<string>;
 }
 
 interface MarketEntry {
@@ -345,11 +339,10 @@ async function buildMarketWorkList(
     etf.holdingIds.push(h.id);
     let holder = etf.holders.get(h.portfolio_id);
     if (!holder) {
-      holder = { etfTickers: new Set(), etfIsins: new Set() };
+      holder = { etfTickers: new Set() };
       etf.holders.set(h.portfolio_id, holder);
     }
     if (h.ticker) holder.etfTickers.add(h.ticker.toUpperCase());
-    if (h.isin) holder.etfIsins.add(h.isin.toUpperCase());
   }
 
   // Best-effort taxonomy seeds — 2 batched reads, errors ignored on purpose.
@@ -422,11 +415,10 @@ async function buildMarketWorkList(
       for (const [portfolioId, holder] of etf.holders) {
         let merged = entry.holders.get(portfolioId);
         if (!merged) {
-          merged = { etfTickers: new Set(), etfIsins: new Set() };
+          merged = { etfTickers: new Set() };
           entry.holders.set(portfolioId, merged);
         }
         holder.etfTickers.forEach((t) => merged!.etfTickers.add(t));
-        holder.etfIsins.forEach((i) => merged!.etfIsins.add(i));
       }
     }
   }
@@ -642,8 +634,9 @@ function titleSignature(title: string, companyNames: string[]): Set<string> {
 }
 
 // Collapse near-identical stories from different sources. Keeps the best source
-// tier (tiebreak exaScore, then recency); merges companyKeys so attribution
-// survives. Conservative: requires ≥3 shared distinctive tokens AND ≥0.6 containment.
+// tier (tiebreak exaScore, then recency); merges companyKeys and entity sets so
+// attribution survives. Conservative: requires ≥3 shared distinctive tokens AND
+// ≥0.6 containment.
 function dedupeByStory(
   pending: Map<string, PendingCluster>,
   queryByKey: Map<string, string>,
@@ -684,7 +677,13 @@ function dedupeByStory(
         dropKey = da >= db ? keyB : keyA;
       }
       const keepKey = dropKey === keyA ? keyB : keyA;
-      pending.get(dropKey)!.companyKeys.forEach((ck) => pending.get(keepKey)!.companyKeys.add(ck));
+      const keep = pending.get(keepKey)!;
+      const drop = pending.get(dropKey)!;
+      drop.companyKeys.forEach((ck) => keep.companyKeys.add(ck));
+      drop.tickers.forEach((t) => keep.tickers.add(t));
+      drop.isins.forEach((n) => keep.isins.add(n));
+      drop.countries.forEach((c) => keep.countries.add(c));
+      drop.sectors.forEach((s) => keep.sectors.add(s));
       pending.delete(dropKey);
       dropped++;
       if (dropKey === keyA) break; // A removed — stop comparing it
@@ -704,12 +703,14 @@ function dedupeByStory(
 //   M    market-topic Exa searches (one per distinct ETF-derived topic,
 //        M ≤ MAX_MARKET_TOPICS=12, M≈4 today; no secondary tier for topics)
 //   ≤2   Exa contents calls (batched summaries, one per language FR/EN)
+//   1    cluster entities pre-read (batched .in() on cluster_key, so a
+//        re-upsert never erases entity attribution from a previous run)
 //   1    batch cluster upsert (all at once)
 //   1    batch match upsert
 //   1    sweep
 //   ─────────────────
-//   worst case 2N+M+8 (= 20 today with N=4, M=4; ≤ 2N+20 at the topic cap),
-//   typical N+M+8 ≈ 16 — well under 50 at current scale.
+//   worst case 2N+M+9 (= 21 today with N=4, M=4; ≤ 2N+21 at the topic cap),
+//   typical N+M+9 ≈ 17 — well under 50 at current scale.
 // ---------------------------------------------------------------------------
 
 interface PendingCluster {
@@ -986,6 +987,33 @@ export async function runNewsFanout(env: Env): Promise<{
       const msg = err instanceof Error ? err.message : String(err);
       console.error("[news] Exa contents (summaries) failed:", msg);
       errors.push(`contents: ${msg}`);
+    }
+  }
+
+  // --- Merge prior-run entity attribution (1 subrequest) ---------------------
+  // The upsert below is last-writer-wins on the whole row: without this union a
+  // cluster re-fetched by a different search (company vs market topic) would
+  // erase the entities written by an earlier run.
+  if (survivors.length > 0) {
+    const { data: existingRows, error: preReadError } = await client
+      .from("news_clusters")
+      .select("cluster_key,entities")
+      .in("cluster_key", survivors.map((p) => p.result.id ?? p.result.url!));
+    if (preReadError) {
+      errors.push(`cluster entities pre-read: ${preReadError.message}`);
+      console.error("[news] cluster entities pre-read failed:", preReadError.message);
+    }
+    const rows = (existingRows as Array<{
+      cluster_key: string;
+      entities: { isins?: string[]; tickers?: string[]; countries?: string[]; sectors?: string[] } | null;
+    }> | null) ?? [];
+    for (const row of rows) {
+      const pending = pendingClusters.get(row.cluster_key);
+      if (!pending || !row.entities) continue;
+      (row.entities.tickers ?? []).forEach((t) => pending.tickers.add(t));
+      (row.entities.isins ?? []).forEach((n) => pending.isins.add(n));
+      (row.entities.countries ?? []).forEach((c) => pending.countries.add(c));
+      (row.entities.sectors ?? []).forEach((s) => pending.sectors.add(s));
     }
   }
 

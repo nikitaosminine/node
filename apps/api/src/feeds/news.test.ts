@@ -42,6 +42,7 @@ interface CapturedState {
   clusterRows: Array<Record<string, any>>;
   matchRows: Array<Record<string, any>>;
   searchQueries: string[];
+  existingClusters: Array<Record<string, any>>;
 }
 
 function installDbMock(state: CapturedState): void {
@@ -62,6 +63,9 @@ function installDbMock(state: CapturedState): void {
         };
       case "news_clusters":
         return {
+          select: () => ({
+            in: async () => ({ data: state.existingClusters, error: null }),
+          }),
           upsert: (rows: Array<Record<string, any>>) => {
             state.clusterRows.push(...rows);
             return {
@@ -86,7 +90,10 @@ function installDbMock(state: CapturedState): void {
   });
 }
 
-function installFetchMock(state: CapturedState): void {
+function installFetchMock(
+  state: CapturedState,
+  extra?: { companyResults?: unknown[]; marketResults?: unknown[] },
+): void {
   vi.stubGlobal(
     "fetch",
     vi.fn(async (url: string, init?: { body?: string }) => {
@@ -103,6 +110,7 @@ function installFetchMock(state: CapturedState): void {
               publishedDate: RECENT,
               score: 0.8,
             },
+            ...(extra?.companyResults ?? []),
           ];
         } else if (body.query.includes("Nasdaq")) {
           results = [
@@ -121,6 +129,7 @@ function installFetchMock(state: CapturedState): void {
               publishedDate: RECENT,
               score: 0.9,
             },
+            ...(extra?.marketResults ?? []),
           ];
         }
         return new Response(JSON.stringify({ results }), { status: 200 });
@@ -141,7 +150,7 @@ describe("runNewsFanout — ETF-derived market coverage", () => {
   let state: CapturedState;
 
   beforeEach(() => {
-    state = { clusterRows: [], matchRows: [], searchQueries: [] };
+    state = { clusterRows: [], matchRows: [], searchQueries: [], existingClusters: [] };
     installDbMock(state);
     installFetchMock(state);
   });
@@ -209,6 +218,75 @@ describe("runNewsFanout — ETF-derived market coverage", () => {
     expect(companyMatch!.match_reason).toEqual({
       matched_tickers: ["AIR.PA"],
       matched_company_names: ["Airbus SE"],
+    });
+  });
+
+  it("unions prior-run entities into re-upserted clusters instead of clobbering them", async () => {
+    state.existingClusters = [
+      {
+        cluster_key: "exa-market-1",
+        entities: { isins: ["US0378331005"], tickers: ["AAPL"], countries: [], sectors: [] },
+      },
+    ];
+
+    const result = await runNewsFanout(env);
+    expect(result.errors).toEqual([]);
+
+    const marketCluster = state.clusterRows.find((r) => r.cluster_key === "exa-market-1");
+    expect(marketCluster).toBeDefined();
+    expect(marketCluster!.entities).toEqual({
+      isins: ["US0378331005"],
+      tickers: ["AAPL"],
+      countries: ["US"],
+      sectors: ["Technology"],
+    });
+  });
+
+  it("unions entity sets from deduped duplicate stories into the surviving cluster", async () => {
+    const dupTitle = "Airbus soars while Nasdaq megacap giants tumble sharply";
+    installFetchMock(state, {
+      companyResults: [
+        {
+          id: "exa-dup-co",
+          url: "https://www.lesechos.fr/airbus-nasdaq",
+          title: dupTitle,
+          publishedDate: RECENT,
+          score: 0.6,
+        },
+      ],
+      marketResults: [
+        {
+          id: "exa-dup-mkt",
+          url: "https://www.cnbc.com/airbus-nasdaq",
+          title: dupTitle,
+          publishedDate: RECENT,
+          score: 0.95,
+        },
+      ],
+    });
+
+    const result = await runNewsFanout(env);
+    expect(result.dedupedAway).toBe(1);
+
+    // The lower-tier duplicate is dropped; its market-topic entities survive on
+    // the kept company-sourced cluster.
+    expect(state.clusterRows.find((r) => r.cluster_key === "exa-dup-mkt")).toBeUndefined();
+    const survivorIdx = state.clusterRows.findIndex((r) => r.cluster_key === "exa-dup-co");
+    expect(survivorIdx).toBeGreaterThanOrEqual(0);
+    expect(state.clusterRows[survivorIdx].entities).toEqual({
+      isins: ["NL0000235190"],
+      tickers: ["AIR.PA"],
+      countries: ["US"],
+      sectors: ["Technology"],
+    });
+
+    const survivorMatch = state.matchRows.find((m) => m.cluster_id === `cluster-${survivorIdx}`);
+    expect(survivorMatch).toBeDefined();
+    expect(survivorMatch!.match_reason).toEqual({
+      matched_tickers: ["AIR.PA"],
+      matched_company_names: ["Airbus SE"],
+      matched_etfs: ["PUST.PA"],
+      matched_topics: ["US tech market"],
     });
   });
 });
