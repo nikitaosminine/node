@@ -200,6 +200,88 @@ describe("fetchCandidateMarkets", () => {
   });
 });
 
+describe("stale market deactivation", () => {
+  it("deactivates resolved and un-refetched markets on every fanout run", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(JSON.stringify([gammaEvent()]), { status: 200 })),
+    );
+
+    let updatePayload: unknown;
+    let eqArgs: unknown[] = [];
+    let orFilter = "";
+
+    dbFrom.mockImplementation((table: string) => {
+      if (table === "polymarket_markets") {
+        return {
+          upsert: vi.fn().mockResolvedValue({ error: null }),
+          update: vi.fn((payload: unknown) => {
+            updatePayload = payload;
+            return {
+              eq: vi.fn((...args: unknown[]) => {
+                eqArgs = args;
+                return {
+                  or: vi.fn((filter: string) => {
+                    orFilter = filter;
+                    return {
+                      select: vi.fn().mockResolvedValue({
+                        data: [{ condition_id: "0xresolved" }, { condition_id: "0xabandoned" }],
+                        error: null,
+                      }),
+                    };
+                  }),
+                };
+              }),
+            };
+          }),
+        };
+      }
+      if (table === "portfolios") {
+        return { select: vi.fn().mockResolvedValue({ data: [], error: null }) };
+      }
+      throw new Error(`Unexpected table: ${table}`);
+    });
+
+    const result = await runPolymarketFanout(env);
+
+    expect(updatePayload).toEqual({ active: false });
+    expect(eqArgs).toEqual(["active", true]);
+    expect(orFilter).toContain("end_date.lt.");
+    expect(orFilter).toContain("fetched_at.lt.");
+    expect(result.marketsDeactivated).toBe(2);
+  });
+
+  it("propagates a deactivation failure instead of silently continuing", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(JSON.stringify([gammaEvent()]), { status: 200 })),
+    );
+
+    dbFrom.mockImplementation((table: string) => {
+      if (table === "polymarket_markets") {
+        return {
+          upsert: vi.fn().mockResolvedValue({ error: null }),
+          update: vi.fn(() => ({
+            eq: vi.fn(() => ({
+              or: vi.fn(() => ({
+                select: vi.fn().mockResolvedValue({
+                  data: null,
+                  error: { message: "connection reset" },
+                }),
+              })),
+            })),
+          })),
+        };
+      }
+      throw new Error(`Unexpected table: ${table}`);
+    });
+
+    await expect(runPolymarketFanout(env)).rejects.toThrow(
+      "failed to deactivate stale markets: connection reset",
+    );
+  });
+});
+
 describe("Polymarket Grok curation", () => {
   it("sends Grok 4.6 with medium reasoning by default", async () => {
     const fetchMock = vi.fn(
@@ -290,7 +372,16 @@ describe("Polymarket Grok curation", () => {
 
     dbFrom.mockImplementation((table: string) => {
       if (table === "polymarket_markets") {
-        return { upsert: vi.fn().mockResolvedValue({ error: null }) };
+        return {
+          upsert: vi.fn().mockResolvedValue({ error: null }),
+          update: vi.fn(() => ({
+            eq: vi.fn(() => ({
+              or: vi.fn(() => ({
+                select: vi.fn().mockResolvedValue({ data: [], error: null }),
+              })),
+            })),
+          })),
+        };
       }
       if (table === "portfolios") {
         return {

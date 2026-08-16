@@ -124,6 +124,7 @@ export interface PolymarketFanoutOptions {
 
 export interface PolymarketFanoutResult {
   marketsUpserted: number;
+  marketsDeactivated: number;
   pinnedSlugsFound: number;
   portfoliosProcessed: number;
   portfoliosSkipped: number;
@@ -587,6 +588,40 @@ async function upsertMarkets(
   }
 }
 
+// Markets that drop out of the top-30-per-tag Gamma pool are never re-fetched
+// and would otherwise freeze at their last-seen `active`/`outcome_prices`
+// forever. 48h comfortably covers the fanout's normal run cadence (hourly)
+// plus a couple of missed runs, so anything older is treated as abandoned by
+// Gamma rather than merely mid-cycle.
+const STALE_FANOUT_WINDOW_HOURS = 48;
+
+/**
+ * Deactivates rows that have resolved (`end_date` in the past) or have not
+ * been re-fetched by a recent fanout — both are cases where Gamma has
+ * stopped surfacing the market, so `active`/prices are stale and the market
+ * must stop appearing in feeds. Pinned markets are not exempt: a pinned
+ * market that resolves is exactly the case most likely to render stale.
+ */
+async function deactivateStaleMarkets(client: AnySupabaseClient): Promise<number> {
+  const nowIso = new Date().toISOString();
+  const staleCutoffIso = new Date(
+    Date.now() - STALE_FANOUT_WINDOW_HOURS * 3_600_000,
+  ).toISOString();
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const { data, error } = (await (client as any)
+    .from("polymarket_markets")
+    .update({ active: false })
+    .eq("active", true)
+    .or(`end_date.lt.${nowIso},fetched_at.lt.${staleCutoffIso}`)
+    .select("condition_id")) as { data: { condition_id: string }[] | null; error: { message: string } | null };
+
+  if (error) {
+    throw new Error(`[polymarket] failed to deactivate stale markets: ${error.message}`);
+  }
+  return (data ?? []).length;
+}
+
 interface PortfolioMarketSelection {
   condition_id: string;
   score: number | null;
@@ -967,6 +1002,11 @@ export async function runPolymarketFanout(
   await upsertMarkets(client, allMarkets);
   console.log(`[polymarket] upserted ${allMarkets.length} markets`);
 
+  // 3b. Deactivate resolved/stale markets so they stop rendering in feeds,
+  // regardless of whether they're still pinned or matched to a portfolio.
+  const marketsDeactivated = await deactivateStaleMarkets(client);
+  console.log(`[polymarket] deactivated ${marketsDeactivated} resolved/stale markets`);
+
   // 4. Collect pinned condition_ids
   const pinnedConditionIds = new Set(pinnedBySlug.values());
 
@@ -979,6 +1019,7 @@ export async function runPolymarketFanout(
     errors.push(`portfolios fetch: ${portfoliosError?.message ?? "no data"}`);
     return {
       marketsUpserted: allMarkets.length,
+      marketsDeactivated,
       pinnedSlugsFound: pinnedBySlug.size,
       portfoliosProcessed,
       portfoliosSkipped,
@@ -1245,6 +1286,7 @@ export async function runPolymarketFanout(
 
   const result = {
     marketsUpserted: allMarkets.length,
+    marketsDeactivated,
     pinnedSlugsFound: pinnedBySlug.size,
     portfoliosProcessed,
     portfoliosSkipped,
