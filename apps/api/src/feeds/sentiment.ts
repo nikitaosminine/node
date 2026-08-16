@@ -251,11 +251,25 @@ export function aggregateObservationsByCompany(
   return out;
 }
 
-// Evidence cluster ids kept on the rolling row — bounded so the jsonb column
-// doesn't grow unbounded across months of fanout runs.
+// Cluster-id lists kept on the rolling row, newest first, bounded so the
+// jsonb columns don't grow unbounded across months of fanout runs. Two caps:
+// evidence_cluster_ids is a short display/API list, while scored_cluster_ids
+// is the EWMA re-observation dedupe set and must comfortably exceed the
+// realistic per-company cluster count within the 7-day TTL window
+// (RESULTS_PER_COMPANY=25 per fanout, several fanouts/day) so display-cap
+// eviction can never resurrect an already-observed cluster.
 export const MAX_EVIDENCE_CLUSTER_IDS = 10;
+export const MAX_SCORED_CLUSTER_IDS = 200;
+
+function capIds(existing: string[], fresh: string[], max: number): string[] {
+  const merged = [...fresh, ...existing.filter((id) => !fresh.includes(id))];
+  return merged.slice(0, max);
+}
 
 export function mergeEvidenceClusterIds(existing: string[], fresh: string[]): string[] {
-  const merged = [...fresh, ...existing.filter((id) => !fresh.includes(id))];
-  return merged.slice(0, MAX_EVIDENCE_CLUSTER_IDS);
+  return capIds(existing, fresh, MAX_EVIDENCE_CLUSTER_IDS);
+}
+
+export function mergeScoredClusterIds(existing: string[], fresh: string[]): string[] {
+  return capIds(existing, fresh, MAX_SCORED_CLUSTER_IDS);
 }

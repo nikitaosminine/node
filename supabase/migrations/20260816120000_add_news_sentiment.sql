@@ -31,7 +31,14 @@ create table if not exists public.company_sentiment (
                           check (trend in ('up', 'down', 'flat')),
   evidence_cluster_ids  jsonb not null default '[]'::jsonb,
   -- most-recent-first array of news_clusters.id this score was derived from,
-  -- capped at 10 (see MAX_EVIDENCE_CLUSTER_IDS in feeds/sentiment.ts)
+  -- capped at 10 (see MAX_EVIDENCE_CLUSTER_IDS in feeds/sentiment.ts) —
+  -- display/API list only, NOT the dedupe set
+  scored_cluster_ids    jsonb not null default '[]'::jsonb,
+  -- full re-observation dedupe set: most-recent-first array of every
+  -- news_clusters.id already folded into this company's EWMA, capped at 200
+  -- (see MAX_SCORED_CLUSTER_IDS in feeds/sentiment.ts). Kept separate from
+  -- evidence_cluster_ids so the small display cap can't evict ids the EWMA
+  -- still needs to recognize as already observed within the 7-day window.
   updated_at            timestamptz not null default now()
 );
 
