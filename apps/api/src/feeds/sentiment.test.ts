@@ -5,6 +5,7 @@ import {
   buildSentimentPrompt,
   computeEwma,
   invokeSentimentGrok,
+  MAX_SCORED_CLUSTER_IDS,
   mergeEvidenceClusterIds,
   mergeScoredClusterIds,
   parseSentimentResponse,
@@ -283,25 +284,42 @@ describe("mergeEvidenceClusterIds", () => {
 });
 
 describe("mergeScoredClusterIds", () => {
-  it("puts fresh ids first and caps the total at 200", () => {
-    const existing = Array.from({ length: 199 }, (_, i) => `old-${i}`);
-    const merged = mergeScoredClusterIds(existing, ["new-1", "new-2"]);
-    expect(merged).toHaveLength(200);
-    expect(merged.slice(0, 2)).toEqual(["new-1", "new-2"]);
-    expect(merged).toContain("old-197");
-    expect(merged).not.toContain("old-198");
+  const now = new Date("2026-08-16T00:00:00.000Z").getTime();
+  const ttlMs = 7 * 24 * 3_600_000;
+
+  it("puts fresh ids first, ahead of still-valid existing ids", () => {
+    const existing = [{ id: "old-1", scoredAt: new Date(now - 1000).toISOString() }];
+    const merged = mergeScoredClusterIds(existing, ["new-1", "new-2"], now, ttlMs);
+    expect(merged.map((r) => r.id)).toEqual(["new-1", "new-2", "old-1"]);
   });
 
-  it("retains dedupe coverage for clusters evicted from the 10-id display list", () => {
+  it("prunes ids older than the TTL window instead of capping by count", () => {
+    const stale = { id: "stale", scoredAt: new Date(now - ttlMs - 1000).toISOString() };
+    const stillValid = { id: "still-valid", scoredAt: new Date(now - ttlMs + 1000).toISOString() };
+    const merged = mergeScoredClusterIds([stale, stillValid], ["new-1"], now, ttlMs);
+    expect(merged.map((r) => r.id)).toEqual(["new-1", "still-valid"]);
+  });
+
+  it("keeps a defensive cap even when every entry is within the TTL window", () => {
+    const existing = Array.from({ length: MAX_SCORED_CLUSTER_IDS }, (_, i) => ({
+      id: `old-${i}`,
+      scoredAt: new Date(now - 1000).toISOString(),
+    }));
+    const merged = mergeScoredClusterIds(existing, ["new-1"], now, ttlMs);
+    expect(merged).toHaveLength(MAX_SCORED_CLUSTER_IDS);
+    expect(merged[0].id).toBe("new-1");
+  });
+
+  it("retains dedupe coverage for clusters evicted from the 10-id display list, regardless of volume", () => {
     const run1Clusters = Array.from({ length: 15 }, (_, i) => `c-${i}`);
     const evidence = mergeEvidenceClusterIds([], run1Clusters);
-    const scored = mergeScoredClusterIds([], run1Clusters);
+    const scored = mergeScoredClusterIds([], run1Clusters, now, ttlMs);
     expect(evidence).not.toContain("c-14");
-    expect(scored).toContain("c-14");
+    expect(scored.map((r) => r.id)).toContain("c-14");
 
     const rerun = aggregateObservationsByCompany(
       [{ clusterKey: "c-14", companyKey: "ticker:ACME", score: 0.9, rationale: "" }],
-      new Map([["ticker:ACME", new Set(scored)]]),
+      new Map([["ticker:ACME", new Set(scored.map((r) => r.id))]]),
     );
     expect(rerun.has("ticker:ACME")).toBe(false);
   });

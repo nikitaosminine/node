@@ -80,7 +80,8 @@ function stubFanoutHttp(options: { grokStatus: number }) {
 
     // --- Grok sentiment scoring ---------------------------------------------
     if (url.hostname === "api.x.ai") {
-      if (options.grokStatus !== 200) return new Response("grok down", { status: options.grokStatus });
+      if (options.grokStatus !== 200)
+        return new Response("grok down", { status: options.grokStatus });
       const content = JSON.stringify({
         scores: [
           { i: 1, sentiment: 0.7, rationale: "Earnings beat." },
@@ -93,7 +94,14 @@ function stubFanoutHttp(options: { grokStatus: number }) {
     // --- Supabase PostgREST --------------------------------------------------
     if (url.pathname === "/rest/v1/holdings") {
       return jsonResponse([
-        { ticker: "ACME", isin: null, asset_type: "stock", name: "Acme Corp", quantity: 10, portfolio_id: "p-1" },
+        {
+          ticker: "ACME",
+          isin: null,
+          asset_type: "stock",
+          name: "Acme Corp",
+          quantity: 10,
+          portfolio_id: "p-1",
+        },
       ]);
     }
     if (url.pathname === "/rest/v1/news_clusters" && method === "POST") {
@@ -110,7 +118,14 @@ function stubFanoutHttp(options: { grokStatus: number }) {
     }
     if (url.pathname === "/rest/v1/company_sentiment" && method === "GET") {
       return jsonResponse([
-        { company_key: "ticker:ACME", score: 0, evidence_cluster_ids: ["old-1"], scored_cluster_ids: ["old-1"] },
+        {
+          company_key: "ticker:ACME",
+          score: 0,
+          evidence_cluster_ids: ["old-1"],
+          scored_cluster_ids: [
+            { id: "old-1", scoredAt: new Date(Date.now() - 3_600_000).toISOString() },
+          ],
+        },
       ]);
     }
     if (url.pathname === "/rest/v1/company_sentiment" && method === "POST") {
@@ -118,6 +133,12 @@ function stubFanoutHttp(options: { grokStatus: number }) {
     }
     if (url.pathname === "/rest/v1/portfolio_news_matches" && method === "POST") {
       return jsonResponse(null, 201);
+    }
+    if (url.pathname === "/rest/v1/rpc/try_acquire_company_sentiment_lock" && method === "POST") {
+      return jsonResponse(true, 200);
+    }
+    if (url.pathname === "/rest/v1/company_sentiment_lock" && method === "DELETE") {
+      return jsonResponse(null, 204);
     }
 
     throw new Error(`Unexpected request in test: ${method} ${url.href}`);
@@ -175,7 +196,8 @@ describe("runNewsFanout sentiment pipeline (end-to-end over stubbed HTTP)", () =
       (r) => r.pathname === "/rest/v1/company_sentiment" && r.method === "POST",
     );
     expect(companyUpsert).toBeDefined();
-    expect((companyUpsert!.body as Array<Record<string, unknown>>)[0]).toMatchObject({
+    const companyRow = (companyUpsert!.body as Array<Record<string, unknown>>)[0];
+    expect(companyRow).toMatchObject({
       company_key: "ticker:ACME",
       company_name: "Acme Corp",
       ticker: "ACME",
@@ -183,8 +205,12 @@ describe("runNewsFanout sentiment pipeline (end-to-end over stubbed HTTP)", () =
       score: 0.175,
       trend: "up",
       evidence_cluster_ids: ["db-1", "db-2", "old-1"],
-      scored_cluster_ids: ["db-1", "db-2", "old-1"],
     });
+    expect((companyRow.scored_cluster_ids as Array<{ id: string }>).map((r) => r.id)).toEqual([
+      "db-1",
+      "db-2",
+      "old-1",
+    ]);
   });
 
   it("still fully populates the feed when Grok scoring fails, without touching stored sentiment", async () => {
