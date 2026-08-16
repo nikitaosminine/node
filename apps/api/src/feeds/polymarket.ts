@@ -105,6 +105,11 @@ interface GrokScoreItem {
   reason: string;
 }
 
+interface GrokScoringResult {
+  scores: GrokScoreItem[];
+  grokInvoked: boolean;
+}
+
 type PolymarketGrokReasoningEffort = "low" | "medium" | "high" | "xhigh";
 
 interface HoldingsCacheRow {
@@ -783,8 +788,8 @@ async function scoreRotatingCandidates(
   env: Env,
   profileSummary: string,
   candidates: FlatMarket[],
-): Promise<GrokScoreItem[]> {
-  if (candidates.length === 0) return [];
+): Promise<GrokScoringResult> {
+  if (candidates.length === 0) return { scores: [], grokInvoked: false };
 
   const candidateList = candidates
     .slice(0, ROTATING_BATCH_SIZE)
@@ -822,24 +827,27 @@ Return JSON array only. No sports, no entertainment, no individual political can
   try {
     const raw = await invokeGrok(env, systemPrompt, userPrompt);
     const items = extractJsonArray(raw);
-    return items
-      .filter(
-        (item): item is GrokScoreItem =>
-          typeof item === "object" &&
-          item !== null &&
-          typeof (item as Record<string, unknown>).condition_id === "string" &&
-          typeof (item as Record<string, unknown>).score === "number" &&
-          validIds.has((item as Record<string, unknown>).condition_id as string),
-      )
-      .map((item) => ({
-        condition_id: item.condition_id,
-        score: Math.max(0, Math.min(1, item.score)),
-        reason: String(item.reason ?? ""),
-      }))
-      .slice(0, ROTATING_TOP_K);
+    return {
+      scores: items
+        .filter(
+          (item): item is GrokScoreItem =>
+            typeof item === "object" &&
+            item !== null &&
+            typeof (item as Record<string, unknown>).condition_id === "string" &&
+            typeof (item as Record<string, unknown>).score === "number" &&
+            validIds.has((item as Record<string, unknown>).condition_id as string),
+        )
+        .map((item) => ({
+          condition_id: item.condition_id,
+          score: Math.max(0, Math.min(1, item.score)),
+          reason: String(item.reason ?? ""),
+        }))
+        .slice(0, ROTATING_TOP_K),
+      grokInvoked: true,
+    };
   } catch (err) {
     console.error("[polymarket] Grok scoring failed:", err);
-    return [];
+    return { scores: [], grokInvoked: true };
   }
 }
 
@@ -1120,9 +1128,9 @@ export async function runPolymarketFanout(
           }
         }
 
-        let rawScored: GrokScoreItem[];
+        let scoringResult: GrokScoringResult;
         try {
-          rawScored = curationRun
+          scoringResult = curationRun
             ? await withRunTree(curationRun, () =>
                 scoreRotatingCandidates(env, profileSummary, rotatingCandidates),
               )
@@ -1139,6 +1147,9 @@ export async function runPolymarketFanout(
           }
           throw err;
         }
+
+        const rawScored = scoringResult.scores;
+        if (scoringResult.grokInvoked) curation.grokRuns++;
 
         if (curationRun && lsClient) {
           try {
@@ -1163,7 +1174,6 @@ export async function runPolymarketFanout(
             reason: null,
           }));
         } else {
-          curation.grokRuns++;
           // Server-side event deduplication before storing
           const deduped = dedupeByEvent(rawScored, candidateMap);
           console.log(

@@ -191,7 +191,7 @@ describe("Polymarket Grok curation", () => {
     ).toBe(false);
   });
 
-  it("forces a Grok rescore, replaces curated rows, and reports the run source", async () => {
+  it("counts every Grok attempt, including an empty-result fallback", async () => {
     const holding = {
       ticker: "AAPL",
       isin: null,
@@ -210,7 +210,10 @@ describe("Polymarket Grok curation", () => {
       if (table === "portfolios") {
         return {
           select: vi.fn().mockResolvedValue({
-            data: [{ id: "portfolio-1", user_id: "user-1" }],
+            data: [
+              { id: "portfolio-1", user_id: "user-1" },
+              { id: "portfolio-2", user_id: "user-2" },
+            ],
             error: null,
           }),
         };
@@ -277,19 +280,21 @@ describe("Polymarket Grok curation", () => {
         const url = String(input);
         if (url === "https://api.x.ai/v1/chat/completions") {
           xaiRequests.push(JSON.parse(String(init?.body)));
+          const content =
+            xaiRequests.length === 1
+              ? JSON.stringify([
+                  {
+                    condition_id: "0xrotating",
+                    score: 0.91,
+                    reason: "Rate changes affect AAPL valuation",
+                  },
+                ])
+              : "[]";
           return new Response(
             JSON.stringify({
               choices: [
                 {
-                  message: {
-                    content: JSON.stringify([
-                      {
-                        condition_id: "0xrotating",
-                        score: 0.91,
-                        reason: "Rate changes affect AAPL valuation",
-                      },
-                    ]),
-                  },
+                  message: { content },
                 },
               ],
             }),
@@ -315,12 +320,12 @@ describe("Polymarket Grok curation", () => {
       { forceRescore: true },
     );
 
-    expect(xaiRequests).toHaveLength(1);
+    expect(xaiRequests).toHaveLength(2);
     expect(xaiRequests[0]).toMatchObject({
       model: "grok-4.6",
       reasoning_effort: "medium",
     });
-    expect(matchUpserts).toHaveLength(2);
+    expect(matchUpserts).toHaveLength(4);
     expect(matchUpserts[0]).toHaveLength(4);
     expect(matchUpserts[1]).toEqual([
       {
@@ -331,24 +336,34 @@ describe("Polymarket Grok curation", () => {
         is_pinned: false,
       },
     ]);
-    expect(cacheUpsert).toHaveBeenCalledTimes(1);
+    expect(matchUpserts[2]).toHaveLength(4);
+    expect(matchUpserts[3]).toEqual([
+      {
+        portfolio_id: "portfolio-2",
+        condition_id: "0xrotating",
+        score: 0,
+        reason: null,
+        is_pinned: false,
+      },
+    ]);
+    expect(cacheUpsert).toHaveBeenCalledTimes(2);
     expect(result).toMatchObject({
       marketsUpserted: 5,
       pinnedSlugsFound: 4,
-      portfoliosProcessed: 1,
+      portfoliosProcessed: 2,
       portfoliosSkipped: 0,
       curation: {
         model: "grok-4.6",
         reasoningEffort: "medium",
         forceRescore: true,
-        grokRuns: 1,
+        grokRuns: 2,
         cacheHits: 0,
-        fallbacks: 0,
+        fallbacks: 1,
         portfoliosWithoutHoldings: 0,
-        pinnedMatchesWritten: 4,
-        rotatingMatchesWritten: 1,
+        pinnedMatchesWritten: 8,
+        rotatingMatchesWritten: 2,
       },
-      errors: [],
+      errors: ["portfolio portfolio-2: Grok scoring returned 0 results — using volume fallback"],
     });
   });
 });
