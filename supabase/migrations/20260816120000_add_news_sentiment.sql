@@ -10,8 +10,10 @@ alter table public.news_clusters
   add column if not exists sentiments jsonb not null default '[]'::jsonb;
 -- [{company_key, company_name, tickers, isins, score, rationale}]
 -- One entry per (cluster, company) pair scored by the batched Grok
--- sentiment call at the end of runNewsFanout. Empty when scoring
--- failed or the cluster predates this migration/feature.
+-- sentiment call at the end of runNewsFanout. Empty when the cluster
+-- has never been fully scored (default) or predates this feature; a
+-- failed or partial scoring run omits the key on upsert, preserving
+-- whatever was stored (see buildClusterRow in feeds/news.ts).
 
 -- ============================================================
 -- Company Sentiment

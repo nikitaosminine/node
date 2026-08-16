@@ -47,8 +47,12 @@ interface CapturedRequest {
 }
 
 // Routes every outbound HTTP call runNewsFanout makes. `grokStatus` controls
-// the sentiment-scoring branch; everything else stays healthy.
-function stubFanoutHttp(options: { grokStatus: number }) {
+// the sentiment-scoring branch (`grokScores` optionally overrides the scored
+// pairs it returns); everything else stays healthy.
+function stubFanoutHttp(options: {
+  grokStatus: number;
+  grokScores?: Array<{ i: number; sentiment: number; rationale: string }>;
+}) {
   const captured: CapturedRequest[] = [];
 
   const jsonResponse = (body: unknown, status = 200, headers: Record<string, string> = {}) =>
@@ -83,7 +87,7 @@ function stubFanoutHttp(options: { grokStatus: number }) {
       if (options.grokStatus !== 200)
         return new Response("grok down", { status: options.grokStatus });
       const content = JSON.stringify({
-        scores: [
+        scores: options.grokScores ?? [
           { i: 1, sentiment: 0.7, rationale: "Earnings beat." },
           { i: 2, sentiment: 0.3, rationale: "Expansion positive." },
         ],
@@ -209,6 +213,44 @@ describe("runNewsFanout sentiment pipeline (end-to-end over stubbed HTTP)", () =
     expect((companyRow.scored_cluster_ids as Array<{ id: string }>).map((r) => r.id)).toEqual([
       "db-1",
       "db-2",
+      "old-1",
+    ]);
+  });
+
+  it("skips the sentiments write for clusters Grok only partially answered, while scoring the rest", async () => {
+    // Grok returns valid JSON but only answers pair 1 (cluster exa-1); the
+    // (exa-2, ACME) pair is silently omitted. exa-2's write must be skipped
+    // (preserving any stored sentiment) instead of persisting [], and only
+    // exa-1 may be folded into the rolling score.
+    const { captured } = stubFanoutHttp({
+      grokStatus: 200,
+      grokScores: [{ i: 1, sentiment: 0.7, rationale: "Earnings beat." }],
+    });
+
+    const result = await runNewsFanout(env);
+
+    const rows = clusterUpsertRows(captured);
+    expect(rows.map((r) => r.cluster_key)).toEqual(["exa-1", "exa-2"]);
+    expect((rows[0].sentiments as Array<Record<string, unknown>>).map((s) => s.score)).toEqual([
+      0.7,
+    ]);
+    // The unanswered cluster omits the key entirely so the conflict upsert
+    // leaves previously stored sentiments untouched.
+    expect(rows[1]).not.toHaveProperty("sentiments");
+
+    // Only the answered cluster reaches the rolling score: EWMA over prior 0
+    // with alpha=0.35 and a single 0.7 observation → 0.245. exa-2 is NOT
+    // marked as scored, so it stays eligible for the next fanout run.
+    expect(result.clustersScored).toBe(1);
+    expect(result.companiesRescored).toBe(1);
+    const companyUpsert = captured.find(
+      (r) => r.pathname === "/rest/v1/company_sentiment" && r.method === "POST",
+    );
+    expect(companyUpsert).toBeDefined();
+    const companyRow = (companyUpsert!.body as Array<Record<string, unknown>>)[0];
+    expect(companyRow).toMatchObject({ company_key: "ticker:ACME", score: 0.245, trend: "up" });
+    expect((companyRow.scored_cluster_ids as Array<{ id: string }>).map((r) => r.id)).toEqual([
+      "db-1",
       "old-1",
     ]);
   });
