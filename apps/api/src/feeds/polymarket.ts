@@ -995,9 +995,8 @@ export async function runPolymarketFanout(
   // Grok scoring. Otherwise Grok sees all 13 buckets of one event and may pick
   // a lopsided near-zero bucket ("Will 7 cuts happen?" at 100% No) instead of
   // the meaningful one ("Will 0 cuts happen?" at 67% Yes).
-  // Drop near-certain markets (≥97% on the leading side) — a market at 100%
-  // Yes / 99% No is resolved-in-all-but-name and carries no information. This
-  // strips noise like "Will MSFT hit $435 in May? 100% Yes" before it reaches Grok.
+  // Drop near-certain markets (see isNearCertainMarket) so noise like
+  // "Will MSFT hit $435 in May? 100% Yes" never reaches Grok.
   const consensusByEvent = new Map<string, FlatMarket>();
   for (const m of allMarkets) {
     if (pinnedConditionIds.has(m.condition_id)) continue;
