@@ -177,6 +177,32 @@ describe("aggregateMetrics", () => {
     expect(m.score_max).toBeCloseTo(0.9);
   });
 
+  it("excludes missing-context picks from context-dependent rate denominators", () => {
+    const contextless = {
+      run_id: "x",
+      profile_summary: null,
+      candidates: [],
+      picks: Array.from({ length: 10 }, (_, i) => ({
+        condition_id: `0xctxless${i}`,
+        score: 0.9,
+        reason: "r",
+      })),
+      error: null,
+    };
+    const runB = fixtureDataset.runs.find((r) => r.run_id.endsWith("b"));
+    const m = aggregateMetrics([runB, contextless].map(computeRunMetrics));
+    expect(m.runs_missing_context).toBe(1);
+    expect(m.total_picks).toBe(17);
+    expect(m.context_picks).toBe(7);
+    // Rates over run B's 7 context picks only — the 10 blind picks must not
+    // dilute them (run B: 1 invalid, 1 non-financial, 1 anchored of 6 reasons).
+    expect(m.invalid_pick_rate).toBeCloseTo(1 / 7);
+    expect(m.non_financial_leak_rate).toBeCloseTo(1 / 7);
+    expect(m.reason_anchored_rate).toBeCloseTo(1 / 6);
+    // Pick-intrinsic rates still cover everything.
+    expect(m.below_threshold_rate).toBeCloseTo(1 / 17);
+  });
+
   it("handles an empty dataset without dividing by zero", () => {
     const m = aggregateMetrics([]);
     expect(m.runs).toBe(0);

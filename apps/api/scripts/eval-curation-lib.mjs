@@ -234,7 +234,16 @@ export function aggregateMetrics(runMetrics) {
   const allScores = scoredRuns.flatMap((r) => r.scores).sort((a, b) => a - b);
   const totalPicks = scoredRuns.reduce((s, r) => s + r.pick_count, 0);
   const sum = (key) => scoredRuns.reduce((s, r) => s + r[key], 0);
-  const picksWithReason = totalPicks - sum("missing_reason");
+
+  // Context-dependent rates (invalid-id, non-financial, reason-anchored) are
+  // computed only over runs where the grok.score child gave us the candidate
+  // pool + profile — otherwise missing-context picks would sit in the
+  // denominator with guaranteed-zero numerators and dilute the rates as
+  // missing-context traces accumulate.
+  const contextRuns = scoredRuns.filter((r) => !r.missing_context);
+  const contextPicks = contextRuns.reduce((s, r) => s + r.pick_count, 0);
+  const sumCtx = (key) => contextRuns.reduce((s, r) => s + r[key], 0);
+  const contextPicksWithReason = contextPicks - sumCtx("missing_reason");
 
   const histogram = {
     "0.00-0.35": allScores.filter((s) => s < 0.35).length,
@@ -255,12 +264,15 @@ export function aggregateMetrics(runMetrics) {
     distinct_portfolios: new Set(runMetrics.map((r) => r.portfolio_id).filter(Boolean)).size,
     avg_picks_per_scored_run: scoredRuns.length > 0 ? totalPicks / scoredRuns.length : 0,
     total_picks: totalPicks,
-    invalid_pick_rate: totalPicks > 0 ? sum("invalid_picks") / totalPicks : 0,
+    invalid_pick_rate: contextPicks > 0 ? sumCtx("invalid_picks") / contextPicks : null,
     duplicate_pick_rate: totalPicks > 0 ? sum("duplicate_picks") / totalPicks : 0,
     below_threshold_rate: totalPicks > 0 ? sum("below_threshold") / totalPicks : 0,
     missing_reason_rate: totalPicks > 0 ? sum("missing_reason") / totalPicks : 0,
-    reason_anchored_rate: picksWithReason > 0 ? sum("reason_anchored") / picksWithReason : 0,
-    non_financial_leak_rate: totalPicks > 0 ? sum("non_financial_picks") / totalPicks : 0,
+    reason_anchored_rate:
+      contextPicksWithReason > 0 ? sumCtx("reason_anchored") / contextPicksWithReason : null,
+    non_financial_leak_rate:
+      contextPicks > 0 ? sumCtx("non_financial_picks") / contextPicks : null,
+    context_picks: contextPicks,
     score_mean: allScores.length > 0 ? allScores.reduce((a, b) => a + b, 0) / allScores.length : null,
     score_p50: quantile(allScores, 0.5),
     score_min: allScores.length > 0 ? allScores[0] : null,
@@ -452,7 +464,7 @@ export function formatReport(report, baseline = null) {
   lines.push(`Portfolios:         ${m.distinct_portfolios}`);
   if (m.runs_missing_context > 0) {
     lines.push(
-      `⚠️  ${m.runs_missing_context} run(s) have picks but no grok.score child (profile/candidate pool unknown) — their invalid-id, non-financial, and anchored-reason numbers are blind spots, and their picks are not judged.`,
+      `⚠️  ${m.runs_missing_context} run(s) have picks but no grok.score child (profile/candidate pool unknown) — their picks are excluded from the invalid-id, non-financial, and anchored-reason rates (${m.context_picks}/${m.total_picks} picks have context) and are not judged.`,
     );
   }
   lines.push("");
