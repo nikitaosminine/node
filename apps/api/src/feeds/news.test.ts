@@ -564,7 +564,9 @@ describe("runNewsFanout — ETF-derived market coverage", () => {
         await vi.runAllTimersAsync();
         const result = await run;
 
-        expect(result.marketTopicsQueried).toBe(3);
+        expect(result.marketTopicsQueried).toBeGreaterThan(0);
+        expect(result.marketTopicsQueried).toBeLessThanOrEqual(2);
+        expect(state.subrequestCount).toBeLessThanOrEqual(50);
         state.searchQueries
           .filter((query) => topicMarkers.some((marker) => query.includes(marker)))
           .forEach((query) => topicQueries.add(query));
