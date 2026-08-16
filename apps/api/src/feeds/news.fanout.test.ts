@@ -344,8 +344,10 @@ describe("runNewsFanout sentiment pipeline (end-to-end over stubbed HTTP)", () =
       captured.some((r) => r.pathname === "/rest/v1/company_sentiment" && r.method === "GET"),
     ).toBe(true);
     expect(
-      captured.some((r) => r.pathname === "/rest/v1/rpc/apply_company_sentiment_batch"),
-    ).toBe(false);
+      captured.find(
+        (r) => r.pathname === "/rest/v1/rpc/apply_company_sentiment_batch" && r.method === "POST",
+      )?.body,
+    ).toMatchObject({ p_rows: [] });
   });
 
   it("does not fold the answered member of a partially answered cluster into EWMA", async () => {
@@ -362,7 +364,9 @@ describe("runNewsFanout sentiment pipeline (end-to-end over stubbed HTTP)", () =
     expect(result.companiesRescored).toBe(0);
     expect(clusterUpsertRows(captured)[0]).not.toHaveProperty("sentiments");
     expect(
-      captured.some((r) => r.pathname === "/rest/v1/rpc/apply_company_sentiment_batch"),
-    ).toBe(false);
+      captured.find(
+        (r) => r.pathname === "/rest/v1/rpc/apply_company_sentiment_batch" && r.method === "POST",
+      )?.body,
+    ).toMatchObject({ p_rows: [] });
   });
 });

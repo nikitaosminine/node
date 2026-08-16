@@ -262,6 +262,7 @@ type NewsFetch = (input: RequestInfo | URL, init?: RequestInit) => Promise<Respo
 class NewsSubrequestBudget {
   private used = 0;
   private reserved = 0;
+  private activeReservation: number | null = null;
 
   reserve(count: number): void {
     if (this.used + this.reserved + count > NEWS_SUBREQUEST_BUDGET) {
@@ -270,14 +271,21 @@ class NewsSubrequestBudget {
     this.reserved += count;
   }
 
-  release(count: number): void {
-    this.reserved = Math.max(0, this.reserved - count);
+  activateReservation(count: number): void {
+    if (this.reserved < count) throw new NewsSubrequestBudgetExceededError();
+    this.reserved -= count;
+    this.activeReservation = count;
   }
 
   async fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
-    if (this.used + this.reserved >= NEWS_SUBREQUEST_BUDGET) {
+    if (
+      this.used >= NEWS_SUBREQUEST_BUDGET ||
+      (this.activeReservation !== null && this.activeReservation <= 0) ||
+      (this.activeReservation === null && this.used + this.reserved >= NEWS_SUBREQUEST_BUDGET)
+    ) {
       throw new NewsSubrequestBudgetExceededError();
     }
+    if (this.activeReservation !== null) this.activeReservation--;
     this.used++;
     return globalThis.fetch(input, init);
   }
@@ -960,7 +968,7 @@ export async function updateRollingCompanySentiment(
     try {
       const { data: pendingRows, error: pendingError } = await client
         .from("company_sentiment_pending")
-        .select("company_key, cluster_id, company_name, ticker, isin, score, rationale");
+        .select("company_key, cluster_id, company_name, ticker, isin, score, rationale, observed_at");
 
       if (pendingError) throw new Error(pendingError.message);
 
@@ -972,12 +980,19 @@ export async function updateRollingCompanySentiment(
       ];
       const { data: priorRows, error: priorError } = await client
         .from("company_sentiment")
-        .select("company_key, score, evidence_cluster_ids, scored_cluster_ids")
+        .select(
+          "company_key, company_name, ticker, isin, score, trend, evidence_cluster_ids, scored_cluster_ids",
+        )
         .in("company_key", readCompanyKeys);
 
       if (priorError) throw new Error(priorError.message);
 
-      const queuedSentiments: ClusterSentiment[] = (pendingRows ?? []).map(
+      const now = Date.now();
+      const activePendingRows = (pendingRows ?? []).filter(
+        (row: { observed_at?: string | null }) =>
+          !row.observed_at || now - Date.parse(row.observed_at) <= NEWS_WINDOW_MS,
+      );
+      const queuedSentiments: ClusterSentiment[] = activePendingRows.map(
         (r: {
           company_key: string;
           cluster_id: string;
@@ -1013,18 +1028,34 @@ export async function updateRollingCompanySentiment(
 
       const priorByKey = new Map<
         string,
-        { score: number; evidence_cluster_ids: string[]; scored_cluster_ids: ScoredClusterRecord[] }
+        {
+          company_name: string | null;
+          ticker: string | null;
+          isin: string | null;
+          score: number;
+          trend: "up" | "down" | "flat";
+          evidence_cluster_ids: string[];
+          scored_cluster_ids: ScoredClusterRecord[];
+        }
       >(
         (priorRows ?? []).map(
           (r: {
             company_key: string;
+            company_name?: string | null;
+            ticker?: string | null;
+            isin?: string | null;
             score: number;
+            trend?: "up" | "down" | "flat" | null;
             evidence_cluster_ids: string[] | null;
             scored_cluster_ids: ScoredClusterRecord[] | null;
           }) => [
             r.company_key,
             {
+              company_name: r.company_name ?? null,
+              ticker: r.ticker ?? null,
+              isin: r.isin ?? null,
               score: r.score,
+              trend: r.trend ?? "flat",
               evidence_cluster_ids: r.evidence_cluster_ids ?? [],
               scored_cluster_ids: r.scored_cluster_ids ?? [],
             },
@@ -1032,18 +1063,24 @@ export async function updateRollingCompanySentiment(
         ),
       );
 
+      const expiredScoredCompanies = new Set<string>();
       const priorScoredByCompany = new Map<string, Set<string>>(
-        [...priorByKey].map(([companyKey, prior]) => [
-          companyKey,
-          new Set(prior.scored_cluster_ids.map((r) => r.id)),
-        ]),
+        [...priorByKey].map(([companyKey, prior]) => {
+          const validScored = prior.scored_cluster_ids.filter(
+            (record) => now - new Date(record.scoredAt).getTime() <= NEWS_WINDOW_MS,
+          );
+          if (validScored.length !== prior.scored_cluster_ids.length) {
+            expiredScoredCompanies.add(companyKey);
+            prior.scored_cluster_ids = validScored;
+          }
+          return [companyKey, new Set(validScored.map((record) => record.id))];
+        }),
       );
       const observationsByCompany = aggregateObservationsByCompany(
         observations,
         priorScoredByCompany,
       );
 
-      const now = Date.now();
       const companySentimentRows = [...observationsByCompany].map(([companyKey, obs]) => {
         const prior = priorByKey.get(companyKey) ?? null;
         const { score, trend } = computeEwma(prior?.score ?? null, obs.observedScore);
@@ -1069,7 +1106,23 @@ export async function updateRollingCompanySentiment(
         };
       });
 
-      if (companySentimentRows.length === 0) return { companiesRescored: 0, error: null };
+      for (const companyKey of expiredScoredCompanies) {
+        if (observationsByCompany.has(companyKey)) continue;
+        const prior = priorByKey.get(companyKey);
+        if (!prior) continue;
+        const ref = companiesByKey.get(companyKey);
+        companySentimentRows.push({
+          company_key: companyKey,
+          company_name: ref?.name ?? prior.company_name ?? companyKey,
+          ticker: ref?.tickers[0] ?? prior.ticker,
+          isin: ref?.isins[0] ?? prior.isin,
+          score: prior.score,
+          trend: prior.trend,
+          evidence_cluster_ids: prior.evidence_cluster_ids,
+          scored_cluster_ids: prior.scored_cluster_ids,
+          updated_at: new Date(now).toISOString(),
+        });
+      }
 
       const { data: applied, error: applyError } = await client.rpc("apply_company_sentiment_batch", {
         p_holder: holder,
@@ -1516,7 +1569,7 @@ export async function runNewsFanout(env: Env): Promise<{
       errors.push(`${entry.canonicalKey}: ${msg}`);
     }
   });
-  budget.release(MAX_POST_SEARCH_SUBREQUESTS);
+  budget.activateReservation(MAX_POST_SEARCH_SUBREQUESTS);
 
   // Collapse same-story duplicates across sources (keep best source tier).
   const queryByKey = new Map<string, string>();

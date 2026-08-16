@@ -99,9 +99,8 @@ export async function invokeSentimentGrok(
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), SENTIMENT_GROK_TIMEOUT_MS);
-  let res: Response;
   try {
-    res = await fetchImpl(`${getGrokBaseUrl(env)}/chat/completions`, {
+    const res = await fetchImpl(`${getGrokBaseUrl(env)}/chat/completions`, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${apiKey}`,
@@ -118,22 +117,21 @@ export async function invokeSentimentGrok(
       }),
       signal: controller.signal,
     });
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      throw new Error(`Grok sentiment scoring failed (${res.status}): ${body.slice(0, 400)}`);
+    }
+
+    const data = (await res.json()) as GrokChatResponse;
+    const content = data.choices?.[0]?.message?.content;
+    if (!content) throw new Error("Grok sentiment scoring returned no content");
+    return content;
   } catch (err) {
     if (controller.signal.aborted) throw new Error("Grok sentiment scoring timed out");
     throw err;
   } finally {
     clearTimeout(timeout);
   }
-
-  if (!res.ok) {
-    const body = await res.text().catch(() => "");
-    throw new Error(`Grok sentiment scoring failed (${res.status}): ${body.slice(0, 400)}`);
-  }
-
-  const data = (await res.json()) as GrokChatResponse;
-  const content = data.choices?.[0]?.message?.content;
-  if (!content) throw new Error("Grok sentiment scoring returned no content");
-  return content;
 }
 
 // ---------------------------------------------------------------------------

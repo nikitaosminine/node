@@ -689,7 +689,20 @@ function mockSentimentClient(
             ),
           );
           for (let i = pendingRows.length - 1; i >= 0; i--) {
-            if (completed.has(`${pendingRows[i].company_key}:${pendingRows[i].cluster_id}`)) {
+            const prior = priorRows.find(
+              (row) => row.company_key === pendingRows[i].company_key,
+            );
+            const alreadyScored = prior?.scored_cluster_ids?.some(
+              (scored) => scored.id === pendingRows[i].cluster_id,
+            );
+            const expired =
+              typeof pendingRows[i].observed_at === "string" &&
+              Date.parse(pendingRows[i].observed_at) < Date.now() - 7 * 24 * 3_600_000;
+            if (
+              completed.has(`${pendingRows[i].company_key}:${pendingRows[i].cluster_id}`) ||
+              alreadyScored ||
+              expired
+            ) {
               pendingRows.splice(i, 1);
             }
           }
@@ -750,7 +763,8 @@ describe("updateRollingCompanySentiment", () => {
     );
 
     expect(outcome).toEqual({ companiesRescored: 0, error: null });
-    expect(applies).toHaveLength(0);
+    expect(applies).toHaveLength(1);
+    expect(applies[0].rows).toEqual([]);
   });
 
   it("folds a genuinely new cluster into the EWMA and writes both id columns via the guarded RPC", async () => {
@@ -786,6 +800,52 @@ describe("updateRollingCompanySentiment", () => {
     // The write is guarded by the same holder token the lock was acquired with.
     const acquireCall = rpcCalls.find((c) => c.fn === "try_acquire_company_sentiment_lock")!;
     expect(applies[0].holder).toBe((acquireCall.args as { p_holder: string }).p_holder);
+  });
+
+  it("prunes stale scored ids even when there is no fresh observation", async () => {
+    const now = Date.now();
+    const { client, applies } = mockSentimentClient([
+      {
+        company_key: "ticker:ACME",
+        score: 0.5,
+        evidence_cluster_ids: ["old-1"],
+        scored_cluster_ids: [
+          { id: "stale", scoredAt: new Date(now - 8 * 24 * 3_600_000).toISOString() },
+          { id: "fresh", scoredAt: new Date(now - 1_000).toISOString() },
+        ],
+      },
+    ]);
+
+    const outcome = await updateRollingCompanySentiment(client, [], companiesByKey);
+
+    expect(outcome).toEqual({ companiesRescored: 1, error: null });
+    expect(applies[0].rows[0]).toMatchObject({
+      company_key: "ticker:ACME",
+      score: 0.5,
+      scored_cluster_ids: [{ id: "fresh" }],
+    });
+  });
+
+  it("removes expired pending observations while draining the queue", async () => {
+    const pendingRows: Array<Record<string, unknown>> = [
+      {
+        company_key: "ticker:ACME",
+        cluster_id: "expired",
+        company_name: "Acme Corp",
+        ticker: "ACME",
+        isin: null,
+        score: 0.2,
+        rationale: "old",
+        observed_at: new Date(Date.now() - 8 * 24 * 3_600_000).toISOString(),
+      },
+    ];
+    const { client, applies } = mockSentimentClient([], { pendingRows });
+
+    const outcome = await updateRollingCompanySentiment(client, [], companiesByKey);
+
+    expect(outcome).toEqual({ companiesRescored: 0, error: null });
+    expect(applies).toHaveLength(1);
+    expect(pendingRows).toHaveLength(0);
   });
 
   it("skips the DB entirely when there is nothing to update", async () => {

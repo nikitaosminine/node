@@ -164,11 +164,11 @@ declare
   v_acquired int;
 begin
   insert into public.company_sentiment_lock (id, holder, expires_at)
-  values ('singleton', p_holder, now() + make_interval(secs => p_ttl_seconds))
+  values ('singleton', p_holder, clock_timestamp() + make_interval(secs => p_ttl_seconds))
   on conflict (id) do update
     set holder = excluded.holder,
         expires_at = excluded.expires_at
-    where public.company_sentiment_lock.expires_at < now();
+    where public.company_sentiment_lock.expires_at < clock_timestamp();
   get diagnostics v_acquired = row_count;
   return v_acquired > 0;
 end;
@@ -205,7 +205,7 @@ begin
     where id = 'singleton'
     for update;
 
-  if v_holder is distinct from p_holder or v_expires_at is null or v_expires_at <= now() then
+  if v_holder is distinct from p_holder or v_expires_at is null or v_expires_at <= clock_timestamp() then
     return false;
   end if;
 
@@ -238,16 +238,14 @@ begin
         updated_at = excluded.updated_at;
 
   delete from public.company_sentiment_pending p
-  where exists (
-    select 1
-    from jsonb_to_recordset(p_rows) as r(
-      company_key text,
-      scored_cluster_ids jsonb
-    )
-    cross join lateral jsonb_array_elements(coalesce(r.scored_cluster_ids, '[]'::jsonb)) as ids(value)
-    where r.company_key = p.company_key
-      and ids.value->>'id' = p.cluster_id
-  );
+  where p.observed_at < clock_timestamp() - interval '7 days'
+     or exists (
+       select 1
+       from public.company_sentiment cs
+       cross join lateral jsonb_array_elements(coalesce(cs.scored_cluster_ids, '[]'::jsonb)) as ids(value)
+       where cs.company_key = p.company_key
+         and ids.value->>'id' = p.cluster_id
+     );
 
   return true;
 end;

@@ -186,6 +186,27 @@ describe("invokeSentimentGrok", () => {
       error: "Grok sentiment scoring timed out",
     });
   });
+
+  it("aborts when Grok headers arrive but the response body hangs", async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.fn((_input: RequestInfo | URL, init?: RequestInit) =>
+      Promise.resolve({
+        ok: true,
+        json: () =>
+          new Promise<unknown>((_, reject) => {
+            init?.signal?.addEventListener("abort", () => reject(new Error("body aborted")));
+          }),
+      } as Response),
+    );
+
+    const resultPromise = scoreClusterSentiments(env, [target], fetchMock);
+    await vi.advanceTimersByTimeAsync(15_000);
+
+    await expect(resultPromise).resolves.toMatchObject({
+      sentiments: [],
+      error: "Grok sentiment scoring timed out",
+    });
+  });
 });
 
 describe("scoreClusterSentiments (degrade gracefully)", () => {
