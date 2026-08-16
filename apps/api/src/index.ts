@@ -1580,7 +1580,7 @@ function completedUnknownGeographyReason(result: {
   return parts.join(" · ");
 }
 
-async function researchPortfolioEtfGeography(
+export async function researchPortfolioEtfGeography(
   env: Env,
   portfolioId: string,
   options: { holdingIds?: string[]; onlyPending?: boolean; reason?: GeographyQueueMessage["reason"] } = {},
@@ -1657,6 +1657,14 @@ async function researchPortfolioEtfGeography(
       );
       const primary = result.allocations[0] ?? null;
       if (result.allocations.length > 0) resolved += 1;
+
+      const hasExistingAllocations = (allocationsByHolding.get(holding.id) ?? []).length > 0;
+      if (result.allocations.length === 0 && hasExistingAllocations) {
+        await markGeographyJobCompleted(client, holding.id, {
+          lastError: completedUnknownGeographyReason(result),
+        });
+        continue;
+      }
 
       await client
         .from("holdings")
