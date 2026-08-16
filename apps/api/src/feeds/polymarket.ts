@@ -240,6 +240,20 @@ export function isShortTermMarket(
 }
 
 // ---------------------------------------------------------------------------
+// Near-certain filter — a market at 100% Yes / 99% No is resolved-in-all-but-
+// name and carries no information. Shared with the category browse endpoint
+// so it applies the same cutoff as the personalized rotating path.
+// ---------------------------------------------------------------------------
+
+export const MAX_CERTAIN_PROB = 0.97;
+
+export function isNearCertainMarket(outcomePrices: number[] | null | undefined): boolean {
+  if (!outcomePrices || outcomePrices.length === 0) return false;
+  const topProb = Math.max(...outcomePrices, 0);
+  return topProb >= MAX_CERTAIN_PROB;
+}
+
+// ---------------------------------------------------------------------------
 // Grok helpers (self-contained — no cross-import from index.ts)
 // ---------------------------------------------------------------------------
 
@@ -981,17 +995,14 @@ export async function runPolymarketFanout(
   // Grok scoring. Otherwise Grok sees all 13 buckets of one event and may pick
   // a lopsided near-zero bucket ("Will 7 cuts happen?" at 100% No) instead of
   // the meaningful one ("Will 0 cuts happen?" at 67% Yes).
-  // Drop near-certain markets (≥97% on the leading side) — a market at 100%
-  // Yes / 99% No is resolved-in-all-but-name and carries no information. This
-  // strips noise like "Will MSFT hit $435 in May? 100% Yes" before it reaches Grok.
-  const MAX_CERTAIN_PROB = 0.97;
+  // Drop near-certain markets (see isNearCertainMarket) so noise like
+  // "Will MSFT hit $435 in May? 100% Yes" never reaches Grok.
   const consensusByEvent = new Map<string, FlatMarket>();
   for (const m of allMarkets) {
     if (pinnedConditionIds.has(m.condition_id)) continue;
     // Drop weekly/daily price-target gambling markets (short duration)
     if (isShortTermMarket(m.start_date, m.end_date)) continue;
-    const topProb = Math.max(...m.outcome_prices, 0);
-    if (topProb >= MAX_CERTAIN_PROB) continue;
+    if (isNearCertainMarket(m.outcome_prices)) continue;
     const key = m.event_id || m.condition_id;
     const existing = consensusByEvent.get(key);
     if (!existing || getYesProb(m) > getYesProb(existing)) {

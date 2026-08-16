@@ -7,9 +7,12 @@ vi.mock("@supabase/supabase-js", () => ({
 }));
 
 import {
+  NON_FINANCIAL_RE,
   TAG_IDS,
   fetchCandidateMarkets,
   invokePolymarketGrok,
+  isNearCertainMarket,
+  isShortTermMarket,
   runPolymarketFanout,
   shouldUsePolymarketCurationCache,
   upsertThenPrunePortfolioMatches,
@@ -67,6 +70,88 @@ beforeEach(() => {
 afterEach(() => {
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
+});
+
+describe("isShortTermMarket", () => {
+  it("flags markets spanning less than 14 days", () => {
+    expect(isShortTermMarket("2026-01-01T00:00:00Z", "2026-01-05T00:00:00Z")).toBe(true);
+  });
+
+  it("keeps markets spanning 14 days or more", () => {
+    expect(isShortTermMarket("2026-01-01T00:00:00Z", "2026-02-01T00:00:00Z")).toBe(false);
+  });
+
+  it("keeps markets with unknown duration (missing start/end)", () => {
+    expect(isShortTermMarket(null, "2026-02-01T00:00:00Z")).toBe(false);
+    expect(isShortTermMarket("2026-01-01T00:00:00Z", null)).toBe(false);
+  });
+});
+
+describe("isNearCertainMarket", () => {
+  it("flags markets with a leading outcome >= 0.97", () => {
+    expect(isNearCertainMarket([0.98, 0.02])).toBe(true);
+    expect(isNearCertainMarket([0.97, 0.03])).toBe(true);
+  });
+
+  it("keeps markets with no near-certain outcome", () => {
+    expect(isNearCertainMarket([0.55, 0.45])).toBe(false);
+  });
+
+  it("keeps markets with missing outcome prices", () => {
+    expect(isNearCertainMarket(null)).toBe(false);
+    expect(isNearCertainMarket([])).toBe(false);
+  });
+});
+
+describe("category endpoint filter application", () => {
+  // Mirrors the filter chain applied post-query in the
+  // GET /api/polymarket/category handler in index.ts.
+  function applyCategoryFilters(
+    markets: Array<{
+      question: string;
+      start_date: string | null;
+      end_date: string | null;
+      outcome_prices: number[];
+    }>,
+  ) {
+    return markets
+      .filter((m) => !NON_FINANCIAL_RE.test(m.question ?? ""))
+      .filter((m) => !isShortTermMarket(m.start_date, m.end_date))
+      .filter((m) => !isNearCertainMarket(m.outcome_prices));
+  }
+
+  it("drops short-duration, near-certain, and non-financial markets while keeping normal ones", () => {
+    const markets = [
+      {
+        question: "Will MSFT close $440-$450 this week?",
+        start_date: "2026-01-01T00:00:00Z",
+        end_date: "2026-01-05T00:00:00Z",
+        outcome_prices: [0.5, 0.5],
+      },
+      {
+        question: "Will the Fed cut rates in 2026?",
+        start_date: "2026-01-01T00:00:00Z",
+        end_date: "2026-12-31T00:00:00Z",
+        outcome_prices: [0.99, 0.01],
+      },
+      {
+        question: "Will the Super Bowl champion be decided by field goal?",
+        start_date: "2026-01-01T00:00:00Z",
+        end_date: "2026-12-31T00:00:00Z",
+        outcome_prices: [0.5, 0.5],
+      },
+      {
+        question: "Will EWY close above $60 in May?",
+        start_date: "2026-01-01T00:00:00Z",
+        end_date: "2026-02-01T00:00:00Z",
+        outcome_prices: [0.6, 0.4],
+      },
+    ];
+
+    const filtered = applyCategoryFilters(markets);
+
+    expect(filtered.map((m) => m.question)).toEqual(["Will EWY close above $60 in May?"]);
+  });
 });
 
 describe("fetchCandidateMarkets", () => {
