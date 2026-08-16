@@ -450,7 +450,7 @@ export function PolymarketFeed({ portfolioId }: PolymarketFeedProps) {
     // Curation failed for this batch: the fanout fell back to top-by-volume rows.
     // Detected read-side (score=0 + reason=null) until the `source` column ships.
     const rotatingIsFallback =
-      rotatingFiltered.length > 0 && rotatingFiltered.every(isFallbackMatch);
+      personalizedData.rotating.length > 0 && personalizedData.rotating.every(isFallbackMatch);
     body = (
       <>
         {pinnedFiltered.map((match) => (
@@ -461,7 +461,7 @@ export function PolymarketFeed({ portfolioId }: PolymarketFeedProps) {
             reason={match.reason}
           />
         ))}
-        {rotatingIsFallback && (
+        {rotatingIsFallback && rotatingFiltered.length > 0 && (
           <li className="px-5 py-2 text-[10px] font-semibold uppercase tracking-[0.12em] text-foreground-muted/60">
             Trending on Polymarket — personalization is catching up
           </li>
