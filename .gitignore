@@ -39,6 +39,7 @@ dist-ssr
 *.sw?
 
 .claude/
+.codex/
 apps/api/*.txt
 
 # OpenNext build output (legacy, unused on Vercel)

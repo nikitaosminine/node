@@ -240,7 +240,7 @@ export function RecapPlayer({ recap, open, onOpenChange }: RecapPlayerProps) {
         // Don't auto-focus a control on open (Radix would focus the pause button,
         // leaving a stray focus ring and letting Enter/Space activate it).
         onOpenAutoFocus={(e) => e.preventDefault()}
-        className="h-[800px] max-h-[92vh] w-[520px] max-w-[96vw] gap-0 overflow-hidden rounded-2xl border-hairline bg-surface p-0"
+        className="h-[800px] max-h-[92dvh] w-[520px] max-w-[96vw] gap-0 overflow-hidden rounded-2xl border-hairline bg-surface p-0"
       >
         <DialogTitle className="sr-only">
           {recap.type === "weekly" ? "Weekly recap" : "Daily recap"}
@@ -267,7 +267,7 @@ export function RecapPlayer({ recap, open, onOpenChange }: RecapPlayerProps) {
             type="button"
             aria-label={paused ? "Resume" : "Pause"}
             onClick={() => setPaused((p) => !p)}
-            className="rounded-full p-1.5 text-foreground-muted hover:bg-surface-2 hover:text-foreground"
+            className="rounded-full p-2.5 text-foreground-muted hover:bg-surface-2 hover:text-foreground md:p-1.5"
           >
             {paused ? <Play className="h-4 w-4" /> : <Pause className="h-4 w-4" />}
           </button>
@@ -275,7 +275,7 @@ export function RecapPlayer({ recap, open, onOpenChange }: RecapPlayerProps) {
             type="button"
             aria-label="Close"
             onClick={() => onOpenChange(false)}
-            className="rounded-full p-1.5 text-foreground-muted hover:bg-surface-2 hover:text-foreground"
+            className="rounded-full p-2.5 text-foreground-muted hover:bg-surface-2 hover:text-foreground md:p-1.5"
           >
             <X className="h-4 w-4" />
           </button>

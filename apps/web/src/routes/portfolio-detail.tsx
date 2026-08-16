@@ -215,6 +215,29 @@ const ALL_COLUMNS = [
 
 type ColKey = (typeof ALL_COLUMNS)[number]["key"];
 
+// Per-column widths, shared by the <colgroup> and by the table's minimum width.
+// `table-auto` treats a <col> width as a preference it may shrink below, so
+// without an explicit min-width the columns crush instead of scrolling whenever
+// the cell text is short. Deriving the minimum from the VISIBLE columns means
+// hiding columns removes the horizontal scroll rather than leaving dead space.
+const COLUMN_WIDTHS: Partial<Record<ColKey, number>> = {
+  name: 340,
+  assetType: 96,
+  qty: 64,
+  cur: 104,
+  buy: 104,
+  total: 104,
+  gl: 112,
+  weight: 78,
+  sector: 110,
+  perf1D: 76,
+  perfYTD: 76,
+  take: 52,
+};
+
+/** Width of the trailing row-actions column, which has no entry in ALL_COLUMNS. */
+const ACTIONS_COLUMN_WIDTH = 52;
+
 interface RowData {
   id: string;
   ticker: string;
@@ -1033,7 +1056,15 @@ export default function PortfolioDetailPage() {
     };
   }, [holdings, portfolioCurrency]);
 
-  const visibleCols = colOrder.filter((k) => !hiddenCols.has(k));
+  const visibleCols = useMemo(
+    () => colOrder.filter((k) => !hiddenCols.has(k)),
+    [colOrder, hiddenCols],
+  );
+  const holdingsTableMinWidth = useMemo(
+    () =>
+      visibleCols.reduce((total, key) => total + (COLUMN_WIDTHS[key] ?? 0), ACTIONS_COLUMN_WIDTH),
+    [visibleCols],
+  );
   const holdingsSnapshotRows = useMemo<ExportRow[]>(() => {
     return rows.map((row) => {
       return {
@@ -1582,8 +1613,8 @@ export default function PortfolioDetailPage() {
     );
 
   return (
-    <div className="min-h-screen bg-background text-foreground">
-      <div className="mx-auto flex max-w-[1500px] flex-col gap-6 px-6 pb-8 pt-4">
+    <div className="bg-background text-foreground">
+      <div className="@container mx-auto flex w-full max-w-[1500px] flex-col gap-6 px-4 pb-8 pt-4 sm:px-6">
         {/* Compact header */}
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="flex flex-wrap items-center gap-2">
@@ -1607,7 +1638,7 @@ export default function PortfolioDetailPage() {
             <button
               type="button"
               onClick={openExportSheet}
-              className="inline-flex items-center gap-1.5 rounded-full border border-hairline bg-surface px-3 py-1.5 text-xs font-medium text-foreground transition-colors hover:bg-surface-2"
+              className="inline-flex items-center gap-1.5 rounded-full border border-hairline bg-surface px-3 py-2.5 text-xs font-medium text-foreground transition-colors hover:bg-surface-2 md:py-1.5"
             >
               <Download className="h-3.5 w-3.5" />
               Export
@@ -1615,8 +1646,11 @@ export default function PortfolioDetailPage() {
           </div>
         </div>
 
-        {/* Allocation + Geography 2-col grid */}
-        <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+        {/* Allocation + Geography 2-col grid. Container-, not viewport-, driven:
+            `lg:` fired at 1024px of WINDOW, which is only ~756px of content once the
+            sidebar and gutters are taken out — two 370px cards. @4xl (896px) is
+            measured against the real content box, so the split waits for room. */}
+        <div className="grid grid-cols-1 gap-4 @4xl:grid-cols-2">
           <AllocationCard
             portfolioId={portfolioId!}
             sectorData={sectorData}
@@ -1642,10 +1676,10 @@ export default function PortfolioDetailPage() {
         <Tabs value={activeTab} onValueChange={(value) => setActiveTab(value as typeof activeTab)}>
           <div className="rounded-2xl border border-hairline bg-surface">
             <div className="flex flex-wrap items-center gap-3 border-b border-hairline px-5 py-3">
-              <TabsList className="h-9 rounded-full border border-hairline bg-surface-2 p-0.5">
+              <TabsList className="h-11 rounded-full border border-hairline bg-surface-2 p-0.5 md:h-9">
                 <TabsTrigger
                   value="holdings"
-                  className={`relative h-8 rounded-full px-4 text-[11px] uppercase tracking-[0.1em] transition-colors ${
+                  className={`relative h-10 rounded-full px-4 text-[11px] uppercase tracking-[0.1em] transition-colors md:h-8 ${
                     activeTab === "holdings"
                       ? "text-background"
                       : "text-foreground-muted hover:text-foreground"
@@ -1669,7 +1703,7 @@ export default function PortfolioDetailPage() {
                 </TabsTrigger>
                 <TabsTrigger
                   value="transactions"
-                  className={`relative h-8 rounded-full px-4 text-[11px] uppercase tracking-[0.1em] transition-colors ${
+                  className={`relative h-10 rounded-full px-4 text-[11px] uppercase tracking-[0.1em] transition-colors md:h-8 ${
                     activeTab === "transactions"
                       ? "text-background"
                       : "text-foreground-muted hover:text-foreground"
@@ -1699,7 +1733,7 @@ export default function PortfolioDetailPage() {
                       type="button"
                       variant="outline"
                       size="sm"
-                      className="rounded-full bg-background px-4"
+                      className="h-10 rounded-full bg-background px-4 md:h-8"
                     >
                       <Columns3 className="h-3.5 w-3.5" />
                       Columns
@@ -1764,7 +1798,12 @@ export default function PortfolioDetailPage() {
                         </button>
                       )}
                     </div>
-                    <PopoverContent className="w-auto p-3" align="start">
+                    {/* Two months is ~560px wide — wider than a phone. Cap to the
+                        viewport and let the calendar scroll inside the popover. */}
+                    <PopoverContent
+                      className="w-auto max-w-[calc(100vw-2rem)] overflow-x-auto p-3"
+                      align="start"
+                    >
                       <div className="mb-3 flex flex-wrap gap-2">
                         {(["30D", "90D", "YTD", "All"] as DatePreset[]).map((preset) => (
                           <Button
@@ -1811,7 +1850,7 @@ export default function PortfolioDetailPage() {
                         setCashAction("deposit");
                         setCashDialogOpen(true);
                       }}
-                      className="rounded-full bg-background px-4"
+                      className="h-10 rounded-full bg-background px-4 md:h-8"
                     >
                       <Plus className="h-3.5 w-3.5" />
                       Add cash
@@ -1820,7 +1859,7 @@ export default function PortfolioDetailPage() {
                       type="button"
                       size="sm"
                       onClick={() => setAddHoldingOpen(true)}
-                      className="rounded-full px-4"
+                      className="h-10 rounded-full px-4 md:h-8"
                     >
                       <Plus className="h-3.5 w-3.5" />
                       Add holding
@@ -1833,7 +1872,7 @@ export default function PortfolioDetailPage() {
                       variant="outline"
                       size="sm"
                       onClick={() => setManualTransactionOpen(true)}
-                      className="rounded-full bg-background px-4"
+                      className="h-10 rounded-full bg-background px-4 md:h-8"
                     >
                       <Plus className="h-3.5 w-3.5" />
                       Add transaction
@@ -1842,7 +1881,7 @@ export default function PortfolioDetailPage() {
                       type="button"
                       size="sm"
                       onClick={() => setImportOpen(true)}
-                      className="rounded-full px-4"
+                      className="h-10 rounded-full px-4 md:h-8"
                     >
                       <Plus className="h-3.5 w-3.5" />
                       Import transactions
@@ -1854,26 +1893,20 @@ export default function PortfolioDetailPage() {
 
             <TabsContent value="holdings" className="m-0">
               <div className="overflow-x-auto">
-                <table className="w-full table-auto text-sm">
+                <table
+                  className="w-full table-auto text-sm"
+                  style={{ minWidth: `${holdingsTableMinWidth}px` }}
+                >
                   <colgroup>
-                    {visibleCols.map((key) => {
-                      const w: Record<string, string> = {
-                        name: "340px",
-                        assetType: "96px",
-                        qty: "64px",
-                        cur: "104px",
-                        buy: "104px",
-                        total: "104px",
-                        gl: "112px",
-                        weight: "78px",
-                        sector: "110px",
-                        perf1D: "76px",
-                        perfYTD: "76px",
-                        take: "52px",
-                      };
-                      return <col key={key} style={{ width: w[key] ?? "auto" }} />;
-                    })}
-                    <col style={{ width: "52px" }} />
+                    {visibleCols.map((key) => (
+                      <col
+                        key={key}
+                        style={{
+                          width: COLUMN_WIDTHS[key] ? `${COLUMN_WIDTHS[key]}px` : "auto",
+                        }}
+                      />
+                    ))}
+                    <col style={{ width: `${ACTIONS_COLUMN_WIDTH}px` }} />
                   </colgroup>
                   <thead>
                     <tr className="text-[10px] uppercase tracking-[0.1em] text-foreground-muted">
@@ -2245,7 +2278,7 @@ export default function PortfolioDetailPage() {
                 </div>
 
                 {exportDatePreset === "custom" && (
-                  <div className="grid grid-cols-2 gap-3">
+                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                     <div className="space-y-1.5">
                       <Label htmlFor="export-date-from" className="text-xs text-foreground-muted">
                         Start date

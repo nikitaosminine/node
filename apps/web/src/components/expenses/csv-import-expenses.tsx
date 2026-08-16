@@ -285,7 +285,10 @@ export function CsvImportExpenses({ open, onOpenChange, userId, onImported }: Pr
         )}
 
         {step === "review" && (
-          <div className="space-y-4">
+          /* min-w-0: DialogContent is a grid, whose items default to `min-width: auto`, so the
+             6-column table sized this track to 579px inside a 358px dialog and painted 264px
+             off a 390px screen instead of scrolling. */
+          <div className="min-w-0 space-y-4">
             {errors.length > 0 && (
               <div className="rounded-md border border-destructive/20 bg-destructive/10 p-3">
                 {errors.map((error, index) => (
@@ -304,7 +307,7 @@ export function CsvImportExpenses({ open, onOpenChange, userId, onImported }: Pr
             )}
 
             <div className="max-h-[420px] overflow-auto rounded-md border border-hairline">
-              <Table>
+              <Table className="min-w-[640px]">
                 <TableHeader>
                   <TableRow>
                     <TableHead className="w-8" />

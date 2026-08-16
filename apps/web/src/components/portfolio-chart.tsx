@@ -577,7 +577,7 @@ function ExpandableBenchmarkSearch({
                           type="button"
                           disabled={!canApplyMore}
                           onClick={() => onApply(suggestion)}
-                          className="min-w-0 flex-1 text-left disabled:opacity-50"
+                          className="min-w-0 flex-1 py-2.5 text-left disabled:opacity-50 md:py-0"
                         >
                           <span className="block break-words text-sm leading-snug text-foreground">
                             {suggestion.name}
@@ -590,7 +590,7 @@ function ExpandableBenchmarkSearch({
                           type="button"
                           disabled={savingTicker === suggestion.ticker}
                           onClick={() => saveBenchmark(suggestion)}
-                          className="shrink-0 rounded-full border border-hairline px-2 py-1 text-xs text-foreground-muted hover:text-foreground disabled:opacity-50"
+                          className="shrink-0 rounded-full border border-hairline px-2 py-2.5 text-xs text-foreground-muted hover:text-foreground disabled:opacity-50 md:py-1"
                         >
                           Save
                         </button>

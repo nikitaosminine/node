@@ -61,7 +61,7 @@ export function ThesisStack({ theses, onUpdate, onOpen }: Props) {
                 animate={{ opacity: 1, y: 0 }}
                 exit={{ opacity: 0, y: -4 }}
                 onClick={() => setExpanded(false)}
-                className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-card px-3 py-1.5 text-xs font-medium text-foreground transition-colors hover:bg-secondary"
+                className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-card px-3 py-2.5 text-xs font-medium text-foreground transition-colors hover:bg-secondary md:py-1.5"
               >
                 <ChevronUp className="h-3.5 w-3.5" />
                 Collapse

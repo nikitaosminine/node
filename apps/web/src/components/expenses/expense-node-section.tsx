@@ -192,7 +192,9 @@ export function ExpenseNodeSection({
           )}
 
           <div className="flex items-center gap-2">
-            <div className="flex flex-1 items-center gap-2 rounded-lg border border-hairline bg-surface px-3 py-2 opacity-70">
+            {/* min-w-0: without it the flex-1 stub floors at its text's intrinsic width and
+                pushes the shrink-0 income button off a 390px viewport. */}
+            <div className="flex min-w-0 flex-1 items-center gap-2 rounded-lg border border-hairline bg-surface px-3 py-2 opacity-70">
               <NodeIcon className="h-3.5 w-3.5" />
               <span className="truncate text-sm text-foreground-muted">
                 Ask Node — &ldquo;Where can I cut €300?&rdquo;

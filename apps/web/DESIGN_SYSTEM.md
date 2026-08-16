@@ -92,20 +92,20 @@ consumed only as raw `var()`: `var(--accent-teal)` in the portfolio chart
 
 The **second sanctioned chromatic exception** (after the allocation strip): the Expenses
 spending heatmap. A single-hue intensity ramp, **warm orange in light mode, indigo blue in
-dark mode** (the mockup is the source of truth for this element — it is intentionally *not*
+dark mode** (the mockup is the source of truth for this element — it is intentionally _not_
 teal). Consumed as raw `var(--heat-*)` only (no Tailwind utility); `--heat-empty` is a
 no-spend cell, visually distinct from a low-but-nonzero `--heat-1`. Used in
 `components/expenses/spending-heatmap.tsx`.
 
-| Token         | Light (orange)            | Dark (indigo)             |
-| ------------- | ------------------------- | ------------------------- |
-| `--heat-empty`| `oklch(0.965 0.004 70)`   | `oklch(0.17 0.012 275)`   |
-| `--heat-1`    | `oklch(0.93 0.05 72)`     | `oklch(0.3 0.07 278)`     |
-| `--heat-2`    | `oklch(0.87 0.09 64)`     | `oklch(0.38 0.11 274)`    |
-| `--heat-3`    | `oklch(0.8 0.13 56)`      | `oklch(0.47 0.145 270)`   |
-| `--heat-4`    | `oklch(0.72 0.16 48)`     | `oklch(0.57 0.17 267)`    |
-| `--heat-5`    | `oklch(0.63 0.185 42)`    | `oklch(0.67 0.19 265)`    |
-| `--heat-foreground` | `oklch(1 0 0)`      | `oklch(1 0 0)`            |
+| Token               | Light (orange)          | Dark (indigo)           |
+| ------------------- | ----------------------- | ----------------------- |
+| `--heat-empty`      | `oklch(0.965 0.004 70)` | `oklch(0.17 0.012 275)` |
+| `--heat-1`          | `oklch(0.93 0.05 72)`   | `oklch(0.3 0.07 278)`   |
+| `--heat-2`          | `oklch(0.87 0.09 64)`   | `oklch(0.38 0.11 274)`  |
+| `--heat-3`          | `oklch(0.8 0.13 56)`    | `oklch(0.47 0.145 270)` |
+| `--heat-4`          | `oklch(0.72 0.16 48)`   | `oklch(0.57 0.17 267)`  |
+| `--heat-5`          | `oklch(0.63 0.185 42)`  | `oklch(0.67 0.19 265)`  |
+| `--heat-foreground` | `oklch(1 0 0)`          | `oklch(1 0 0)`          |
 
 Cell text is `--foreground` on `--heat-1..3` and `--heat-foreground` (white, both modes)
 on the saturated `--heat-4/5` steps. Never hardcode `#fff` — use the token.
@@ -207,6 +207,48 @@ Base `--radius: 0.75rem`. Scale (utilities `rounded-sm` … `rounded-4xl`):
 | `--radius-3xl` | `calc(var(--radius) + 12px)` |
 | `--radius-4xl` | `calc(var(--radius) + 16px)` |
 
+## Layout
+
+Mobile-first: the small-screen value is the base class and larger sizes are `sm:` / `md:` /
+`lg:` overrides. The app shell swaps the desktop sidebar for the mobile drawer at `md`
+(768px) — see `AGENTS.md` → "Frontend architecture" for the shell itself.
+
+**Page wrappers.** A top-level page wrapper is a centered column (`mx-auto w-full max-w-*`)
+with fluid padding `px-4 sm:px-6` and an `@container` context, so layouts inside a page can
+use `@`-prefixed variants (`@lg:`, `@3xl:`) that track the real content width instead of the
+viewport. Tailwind v4 ships container queries natively (no plugin, no config).
+
+**Always pair `@container` with an explicit `w-full`.** `@container` sets
+`container-type: inline-size`, which applies inline-size containment: the element can no
+longer be sized by its own contents. On a shrink-to-fit wrapper (`mx-auto` with no `w-full`,
+inside a flex column) that collapses it to zero content width.
+
+**Pick container-query steps from the CONTENT box.** `container-type: inline-size` queries the
+content box, but `getBoundingClientRect()` returns the border box — on a `px-6` wrapper that
+reads 48px high, which is enough to pick a step that makes laptops *worse*. Measure with
+`el.clientWidth - paddingLeft - paddingRight`, and remember the desktop rail costs a further
+220px: at a 1280px window with the sidebar expanded the content box is 1012px, not 1280px.
+That gap is the whole reason a `xl:` rule misfires here.
+
+**Use named container steps, not arbitrary `@min-[…]`, when several could match.** Tailwind
+sorts an arbitrary container variant *before* the named ones, so a wide `@min-[1180px]:grid-cols-7`
+loses to a narrower `@3xl:grid-cols-4` at widths where both apply — silently reinstating the
+cramped layout, and orphaning any divider tied to the wide step. Keep a divider on the same
+step as the column count it belongs to, plus an `:nth-child(Nn+1)` guard.
+
+**Dialogs are outside the page container.** Radix portals `DialogContent` to `<body>`, so
+`@`-prefixed variants never match inside one — use viewport breakpoints (`sm:`) there.
+`DialogContent` is also a `grid`, and grid items default to `min-width: auto`: a wide table
+inside one will size its track past the dialog and paint off-screen instead of scrolling, so
+give the wrapper `min-w-0` and the table a `min-w-*`.
+
+**Full-height wrappers must subtract the mobile top bar.** Below `md` the shell puts a sticky
+`h-14` (3.5rem) bar inside the viewport, so a bare `min-h-screen` / `h-screen` overflows the
+document by exactly that bar and short pages scroll for nothing. Write the height mobile-first
+as `min-h-[calc(100dvh-3.5rem)] md:min-h-screen` — `dvh` so mobile browser chrome is accounted
+for — and use `h-` instead of `min-h-` only where the page needs a fixed height for its own
+`overflow-hidden` scroll panes.
+
 ## Icons
 
 **`lucide-react` is the sole icon library.** Browse the full set at
@@ -245,6 +287,13 @@ auto `size-4` SVGs.
 **`Badge`** (`badgeVariants`) — base `text-xs font-semibold`, rounded-md.
 
 - variants: `default`, `secondary`, `destructive`, `outline`
+
+**`Dialog`** (`DialogContent`) — base caps height at
+`max-h-[calc(100dvh-2rem)] overflow-y-auto` so content taller than the viewport
+scrolls instead of overflowing past the fixed, vertically-centered positioning.
+Callers that manage their own height/scroll (e.g. `thesis-centered-modal.tsx`,
+`recap-player.tsx`) override both via `className`; `cn()`'s `twMerge` lets the
+caller's `max-h-*` / `overflow-*` win over the base.
 
 ## Motion & variants
 
