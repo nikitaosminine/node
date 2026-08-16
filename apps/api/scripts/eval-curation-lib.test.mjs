@@ -279,6 +279,15 @@ describe("judge plumbing", () => {
     // Run with picks but no grok.score child context at all:
     const contextless = { profile_summary: null, candidates: [], picks: [{ condition_id: "0x1" }] };
     expect(isJudgeablePick(contextless, contextless.picks[0])).toBe(false);
+    // Partially parsed candidate list: even a pick whose own question survived
+    // is excluded — the surviving sample would bias judge precision.
+    const runA = fixtureDataset.runs.find((r) => r.run_id.endsWith("a"));
+    const partial = { ...runA, candidates: runA.candidates.slice(0, 5) };
+    const survivingPick = partial.picks.find((p) =>
+      partial.candidates.some((c) => c.condition_id === p.condition_id),
+    );
+    expect(survivingPick).toBeTruthy();
+    expect(isJudgeablePick(partial, survivingPick)).toBe(false);
   });
 });
 

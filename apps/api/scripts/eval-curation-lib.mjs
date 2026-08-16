@@ -380,12 +380,14 @@ export function parseJudgeResponse(raw) {
 }
 
 // A pick is judgeable only when we know what the model saw: the portfolio
-// profile and the market's question text. Hallucinated condition_ids (no
-// question) and runs missing their grok.score child are counted separately —
-// a relevance verdict on "(unknown)" content would be meaningless and would
-// poison the verdict cache.
+// profile, a COMPLETE candidate pool, and the market's question text.
+// Hallucinated condition_ids (no question) are unjudgeable individually;
+// runs with missing or partially parsed grok.score context are excluded
+// wholesale — which picks survive a partial parse correlates with question
+// content, so judging the survivors would bias the precision sample (and a
+// verdict on "(unknown)" content would poison the cache).
 export function isJudgeablePick(run, pick) {
-  if (!run.profile_summary) return false;
+  if (!hasFullContext(run, run.candidates ?? [])) return false;
   return (run.candidates ?? []).some(
     (c) => c.condition_id === pick.condition_id && typeof c.question === "string",
   );
