@@ -8,15 +8,18 @@ vi.mock("@supabase/supabase-js", () => ({
 
 import {
   NON_FINANCIAL_RE,
+  PRICE_HISTORY_RETENTION_DAYS,
   TAG_IDS,
   buildPortfolioProfile,
   enqueueEtfConstituentsEnrichment,
   fetchCandidateMarkets,
+  insertPriceSnapshots,
   invokePolymarketGrok,
   isNearCertainMarket,
   isShortTermMarket,
   runPolymarketFanout,
   shouldUsePolymarketCurationCache,
+  sweepExpiredPriceHistory,
   upsertThenPrunePortfolioMatches,
 } from "./polymarket";
 
@@ -182,7 +185,7 @@ describe("fetchCandidateMarkets", () => {
     }
   });
 
-  it("rejects a completely failed candidate refresh before any database access", async () => {
+  it("rejects a completely failed candidate refresh without touching feed matches", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(
@@ -197,8 +200,21 @@ describe("fetchCandidateMarkets", () => {
       ),
     );
 
+    dbFrom.mockImplementation((table: string) => {
+      if (table === "polymarket_price_history") {
+        return {
+          delete: vi.fn(() => ({
+            lt: vi.fn().mockResolvedValue({ count: 0, error: null }),
+          })),
+        };
+      }
+      throw new Error(`Unexpected table: ${table}`);
+    });
+
     await expect(runPolymarketFanout(env)).rejects.toThrow("Gamma candidate pool is empty");
-    expect(dbFrom).not.toHaveBeenCalled();
+    expect(dbFrom).toHaveBeenCalledWith("polymarket_price_history");
+    expect(dbFrom).not.toHaveBeenCalledWith("polymarket_markets");
+    expect(dbFrom).not.toHaveBeenCalledWith("portfolio_polymarket_matches");
   });
 });
 
@@ -236,6 +252,14 @@ describe("stale market deactivation", () => {
               }),
             };
           }),
+        };
+      }
+      if (table === "polymarket_price_history") {
+        return {
+          insert: vi.fn().mockResolvedValue({ error: null }),
+          delete: vi.fn(() => ({
+            lt: vi.fn().mockResolvedValue({ count: 0, error: null }),
+          })),
         };
       }
       if (table === "portfolios") {
@@ -371,6 +395,7 @@ describe("Polymarket Grok curation", () => {
     const currentHash = await holdingsHash(holding);
     const matchUpserts: unknown[][] = [];
     const cacheUpsert = vi.fn().mockResolvedValue({ error: null });
+    const priceHistoryInserts: unknown[][] = [];
 
     dbFrom.mockImplementation((table: string) => {
       if (table === "polymarket_markets") {
@@ -382,6 +407,17 @@ describe("Polymarket Grok curation", () => {
                 select: vi.fn().mockResolvedValue({ data: [], error: null }),
               })),
             })),
+          })),
+        };
+      }
+      if (table === "polymarket_price_history") {
+        return {
+          insert: vi.fn(async (rows: unknown[]) => {
+            priceHistoryInserts.push(rows);
+            return { error: null };
+          }),
+          delete: vi.fn(() => ({
+            lt: vi.fn().mockResolvedValue({ count: 0, error: null }),
           })),
         };
       }
@@ -514,8 +550,12 @@ describe("Polymarket Grok curation", () => {
       },
     ]);
     expect(cacheUpsert).toHaveBeenCalledTimes(2);
+    expect(priceHistoryInserts).toHaveLength(1);
+    expect(priceHistoryInserts[0]).toHaveLength(1);
     expect(result).toMatchObject({
       marketsUpserted: 1,
+      priceSnapshotsWritten: 1,
+      priceHistorySwept: 0,
       portfoliosProcessed: 2,
       portfoliosSkipped: 0,
       curation: {
@@ -546,6 +586,14 @@ describe("Polymarket Grok curation", () => {
                 select: vi.fn().mockResolvedValue({ data: [], error: null }),
               })),
             })),
+          })),
+        };
+      }
+      if (table === "polymarket_price_history") {
+        return {
+          insert: vi.fn().mockResolvedValue({ error: null }),
+          delete: vi.fn(() => ({
+            lt: vi.fn().mockResolvedValue({ count: 0, error: null }),
           })),
         };
       }
@@ -932,6 +980,179 @@ describe("ETF constituents in portfolio profiles", () => {
       ],
     );
     expect(noQueue.enqueued).toEqual([]);
+  });
+});
+
+describe("polymarket price history failure independence", () => {
+  // Minimal fanout mocks: Gamma returns the same rotating event for each tag;
+  // an empty portfolios list stops the run after the price-history steps.
+  function stubGammaFetch() {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        return new Response(JSON.stringify([gammaEvent("0xrotating")]), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }),
+    );
+  }
+
+  function mockTables(priceHistory: Record<string, unknown>) {
+    dbFrom.mockImplementation((table: string) => {
+      if (table === "polymarket_markets") {
+        return {
+          upsert: vi.fn().mockResolvedValue({ error: null }),
+          update: vi.fn(() => ({
+            eq: vi.fn(() => ({
+              or: vi.fn(() => ({
+                select: vi.fn().mockResolvedValue({ data: [], error: null }),
+              })),
+            })),
+          })),
+        };
+      }
+      if (table === "polymarket_price_history") {
+        return priceHistory;
+      }
+      if (table === "portfolios") {
+        return { select: vi.fn().mockResolvedValue({ data: [], error: null }) };
+      }
+      throw new Error(`Unexpected table: ${table}`);
+    });
+  }
+
+  it("still runs the retention sweep when the snapshot insert fails", async () => {
+    stubGammaFetch();
+    const lt = vi.fn().mockResolvedValue({ count: 2, error: null });
+    mockTables({
+      insert: vi.fn().mockResolvedValue({ error: { message: "insert blew up" } }),
+      delete: vi.fn(() => ({ lt })),
+    });
+
+    const result = await runPolymarketFanout(env);
+
+    expect(lt).toHaveBeenCalledTimes(1);
+    expect(result.priceSnapshotsWritten).toBe(0);
+    expect(result.priceHistorySwept).toBe(2);
+    expect(result.errors).toEqual([
+      expect.stringMatching(/^price history insert: .*insert blew up/),
+    ]);
+    expect(result.marketsUpserted).toBe(1);
+  });
+
+  it("records a distinct sweep error without losing the snapshot insert", async () => {
+    stubGammaFetch();
+    const inserted: unknown[][] = [];
+    mockTables({
+      insert: vi.fn(async (rows: unknown[]) => {
+        inserted.push(rows);
+        return { error: null };
+      }),
+      delete: vi.fn(() => ({
+        lt: vi.fn().mockResolvedValue({ count: null, error: { message: "sweep blew up" } }),
+      })),
+    });
+
+    const result = await runPolymarketFanout(env);
+
+    expect(inserted).toHaveLength(1);
+    expect(result.priceSnapshotsWritten).toBe(1);
+    expect(result.priceHistorySwept).toBe(0);
+    expect(result.errors).toEqual([expect.stringMatching(/^price history sweep: .*sweep blew up/)]);
+  });
+});
+
+describe("polymarket price history", () => {
+  function flatMarket(overrides: Partial<Record<string, unknown>> = {}) {
+    return {
+      condition_id: "0xmarket",
+      event_id: "event-1",
+      event_slug: "fed-rates-2026",
+      event_title: "Fed rates in 2026?",
+      market_slug: "fed-rates-market",
+      question: "Will the Fed cut rates in 2026?",
+      tags: [],
+      outcomes: ["Yes", "No"],
+      outcome_prices: [0.55, 0.45],
+      liquidity: 1000,
+      volume_24hr: 500,
+      start_date: "2026-01-01T00:00:00Z",
+      end_date: "2026-12-31T00:00:00Z",
+      image: null,
+      active: true,
+      ...overrides,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any;
+  }
+
+  it("writes one snapshot per active market and skips inactive markets", async () => {
+    const inserted: unknown[][] = [];
+    const client = {
+      from: vi.fn(() => ({
+        insert: vi.fn(async (rows: unknown[]) => {
+          inserted.push(rows);
+          return { error: null };
+        }),
+      })),
+    };
+
+    const markets = [
+      flatMarket({ condition_id: "0xactive-1" }),
+      flatMarket({ condition_id: "0xactive-2" }),
+      flatMarket({ condition_id: "0xinactive", active: false }),
+    ];
+
+    const written = await insertPriceSnapshots(client as never, markets);
+
+    expect(written).toBe(2);
+    expect(inserted).toHaveLength(1);
+    expect(inserted[0]).toEqual([
+      { condition_id: "0xactive-1", outcome_prices: [0.55, 0.45], volume_24hr: 500 },
+      { condition_id: "0xactive-2", outcome_prices: [0.55, 0.45], volume_24hr: 500 },
+    ]);
+  });
+
+  it("returns 0 and skips the insert call when there are no active markets", async () => {
+    const client = { from: vi.fn() };
+
+    const written = await insertPriceSnapshots(client as never, [flatMarket({ active: false })]);
+
+    expect(written).toBe(0);
+    expect(client.from).not.toHaveBeenCalled();
+  });
+
+  it("propagates a batch insert failure", async () => {
+    const client = {
+      from: vi.fn(() => ({
+        insert: vi.fn().mockResolvedValue({ error: { message: "insert failed" } }),
+      })),
+    };
+
+    await expect(insertPriceSnapshots(client as never, [flatMarket()])).rejects.toThrow(
+      "insert failed",
+    );
+  });
+
+  it("sweeps rows older than the retention window", async () => {
+    const lt = vi.fn().mockResolvedValue({ count: 3, error: null });
+    const del = vi.fn(() => ({ lt }));
+    const client = { from: vi.fn(() => ({ delete: del })) };
+
+    const swept = await sweepExpiredPriceHistory(client as never);
+
+    expect(swept).toBe(3);
+    expect(del).toHaveBeenCalledWith({ count: "exact" });
+    const cutoffArg = lt.mock.calls[0][1] as string;
+    const cutoffAgeDays = (Date.now() - Date.parse(cutoffArg)) / 86_400_000;
+    expect(cutoffAgeDays).toBeCloseTo(PRICE_HISTORY_RETENTION_DAYS, 1);
+  });
+
+  it("propagates a sweep failure", async () => {
+    const lt = vi.fn().mockResolvedValue({ count: null, error: { message: "sweep failed" } });
+    const client = { from: vi.fn(() => ({ delete: vi.fn(() => ({ lt })) })) };
+
+    await expect(sweepExpiredPriceHistory(client as never)).rejects.toThrow("sweep failed");
   });
 });
 
