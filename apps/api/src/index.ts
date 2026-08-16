@@ -24,7 +24,13 @@ import {
   upsertEtfConstituents,
 } from "./feeds/etf-constituents";
 import { runNewsFanout } from "./feeds/news";
-import { runPolymarketFanout, NON_FINANCIAL_RE, TAG_IDS, isShortTermMarket } from "./feeds/polymarket";
+import {
+  runPolymarketFanout,
+  NON_FINANCIAL_RE,
+  TAG_IDS,
+  isShortTermMarket,
+  isNearCertainMarket,
+} from "./feeds/polymarket";
 import { generateRecap } from "./feeds/recaps";
 import { langsmithClient } from "./llm/langsmith";
 import type { RecapQueueMessage, RecapType } from "./feeds/recap-types";
@@ -5778,18 +5784,23 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
       const { data, error } = await auth.db
         .from("polymarket_markets")
         .select(
-          "condition_id, event_id, event_slug, event_title, market_slug, question, tags, outcomes, outcome_prices, liquidity, volume_24hr, end_date, image, active, fetched_at",
+          "condition_id, event_id, event_slug, event_title, market_slug, question, tags, outcomes, outcome_prices, liquidity, volume_24hr, start_date, end_date, image, active, fetched_at",
         )
         .contains("tags", JSON.stringify([{ id: tagId }]))
         .eq("active", true)
         .order("volume_24hr", { ascending: false })
-        .limit(limit * 2); // fetch extra to have room after client-side filter
+        .limit(limit * 2); // fetch extra to have room after client-side filters
 
       if (error) return json({ error: error.message }, 500);
 
-      // Apply NON_FINANCIAL_RE filter client-side (regex can't run in SQL)
+      // Apply the same filters as the personalized rotating path: strip
+      // sports/entertainment noise (NON_FINANCIAL_RE), weekly/daily
+      // price-gambling markets (isShortTermMarket), and markets that are
+      // resolved-in-all-but-name (isNearCertainMarket).
       const filtered = (data ?? [])
         .filter((m) => !NON_FINANCIAL_RE.test(m.question ?? ""))
+        .filter((m) => !isShortTermMarket(m.start_date, m.end_date))
+        .filter((m) => !isNearCertainMarket(m.outcome_prices))
         .slice(0, limit);
 
       return json(filtered, 200);
