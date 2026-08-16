@@ -39,7 +39,7 @@ npm run cf-typegen             # regenerate Cloudflare bindings types
 No monorepo-level build or test command exists; lint/build/test per-app.
 
 CI (`.github/workflows/ci.yml`) runs on every PR to `main`: `check-web` does lint + `tsc --noEmit`
-+ `npm test` in `apps/web`; `check-api` does `npm run typecheck` in `apps/api` only.
++ `npm test` in `apps/web`; `check-api` does `npm run typecheck` + `npm test` (vitest) in `apps/api`.
 
 ## Deployment rules
 
