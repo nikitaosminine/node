@@ -19,7 +19,7 @@ function makeFakeDb() {
       const call = { table, args: {} as Record<string, unknown[]> };
       fromCalls.push(call);
       const builder: Record<string, unknown> = {};
-      for (const method of ["select", "contains", "eq", "order"]) {
+      for (const method of ["select", "contains", "eq", "or", "order"]) {
         builder[method] = (...args: unknown[]) => {
           call.args[method] = args;
           return builder;

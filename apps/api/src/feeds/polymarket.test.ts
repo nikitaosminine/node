@@ -402,9 +402,7 @@ describe("Polymarket Grok curation", () => {
           }),
           delete: vi.fn(() => ({
             eq: vi.fn(() => ({
-              eq: vi.fn(() => ({
-                not: vi.fn().mockResolvedValue({ error: null }),
-              })),
+              not: vi.fn().mockResolvedValue({ error: null }),
             })),
           })),
         };
@@ -477,13 +475,6 @@ describe("Polymarket Grok curation", () => {
             { status: 200, headers: { "Content-Type": "application/json" } },
           );
         }
-        if (url.includes("/events/slug/")) {
-          const slug = url.split("/events/slug/")[1];
-          return new Response(
-            JSON.stringify(gammaEvent(`0xpinned-${slug}`, `event-${slug}`, slug)),
-            { status: 200, headers: { "Content-Type": "application/json" } },
-          );
-        }
         return new Response(JSON.stringify([gammaEvent("0xrotating")]), {
           status: 200,
           headers: { "Content-Type": "application/json" },
@@ -501,9 +492,8 @@ describe("Polymarket Grok curation", () => {
       model: "grok-4.6",
       reasoning_effort: "medium",
     });
-    expect(matchUpserts).toHaveLength(4);
-    expect(matchUpserts[0]).toHaveLength(4);
-    expect(matchUpserts[1]).toEqual([
+    expect(matchUpserts).toHaveLength(2);
+    expect(matchUpserts[0]).toEqual([
       {
         portfolio_id: "portfolio-1",
         condition_id: "0xrotating",
@@ -512,8 +502,7 @@ describe("Polymarket Grok curation", () => {
         is_pinned: false,
       },
     ]);
-    expect(matchUpserts[2]).toHaveLength(4);
-    expect(matchUpserts[3]).toEqual([
+    expect(matchUpserts[1]).toEqual([
       {
         portfolio_id: "portfolio-2",
         condition_id: "0xrotating",
@@ -524,8 +513,7 @@ describe("Polymarket Grok curation", () => {
     ]);
     expect(cacheUpsert).toHaveBeenCalledTimes(2);
     expect(result).toMatchObject({
-      marketsUpserted: 5,
-      pinnedSlugsFound: 4,
+      marketsUpserted: 1,
       portfoliosProcessed: 2,
       portfoliosSkipped: 0,
       curation: {
@@ -536,10 +524,78 @@ describe("Polymarket Grok curation", () => {
         cacheHits: 0,
         fallbacks: 1,
         portfoliosWithoutHoldings: 0,
-        pinnedMatchesWritten: 8,
         rotatingMatchesWritten: 2,
       },
       errors: ["portfolio portfolio-2: Grok scoring returned 0 results — using volume fallback"],
+    });
+  });
+
+  it("sweeps legacy pinned rows for portfolios without holdings", async () => {
+    const deleteFilters: Array<[string, unknown]> = [];
+    const matchUpsert = vi.fn().mockResolvedValue({ error: null });
+
+    dbFrom.mockImplementation((table: string) => {
+      if (table === "polymarket_markets") {
+        return {
+          upsert: vi.fn().mockResolvedValue({ error: null }),
+          update: vi.fn(() => ({
+            eq: vi.fn(() => ({
+              or: vi.fn(() => ({
+                select: vi.fn().mockResolvedValue({ data: [], error: null }),
+              })),
+            })),
+          })),
+        };
+      }
+      if (table === "portfolios") {
+        return {
+          select: vi.fn().mockResolvedValue({
+            data: [{ id: "portfolio-empty", user_id: "user-1" }],
+            error: null,
+          }),
+        };
+      }
+      if (table === "holdings") {
+        return {
+          select: vi.fn(() => ({
+            eq: vi.fn(() => ({
+              gt: vi.fn().mockResolvedValue({ data: [], error: null }),
+            })),
+          })),
+        };
+      }
+      if (table === "portfolio_polymarket_matches") {
+        const eq = vi.fn((column: string, value: unknown) => {
+          deleteFilters.push([column, value]);
+          return Object.assign(Promise.resolve({ error: null }), { eq });
+        });
+        return { upsert: matchUpsert, delete: vi.fn(() => ({ eq })) };
+      }
+      throw new Error(`Unexpected table: ${table}`);
+    });
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify([gammaEvent()]), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          }),
+      ),
+    );
+
+    const result = await runPolymarketFanout(env);
+
+    expect(deleteFilters).toEqual([
+      ["portfolio_id", "portfolio-empty"],
+      ["is_pinned", true],
+    ]);
+    expect(matchUpsert).not.toHaveBeenCalled();
+    expect(result).toMatchObject({
+      portfoliosProcessed: 1,
+      curation: { portfoliosWithoutHoldings: 1 },
+      errors: [],
     });
   });
 });
@@ -549,7 +605,6 @@ describe("upsertThenPrunePortfolioMatches", () => {
     condition_id: "0xmarket",
     score: 0.8,
     reason: "Rate sensitivity",
-    is_pinned: false,
   };
 
   it("never prunes existing rows when the replacement upsert fails", async () => {
@@ -574,9 +629,8 @@ describe("upsertThenPrunePortfolioMatches", () => {
       calls.push("prune");
       return { error: null };
     });
-    const secondEq = vi.fn(() => ({ not }));
-    const firstEq = vi.fn(() => ({ eq: secondEq }));
-    const remove = vi.fn(() => ({ eq: firstEq }));
+    const eq = vi.fn(() => ({ not }));
+    const remove = vi.fn(() => ({ eq }));
     const client = {
       from: vi.fn().mockReturnValueOnce({ upsert }).mockReturnValueOnce({ delete: remove }),
     };
@@ -584,6 +638,12 @@ describe("upsertThenPrunePortfolioMatches", () => {
     await upsertThenPrunePortfolioMatches(client as never, "portfolio-1", [selection]);
 
     expect(calls).toEqual(["upsert", "prune"]);
+    expect(upsert).toHaveBeenCalledWith(
+      [{ portfolio_id: "portfolio-1", ...selection, is_pinned: false }],
+      { onConflict: "portfolio_id,condition_id" },
+    );
+    expect(eq).toHaveBeenCalledTimes(1);
+    expect(eq).toHaveBeenCalledWith("portfolio_id", "portfolio-1");
     expect(not).toHaveBeenCalledWith("condition_id", "in", '("0xmarket")');
   });
 
