@@ -105,7 +105,11 @@ export function normalizeLangsmithRun(parent, child) {
     user_id: inputs.user_id ?? null,
     model: inputs.model ?? null,
     reasoning_effort: inputs.reasoning_effort ?? null,
-    candidate_count: inputs.candidate_count ?? candidates.length,
+    // Only the Worker-reported pool size counts as ground truth; never
+    // substitute the parsed candidate count, or hasFullContext would compare
+    // a partially parsed list against itself and always pass. null = the
+    // integrity check honestly has nothing to verify against.
+    candidate_count: typeof inputs.candidate_count === "number" ? inputs.candidate_count : null,
     profile_summary: profileSummary,
     candidates,
     picks,

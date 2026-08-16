@@ -90,6 +90,15 @@ describe("normalizeLangsmithRun", () => {
     expect(row.error).toBeNull();
   });
 
+  it("never synthesizes candidate_count from the parsed list", () => {
+    const parent = { id: "run-3", inputs: { portfolio_id: "p1" }, outputs: {}, error: null };
+    const row = normalizeLangsmithRun(parent, { inputs: { user: SAMPLE_USER_PROMPT } });
+    // A self-derived count would make the hasFullContext integrity check
+    // compare the parsed list against itself and always pass.
+    expect(row.candidate_count).toBeNull();
+    expect(row.candidates).toHaveLength(3);
+  });
+
   it("handles errored runs with no child", () => {
     const row = normalizeLangsmithRun({ id: "run-2", error: "boom", inputs: {} }, null);
     expect(row.error).toBe("boom");
