@@ -477,13 +477,6 @@ describe("Polymarket Grok curation", () => {
             { status: 200, headers: { "Content-Type": "application/json" } },
           );
         }
-        if (url.includes("/events/slug/")) {
-          const slug = url.split("/events/slug/")[1];
-          return new Response(
-            JSON.stringify(gammaEvent(`0xpinned-${slug}`, `event-${slug}`, slug)),
-            { status: 200, headers: { "Content-Type": "application/json" } },
-          );
-        }
         return new Response(JSON.stringify([gammaEvent("0xrotating")]), {
           status: 200,
           headers: { "Content-Type": "application/json" },
@@ -501,9 +494,8 @@ describe("Polymarket Grok curation", () => {
       model: "grok-4.6",
       reasoning_effort: "medium",
     });
-    expect(matchUpserts).toHaveLength(4);
-    expect(matchUpserts[0]).toHaveLength(4);
-    expect(matchUpserts[1]).toEqual([
+    expect(matchUpserts).toHaveLength(2);
+    expect(matchUpserts[0]).toEqual([
       {
         portfolio_id: "portfolio-1",
         condition_id: "0xrotating",
@@ -512,8 +504,7 @@ describe("Polymarket Grok curation", () => {
         is_pinned: false,
       },
     ]);
-    expect(matchUpserts[2]).toHaveLength(4);
-    expect(matchUpserts[3]).toEqual([
+    expect(matchUpserts[1]).toEqual([
       {
         portfolio_id: "portfolio-2",
         condition_id: "0xrotating",
@@ -524,8 +515,7 @@ describe("Polymarket Grok curation", () => {
     ]);
     expect(cacheUpsert).toHaveBeenCalledTimes(2);
     expect(result).toMatchObject({
-      marketsUpserted: 5,
-      pinnedSlugsFound: 4,
+      marketsUpserted: 1,
       portfoliosProcessed: 2,
       portfoliosSkipped: 0,
       curation: {
@@ -536,7 +526,6 @@ describe("Polymarket Grok curation", () => {
         cacheHits: 0,
         fallbacks: 1,
         portfoliosWithoutHoldings: 0,
-        pinnedMatchesWritten: 8,
         rotatingMatchesWritten: 2,
       },
       errors: ["portfolio portfolio-2: Grok scoring returned 0 results — using volume fallback"],
