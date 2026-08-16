@@ -1,4 +1,5 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
+import { deriveMarketTopics, mentionsTopic, type MarketTopic } from "./market-topics";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnySupabaseClient = SupabaseClient<any, any, any>;
@@ -14,6 +15,7 @@ interface Env {
 }
 
 interface HoldingRow {
+  id: string;
   ticker: string;
   isin: string | null;
   asset_type: string | null;
@@ -61,6 +63,11 @@ const FETCH_CONCURRENCY = 4;
 // Distinct-company window per run (rotating-cursor insurance for growth).
 // At current scale (~4 distinct companies) this covers everything every run.
 const FANOUT_WINDOW = 200;
+// Hard cap on ETF-derived market-topic searches per run (subrequest-budget guard).
+const MAX_MARKET_TOPICS = 12;
+// Per-topic keep cap (best Exa score first) so broad market queries don't
+// drown per-company coverage in the feed.
+const MARKET_RESULTS_KEPT = 12;
 
 // Source-quality allowlist: curated premium financial/news outlets. An allowlist
 // (not blocklist) decisively cuts the long tail of quote pages / SEO junk.
@@ -232,10 +239,10 @@ interface CompanyEntry {
 
 async function buildGlobalWorkList(
   client: AnySupabaseClient,
-): Promise<Map<string, CompanyEntry>> {
+): Promise<{ workList: Map<string, CompanyEntry>; fundHoldings: HoldingRow[] }> {
   const { data, error } = await client
     .from("holdings")
-    .select("ticker,isin,asset_type,name,quantity,portfolio_id")
+    .select("id,ticker,isin,asset_type,name,quantity,portfolio_id")
     .gt("quantity", 0);
 
   if (error) {
@@ -244,10 +251,16 @@ async function buildGlobalWorkList(
 
   const holdings = (data as HoldingRow[] | null) ?? [];
   const workList = new Map<string, CompanyEntry>();
+  const fundHoldings: HoldingRow[] = [];
 
   for (const h of holdings) {
-    if (isFundLike(h.asset_type, h.name)) continue;
     if (!h.name && !h.ticker && !h.isin) continue;
+    if (isFundLike(h.asset_type, h.name)) {
+      // Fund-like holdings don't get per-company queries — they map to 1-2
+      // market topics each via buildMarketWorkList instead.
+      fundHoldings.push(h);
+      continue;
+    }
 
     const key = canonicalKey(h);
     let entry = workList.get(key);
@@ -265,7 +278,160 @@ async function buildGlobalWorkList(
     if (h.isin) holder.isins.add(h.isin.toUpperCase());
   }
 
-  return workList;
+  return { workList, fundHoldings };
+}
+
+// ---------------------------------------------------------------------------
+// Market work-list: one entry per distinct market topic derived from the held
+// ETFs. Taxonomy data (etf_constituents + holding_geography_allocations) is
+// best-effort — read failures or empty tables degrade to the static
+// name/ticker override table in market-topics.ts.
+// ---------------------------------------------------------------------------
+
+interface MarketHolder {
+  etfTickers: Set<string>;
+  etfIsins: Set<string>;
+}
+
+interface MarketEntry {
+  canonicalKey: string; // `topic:${topicKey}`
+  topic: MarketTopic;
+  holders: Map<string, MarketHolder>; // portfolioId → the ETFs that map here
+}
+
+interface EtfConstituentRow {
+  etf_isin: string;
+  constituents: Array<{ ticker?: string; name?: string }> | null;
+  top_sectors: Array<{ sector: string; weight_pct: number }> | null;
+}
+
+interface GeographyRow {
+  holding_id: string;
+  country_code: string;
+  country_name: string;
+  weight_pct: number;
+}
+
+async function buildMarketWorkList(
+  client: AnySupabaseClient,
+  fundHoldings: HoldingRow[],
+): Promise<Map<string, MarketEntry>> {
+  const marketList = new Map<string, MarketEntry>();
+  if (fundHoldings.length === 0) return marketList;
+
+  // Collapse multi-lot / multi-portfolio rows of the same ETF (same canonical
+  // key logic as companies) so each distinct ETF is mapped once.
+  interface DistinctEtf {
+    ticker: string;
+    isin: string | null;
+    name: string;
+    holdingIds: string[];
+    holders: Map<string, MarketHolder>;
+  }
+  const etfs = new Map<string, DistinctEtf>();
+  for (const h of fundHoldings) {
+    const key = canonicalKey(h);
+    let etf = etfs.get(key);
+    if (!etf) {
+      etf = {
+        ticker: (h.ticker ?? "").toUpperCase(),
+        isin: h.isin ? h.isin.toUpperCase() : null,
+        name: h.name ?? "",
+        holdingIds: [],
+        holders: new Map(),
+      };
+      etfs.set(key, etf);
+    }
+    etf.holdingIds.push(h.id);
+    let holder = etf.holders.get(h.portfolio_id);
+    if (!holder) {
+      holder = { etfTickers: new Set(), etfIsins: new Set() };
+      etf.holders.set(h.portfolio_id, holder);
+    }
+    if (h.ticker) holder.etfTickers.add(h.ticker.toUpperCase());
+    if (h.isin) holder.etfIsins.add(h.isin.toUpperCase());
+  }
+
+  // Best-effort taxonomy seeds — 2 batched reads, errors ignored on purpose.
+  const isins = [...new Set([...etfs.values()].map((e) => e.isin).filter(Boolean))] as string[];
+  const holdingIds = fundHoldings.map((h) => h.id);
+
+  const constituentsByIsin = new Map<string, EtfConstituentRow>();
+  if (isins.length > 0) {
+    const { data } = await client
+      .from("etf_constituents")
+      .select("etf_isin,constituents,top_sectors")
+      .in("etf_isin", isins);
+    for (const row of (data as EtfConstituentRow[] | null) ?? []) {
+      constituentsByIsin.set(row.etf_isin, row);
+    }
+  }
+
+  const countryWeightsByHolding = new Map<string, GeographyRow[]>();
+  {
+    const { data } = await client
+      .from("holding_geography_allocations")
+      .select("holding_id,country_code,country_name,weight_pct")
+      .in("holding_id", holdingIds);
+    for (const row of (data as GeographyRow[] | null) ?? []) {
+      const list = countryWeightsByHolding.get(row.holding_id) ?? [];
+      list.push(row);
+      countryWeightsByHolding.set(row.holding_id, list);
+    }
+  }
+
+  for (const etf of etfs.values()) {
+    // Merge country weights across this ETF's holding rows — same ETF means
+    // the same research result, so keep the max weight per country.
+    const mergedCountries = new Map<string, GeographyRow>();
+    for (const id of etf.holdingIds) {
+      for (const cw of countryWeightsByHolding.get(id) ?? []) {
+        const prev = mergedCountries.get(cw.country_code);
+        if (!prev || Number(cw.weight_pct) > Number(prev.weight_pct)) {
+          mergedCountries.set(cw.country_code, cw);
+        }
+      }
+    }
+
+    const constituentRow = etf.isin ? constituentsByIsin.get(etf.isin) : undefined;
+    const topConstituents = (constituentRow?.constituents ?? [])
+      .slice(0, 10)
+      .map((c) => c.name || c.ticker || "")
+      .filter(Boolean);
+
+    const topics = deriveMarketTopics(
+      { ticker: etf.ticker, isin: etf.isin, name: etf.name },
+      {
+        topSectors: constituentRow?.top_sectors ?? null,
+        countryWeights: [...mergedCountries.values()].map((cw) => ({
+          country_code: cw.country_code,
+          country_name: cw.country_name,
+          weight_pct: Number(cw.weight_pct),
+        })),
+        topConstituents,
+      },
+    );
+
+    for (const topic of topics) {
+      const key = `topic:${topic.topicKey}`;
+      let entry = marketList.get(key);
+      if (!entry) {
+        entry = { canonicalKey: key, topic, holders: new Map() };
+        marketList.set(key, entry);
+      }
+      for (const [portfolioId, holder] of etf.holders) {
+        let merged = entry.holders.get(portfolioId);
+        if (!merged) {
+          merged = { etfTickers: new Set(), etfIsins: new Set() };
+          entry.holders.set(portfolioId, merged);
+        }
+        holder.etfTickers.forEach((t) => merged!.etfTickers.add(t));
+        holder.etfIsins.forEach((i) => merged!.etfIsins.add(i));
+      }
+    }
+  }
+
+  return marketList;
 }
 
 // ---------------------------------------------------------------------------
@@ -387,7 +553,14 @@ async function exaFetchSummaries(
 // a given article (published_at is fixed), so re-fetching computes the same value.
 // ---------------------------------------------------------------------------
 
-function buildClusterRow(result: ExaSearchResult, tickers: string[], isins: string[], summary: string) {
+function buildClusterRow(
+  result: ExaSearchResult,
+  tickers: string[],
+  isins: string[],
+  summary: string,
+  countries: string[] = [],
+  sectors: string[] = [],
+) {
   const url = result.url!;
   return {
     cluster_key: result.id ?? url,
@@ -402,7 +575,7 @@ function buildClusterRow(result: ExaSearchResult, tickers: string[], isins: stri
       exa_score: typeof result.score === "number" ? result.score : null,
     },
     see_also: [] as unknown[],
-    entities: { isins, tickers, countries: [] as string[], sectors: [] as string[] },
+    entities: { isins, tickers, countries, sectors },
     published_at: result.publishedDate!,
     fetched_at: new Date().toISOString(),
     expires_at: new Date(new Date(result.publishedDate!).getTime() + NEWS_WINDOW_MS).toISOString(),
@@ -473,13 +646,13 @@ function titleSignature(title: string, companyNames: string[]): Set<string> {
 // survives. Conservative: requires ≥3 shared distinctive tokens AND ≥0.6 containment.
 function dedupeByStory(
   pending: Map<string, PendingCluster>,
-  workList: Map<string, CompanyEntry>,
+  queryByKey: Map<string, string>,
 ): number {
   const keys = [...pending.keys()];
   const sig = new Map<string, Set<string>>();
   for (const key of keys) {
     const pc = pending.get(key)!;
-    const names = [...pc.companyKeys].map((ck) => workList.get(ck)?.query ?? "").filter(Boolean);
+    const names = [...pc.companyKeys].map((ck) => queryByKey.get(ck) ?? "").filter(Boolean);
     sig.set(key, titleSignature(pc.result.title ?? "", names));
   }
 
@@ -524,21 +697,29 @@ function dedupeByStory(
 // Main: runNewsFanout (two-phase, globally deduped, batched DB writes)
 //
 // Subrequest budget (free plan cap = 50):
-//   1  holdings query
-//   N  Exa calls (one per distinct company, N=4 today)
-//   1  batch cluster upsert (all at once)
-//   1  batch match upsert
-//   1  sweep
+//   1    holdings query
+//   0-2  ETF taxonomy reads (etf_constituents + geography; only when ETFs are held)
+//   N    company Exa searches (one per distinct company, N=4 today)
+//   ≤N   secondary company searches (only when premium results are thin)
+//   M    market-topic Exa searches (one per distinct ETF-derived topic,
+//        M ≤ MAX_MARKET_TOPICS=12, M≈4 today; no secondary tier for topics)
+//   ≤2   Exa contents calls (batched summaries, one per language FR/EN)
+//   1    batch cluster upsert (all at once)
+//   1    batch match upsert
+//   1    sweep
 //   ─────────────────
-//   N+4  total  (8 today, well under 50)
+//   worst case 2N+M+8 (= 20 today with N=4, M=4; ≤ 2N+20 at the topic cap),
+//   typical N+M+8 ≈ 16 — well under 50 at current scale.
 // ---------------------------------------------------------------------------
 
 interface PendingCluster {
   result: ExaSearchResult; // raw search result — summary fetched later via Contents API
   exaScore: number;
-  companyKeys: Set<string>;
+  companyKeys: Set<string>; // company canonical keys AND `topic:*` market keys
   tickers: Set<string>;
   isins: Set<string>;
+  countries: Set<string>; // from market topics; empty for company-only clusters
+  sectors: Set<string>;
 }
 
 interface ClusterAccum {
@@ -549,11 +730,13 @@ interface ClusterAccum {
 
 export async function runNewsFanout(env: Env): Promise<{
   distinctCompaniesQueried: number;
+  marketTopicsQueried: number;
   clustersUpserted: number;
   matchesUpserted: number;
   undatedDropped: number;
   lowValueDropped: number;
   offTargetDropped: number;
+  offTopicDropped: number;
   secondarySearches: number;
   dedupedAway: number;
   expiredSwept: number;
@@ -565,11 +748,13 @@ export async function runNewsFanout(env: Env): Promise<{
     console.warn("[news] EXA_SEARCH not set — skipping news fanout");
     return {
       distinctCompaniesQueried: 0,
+      marketTopicsQueried: 0,
       clustersUpserted: 0,
       matchesUpserted: 0,
       undatedDropped: 0,
       lowValueDropped: 0,
       offTargetDropped: 0,
+      offTopicDropped: 0,
       secondarySearches: 0,
       dedupedAway: 0,
       expiredSwept: 0,
@@ -581,7 +766,23 @@ export async function runNewsFanout(env: Env): Promise<{
   const client: AnySupabaseClient = createClient(env.SUPABASE_URL, env.SUPABASE_SERVICE_KEY);
 
   // --- Build global work-list (1 subrequest) ---------------------------------
-  const workList = await buildGlobalWorkList(client);
+  const { workList, fundHoldings } = await buildGlobalWorkList(client);
+
+  // --- Market work-list from held ETFs (0-2 subrequests) ---------------------
+  let marketList = new Map<string, MarketEntry>();
+  try {
+    marketList = await buildMarketWorkList(client, fundHoldings);
+  } catch (err) {
+    // Market coverage is additive — never let it break the company fanout.
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error("[news] market work-list failed:", msg);
+    errors.push(`market work-list: ${msg}`);
+  }
+  const marketEntries = [...marketList.values()]
+    .sort((a, b) => (a.canonicalKey < b.canonicalKey ? -1 : a.canonicalKey > b.canonicalKey ? 1 : 0))
+    .slice(0, MAX_MARKET_TOPICS);
+  // Drop capped-away entries so later match/dedup phases can't reference them.
+  marketList = new Map(marketEntries.map((e) => [e.canonicalKey, e]));
 
   const allCompanies = [...workList.values()].sort((a, b) =>
     a.canonicalKey < b.canonicalKey ? -1 : a.canonicalKey > b.canonicalKey ? 1 : 0,
@@ -592,11 +793,12 @@ export async function runNewsFanout(env: Env): Promise<{
   const startPublishedDate = new Date(Date.now() - NEWS_WINDOW_MS).toISOString();
   const userLocation = deriveUserLocation(workList);
 
-  // --- Phase 1: FETCH — collect results, no DB writes (N..2N subrequests) ----
+  // --- Phase 1: FETCH — collect results, no DB writes (N..2N+M subrequests) --
   const pendingClusters = new Map<string, PendingCluster>();
   let undatedDropped = 0;
   let lowValueDropped = 0;
   let offTargetDropped = 0;
+  let offTopicDropped = 0;
   let secondarySearches = 0;
 
   // Filter a result list for one company and add survivors to pendingClusters.
@@ -639,10 +841,58 @@ export async function runNewsFanout(env: Env): Promise<{
           companyKeys: new Set([company.canonicalKey]),
           tickers: new Set(tickerArr),
           isins: new Set(isinArr),
+          countries: new Set(),
+          sectors: new Set(),
         });
       }
     }
     return kept;
+  };
+
+  // Market analog of `ingest`: topic-relevance drift filter instead of the
+  // company-name filter, plus a per-topic keep cap (best Exa score first).
+  const ingestMarket = (results: ExaSearchResult[], entry: MarketEntry): void => {
+    const survivors: Array<{ result: ExaSearchResult; exaScore: number }> = [];
+    for (const result of results) {
+      if (!result.publishedDate || !result.url) {
+        undatedDropped++;
+        continue;
+      }
+      if (isLowValuePage(result.title ?? "", result.url)) {
+        lowValueDropped++;
+        continue;
+      }
+      if (!mentionsTopic(result.title ?? "", entry.topic)) {
+        offTopicDropped++;
+        continue;
+      }
+      survivors.push({
+        result,
+        exaScore: typeof result.score === "number" ? result.score : 0.5,
+      });
+    }
+
+    survivors.sort((a, b) => b.exaScore - a.exaScore);
+    for (const s of survivors.slice(0, MARKET_RESULTS_KEPT)) {
+      const clusterKey = s.result.id ?? s.result.url!;
+      const existing = pendingClusters.get(clusterKey);
+      if (existing) {
+        existing.exaScore = Math.max(existing.exaScore, s.exaScore);
+        existing.companyKeys.add(entry.canonicalKey);
+        entry.topic.countries.forEach((c) => existing.countries.add(c));
+        entry.topic.sectors.forEach((sec) => existing.sectors.add(sec));
+      } else {
+        pendingClusters.set(clusterKey, {
+          result: s.result,
+          exaScore: s.exaScore,
+          companyKeys: new Set([entry.canonicalKey]),
+          tickers: new Set(),
+          isins: new Set(),
+          countries: new Set(entry.topic.countries),
+          sectors: new Set(entry.topic.sectors),
+        });
+      }
+    }
   };
 
   await runWithConcurrency(companies, FETCH_CONCURRENCY, async (company) => {
@@ -691,8 +941,31 @@ export async function runNewsFanout(env: Env): Promise<{
     }
   });
 
+  // Market-topic searches (M subrequests) — premium allowlist only. Macro/market
+  // coverage is dense there, so no secondary tier: keeps the budget deterministic.
+  await runWithConcurrency(marketEntries, FETCH_CONCURRENCY, async (entry) => {
+    try {
+      const response = await exaSearchNews(
+        apiKey, entry.topic.query, startPublishedDate, userLocation, NEWS_INCLUDE_DOMAINS,
+      );
+      if (response.error) {
+        console.error(`[news] Exa API error for topic "${entry.topic.topicKey}":`, response.error);
+        errors.push(`${entry.canonicalKey}: Exa error ${response.error}`);
+        return;
+      }
+      ingestMarket(response.results ?? [], entry);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`[news] Exa market search failed for "${entry.topic.topicKey}":`, msg);
+      errors.push(`${entry.canonicalKey}: ${msg}`);
+    }
+  });
+
   // Collapse same-story duplicates across sources (keep best source tier).
-  const dedupedAway = dedupeByStory(pendingClusters, workList);
+  const queryByKey = new Map<string, string>();
+  for (const [key, entry] of workList) queryByKey.set(key, entry.query);
+  for (const [key, entry] of marketList) queryByKey.set(key, entry.topic.label);
+  const dedupedAway = dedupeByStory(pendingClusters, queryByKey);
 
   // --- Fetch summaries for survivors only, in the article's language ---------
   const EN_SUMMARY_QUERY =
@@ -718,7 +991,14 @@ export async function runNewsFanout(env: Env): Promise<{
 
   // --- Batch cluster upsert (1 subrequest) -----------------------------------
   const clusterRows = survivors.map((p) =>
-    buildClusterRow(p.result, [...p.tickers], [...p.isins], summaryByUrl.get(p.result.url!) ?? ""),
+    buildClusterRow(
+      p.result,
+      [...p.tickers],
+      [...p.isins],
+      summaryByUrl.get(p.result.url!) ?? "",
+      [...p.countries],
+      [...p.sectors],
+    ),
   );
   let clustersUpserted = 0;
   const clusterMap = new Map<string, ClusterAccum>();
@@ -749,25 +1029,46 @@ export async function runNewsFanout(env: Env): Promise<{
   }
 
   // --- Phase 2: SCORE + MATCH — build matchAccum (pure JS, 0 subrequests) ---
-  const matchAccum = new Map<string, Map<string, { keys: Set<string>; tickers: Set<string> }>>();
+  interface MatchAccum {
+    keys: Set<string>;
+    tickers: Set<string>;
+    etfTickers: Set<string>;
+    topicLabels: Set<string>;
+  }
+  const matchAccum = new Map<string, Map<string, MatchAccum>>();
+
+  const accFor = (portfolioId: string, clusterId: string): MatchAccum => {
+    let pMap = matchAccum.get(portfolioId);
+    if (!pMap) {
+      pMap = new Map();
+      matchAccum.set(portfolioId, pMap);
+    }
+    let acc = pMap.get(clusterId);
+    if (!acc) {
+      acc = { keys: new Set(), tickers: new Set(), etfTickers: new Set(), topicLabels: new Set() };
+      pMap.set(clusterId, acc);
+    }
+    return acc;
+  };
 
   for (const [clusterId, cluster] of clusterMap) {
     for (const ck of cluster.companyKeys) {
-      const entry = workList.get(ck);
-      if (!entry) continue;
-      for (const [portfolioId, holder] of entry.holders) {
-        let pMap = matchAccum.get(portfolioId);
-        if (!pMap) {
-          pMap = new Map();
-          matchAccum.set(portfolioId, pMap);
+      const companyEntry = workList.get(ck);
+      if (companyEntry) {
+        for (const [portfolioId, holder] of companyEntry.holders) {
+          const acc = accFor(portfolioId, clusterId);
+          acc.keys.add(ck);
+          holder.tickers.forEach((t) => acc.tickers.add(t));
         }
-        let acc = pMap.get(clusterId);
-        if (!acc) {
-          acc = { keys: new Set(), tickers: new Set() };
-          pMap.set(clusterId, acc);
-        }
+        continue;
+      }
+      const marketEntry = marketList.get(ck);
+      if (!marketEntry) continue;
+      for (const [portfolioId, holder] of marketEntry.holders) {
+        const acc = accFor(portfolioId, clusterId);
         acc.keys.add(ck);
-        holder.tickers.forEach((t) => acc!.tickers.add(t));
+        acc.topicLabels.add(marketEntry.topic.label);
+        holder.etfTickers.forEach((t) => acc.etfTickers.add(t));
       }
     }
   }
@@ -789,14 +1090,23 @@ export async function runNewsFanout(env: Env): Promise<{
         .map((ck) => workList.get(ck)?.query)
         .filter((n): n is string => Boolean(n));
 
+      // Company fields keep their exact V1 shape; ETF/market fields
+      // (reserved in migration 20260520195025) only appear on market matches.
+      const matchReason: Record<string, unknown> = {};
+      if (companyNames.length > 0) {
+        matchReason.matched_tickers = [...acc.tickers];
+        matchReason.matched_company_names = companyNames;
+      }
+      if (acc.topicLabels.size > 0) {
+        matchReason.matched_etfs = [...acc.etfTickers];
+        matchReason.matched_topics = [...acc.topicLabels];
+      }
+
       matchRows.push({
         portfolio_id: portfolioId,
         cluster_id: clusterId,
         score: computeMatchScore(cluster.exaScore, cluster.publishedAt, acc.keys.size),
-        match_reason: {
-          matched_tickers: [...acc.tickers],
-          matched_company_names: companyNames,
-        },
+        match_reason: matchReason,
       });
     }
   }
@@ -826,11 +1136,13 @@ export async function runNewsFanout(env: Env): Promise<{
 
   const result = {
     distinctCompaniesQueried: companies.length,
+    marketTopicsQueried: marketEntries.length,
     clustersUpserted,
     matchesUpserted,
     undatedDropped,
     lowValueDropped,
     offTargetDropped,
+    offTopicDropped,
     secondarySearches,
     dedupedAway,
     expiredSwept: expiredSwept ?? 0,
