@@ -2,7 +2,14 @@ import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { RunTree } from "langsmith";
 import { traceable, withRunTree } from "langsmith/traceable";
 import { langsmithClient } from "../llm/langsmith";
-import { buildPortfolioProfile, type HoldingRow } from "./portfolio-profile";
+import {
+  buildPortfolioProfile,
+  type EtfConstituentGap,
+  type HoldingRow,
+} from "./portfolio-profile";
+
+// Re-exported so callers/tests of the Polymarket fanout keep a single import site.
+export { buildPortfolioProfile, type EtfConstituentGap } from "./portfolio-profile";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnySupabaseClient = SupabaseClient<any, any, any>;
@@ -11,9 +18,22 @@ type AnySupabaseClient = SupabaseClient<any, any, any>;
 // Types
 // ---------------------------------------------------------------------------
 
+// Queue message for the geography/constituents enrichment consumer in
+// index.ts. Structurally compatible with GeographyQueueMessage so the
+// Worker's Queue<GeographyQueueMessage> binding satisfies Env below.
+interface EtfEnrichmentQueueMessage {
+  type: "geography_research";
+  portfolio_id: string;
+  holding_id: string;
+  reason: "polymarket_constituents";
+}
+
 interface Env {
   SUPABASE_URL: string;
   SUPABASE_SERVICE_KEY: string;
+  // Optional: when bound, ETF constituents coverage gaps found during profile
+  // builds are enqueued for background enrichment (never LLM work inline).
+  GEOGRAPHY_QUEUE?: { send(message: EtfEnrichmentQueueMessage): Promise<unknown> };
   GROK_MAIN_API_KEY?: string;
   GROK_SUB_API_KEY?: string;
   GROK_NORMALIZATION_API_KEY?: string;
@@ -677,6 +697,107 @@ async function computeHoldingsHash(holdings: HoldingRow[]): Promise<string> {
 // lives in ./portfolio-profile — shared with the news fanout.
 
 // ---------------------------------------------------------------------------
+// ETF constituents self-healing — when a profile build finds an ETF with no
+// etf_constituents row, enqueue the existing geography/constituents research
+// job for that holding instead of degrading curation silently. The LLM work
+// happens in the geography-queue consumer, never inline in the fanout.
+// ---------------------------------------------------------------------------
+
+// Re-enqueue backoff: an ETF whose research finds no constituents would
+// otherwise re-trigger an LLM web-search job on every 6h cache expiry, forever.
+const CONSTITUENT_ENRICHMENT_BACKOFF_HOURS = 24;
+
+export async function enqueueEtfConstituentsEnrichment(
+  env: Env,
+  client: AnySupabaseClient,
+  portfolioId: string,
+  gaps: EtfConstituentGap[],
+): Promise<{ enqueued: string[] }> {
+  const eligible = gaps.filter((gap) => {
+    if (!gap.isin || !gap.holdingId) {
+      // etf_constituents is keyed by ISIN — without one the row can never
+      // exist, so enqueueing would loop forever. Log once per profile build.
+      console.warn(
+        `[polymarket] ETF constituents gap for ${gap.ticker} (portfolio ${portfolioId}) not enqueueable: missing ${gap.isin ? "holding id" : "ISIN"}`,
+      );
+      return false;
+    }
+    return true;
+  });
+  if (eligible.length === 0) return { enqueued: [] };
+
+  if (!env.GEOGRAPHY_QUEUE) {
+    console.warn(
+      `[polymarket] GEOGRAPHY_QUEUE binding missing; ${eligible.length} ETF constituents enrichment jobs not queued`,
+    );
+    return { enqueued: [] };
+  }
+
+  // Dedupe/backoff via geography_research_jobs: skip any holding with job
+  // activity inside the backoff window, whatever its status — a queued or
+  // running job is already on it, and a recent completed/failed one means
+  // research ran and found nothing (retry daily, not on every fanout).
+  const holdingIds = eligible.map((gap) => String(gap.holdingId));
+  const { data: jobRows, error: jobsError } = (await client
+    .from("geography_research_jobs")
+    .select("holding_id,updated_at,started_at")
+    .in("holding_id", holdingIds)) as {
+    data: Array<{ holding_id: string; updated_at: string | null; started_at: string | null }> | null;
+    error: { message: string } | null;
+  };
+  if (jobsError) {
+    throw new Error(`[polymarket] constituents enrichment jobs lookup failed: ${jobsError.message}`);
+  }
+
+  const backoffCutoffMs = Date.now() - CONSTITUENT_ENRICHMENT_BACKOFF_HOURS * 3_600_000;
+  const recentlyActive = new Set<string>();
+  for (const job of jobRows ?? []) {
+    const activityMs = Date.parse(job.updated_at ?? job.started_at ?? "");
+    if (Number.isFinite(activityMs) && activityMs >= backoffCutoffMs) {
+      recentlyActive.add(String(job.holding_id));
+    }
+  }
+
+  const toEnqueue = eligible.filter((gap) => !recentlyActive.has(String(gap.holdingId)));
+  if (toEnqueue.length === 0) return { enqueued: [] };
+
+  const now = new Date().toISOString();
+  const { error: upsertError } = (await client.from("geography_research_jobs").upsert(
+    toEnqueue.map((gap) => ({
+      holding_id: gap.holdingId,
+      portfolio_id: portfolioId,
+      status: "queued",
+      reason: "polymarket_constituents",
+      last_error: null,
+      started_at: null,
+      finished_at: null,
+      updated_at: now,
+    })),
+    { onConflict: "holding_id" },
+  )) as { error: { message: string } | null };
+  if (upsertError) {
+    throw new Error(`[polymarket] constituents enrichment job upsert failed: ${upsertError.message}`);
+  }
+
+  await Promise.all(
+    toEnqueue.map((gap) =>
+      env.GEOGRAPHY_QUEUE!.send({
+        type: "geography_research",
+        portfolio_id: portfolioId,
+        holding_id: String(gap.holdingId),
+        reason: "polymarket_constituents",
+      }),
+    ),
+  );
+  for (const gap of toEnqueue) {
+    console.warn(
+      `[polymarket] ETF constituents coverage gap: ${gap.ticker} (${gap.isin}) has no etf_constituents row${gap.hasFallback ? " (hardcoded fallback used this run)" : ""} — enrichment enqueued`,
+    );
+  }
+  return { enqueued: toEnqueue.map((gap) => String(gap.holdingId)) };
+}
+
+// ---------------------------------------------------------------------------
 // Grok scoring
 // ---------------------------------------------------------------------------
 
@@ -934,7 +1055,7 @@ export async function runPolymarketFanout(
       // 6b. Holdings-hash cache check — skip Grok if holdings unchanged AND cache is fresh
       const { data: holdingsData } = await client
         .from("holdings")
-        .select("ticker,isin,asset_type,name,quantity")
+        .select("id,ticker,isin,asset_type,name,quantity")
         .eq("portfolio_id", portfolioId)
         .gt("quantity", 0);
 
@@ -994,8 +1115,25 @@ export async function runPolymarketFanout(
           reason: null,
         }));
       } else {
-        const { profileSummary } = await buildPortfolioProfile(client, portfolioId, holdings);
+        const { profileSummary, constituentGaps } = await buildPortfolioProfile(
+          client,
+          portfolioId,
+          holdings,
+        );
         profileSummaryForCache = profileSummary;
+
+        // Self-heal ETF constituents coverage in the background. Best-effort:
+        // an enqueue failure must never break this portfolio's curation.
+        if (constituentGaps.length > 0) {
+          try {
+            await enqueueEtfConstituentsEnrichment(env, client, portfolioId, constituentGaps);
+          } catch (err) {
+            console.error(
+              `[polymarket] constituents enrichment enqueue failed for portfolio ${portfolioId}:`,
+              err,
+            );
+          }
+        }
 
         // --- LangSmith tracing (additive, attributed to this portfolio/user) ---
         // One run per portfolio per fanout. portfolio_id + user_id in the inputs

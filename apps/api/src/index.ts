@@ -466,7 +466,15 @@ interface GeographyQueueMessage {
   portfolio_id: string;
   holding_id?: string;
   holding_ids?: string[];
-  reason?: "holding_change" | "transaction_import" | "snapshot_rebuild" | "manual_retry" | "monthly_refresh";
+  reason?:
+    | "holding_change"
+    | "transaction_import"
+    | "snapshot_rebuild"
+    | "manual_retry"
+    | "monthly_refresh"
+    // Polymarket profile build found an ETF with no etf_constituents row —
+    // re-research even if geography allocations already cover the holding.
+    | "polymarket_constituents";
 }
 
 type WorkerQueueMessage =
@@ -5919,7 +5927,9 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
         try {
           await researchPortfolioEtfGeography(env, message.body.portfolio_id, {
             holdingIds,
-            onlyPending: true,
+            // Constituent-gap jobs target holdings whose geography is often
+            // already covered — onlyPending would skip them without running.
+            onlyPending: message.body.reason !== "polymarket_constituents",
             reason: message.body.reason,
           });
           message.ack();

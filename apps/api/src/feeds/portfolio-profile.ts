@@ -12,6 +12,9 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 type AnySupabaseClient = SupabaseClient<any, any, any>;
 
 export interface HoldingRow {
+  // Optional so pre-fetched holdings from older call sites still type-check;
+  // ETFs without an id are skipped by the enrichment enqueue, nothing else.
+  id?: string | null;
   ticker: string;
   isin: string | null;
   asset_type: string | null;
@@ -33,8 +36,20 @@ export interface PortfolioProfile {
   countries: string[];
 }
 
-// ETF → top-5 underlying stocks for LLM/query context.
-// Used when etf_constituents table is empty (lazy-populated by geography job).
+/** ETF holding with no etf_constituents row — candidate for enrichment enqueue. */
+export interface EtfConstituentGap {
+  holdingId: string | null;
+  ticker: string;
+  isin: string | null;
+  name: string;
+  /** true when the hardcoded ETF_UNDERLYING_LABELS map still covers this ETF */
+  hasFallback: boolean;
+}
+
+// ETF → top-5 underlying stocks for LLM/query context. LAST-RESORT fallback
+// only: the etf_constituents table (lazy-populated by the geography job) is
+// the primary source, and any ETF missing from it gets enrichment enqueued —
+// so entries here merely bridge the gap until the DB row lands.
 // Keyed by exchange-qualified ETF ticker.
 export const ETF_UNDERLYING_LABELS: Record<string, { label: string; top5: string[] }> = {
   "PUST.PA": {
@@ -67,13 +82,17 @@ export async function buildPortfolioProfile(
   client: AnySupabaseClient,
   portfolioId: string,
   preloadedHoldings?: HoldingRow[],
-): Promise<{ profile: PortfolioProfile; profileSummary: string }> {
+): Promise<{
+  profile: PortfolioProfile;
+  profileSummary: string;
+  constituentGaps: EtfConstituentGap[];
+}> {
   const [holdingsResult, geoResult] = await Promise.all([
     preloadedHoldings
       ? Promise.resolve({ data: preloadedHoldings })
       : client
           .from("holdings")
-          .select("ticker,isin,asset_type,name,quantity")
+          .select("id,ticker,isin,asset_type,name,quantity")
           .eq("portfolio_id", portfolioId)
           .gt("quantity", 0),
     client
@@ -89,11 +108,21 @@ export async function buildPortfolioProfile(
     (geoResult.data as GeographyAllocationRow[] | null) ?? [];
 
   const directTickers: string[] = [];
-  const etfHoldings: Array<{ ticker: string; isin: string | null; name: string }> = [];
+  const etfHoldings: Array<{
+    holdingId: string | null;
+    ticker: string;
+    isin: string | null;
+    name: string;
+  }> = [];
 
   for (const h of holdings) {
     if (isFundLike(h.asset_type, h.name)) {
-      etfHoldings.push({ ticker: h.ticker, isin: h.isin, name: h.name });
+      etfHoldings.push({
+        holdingId: h.id == null ? null : String(h.id),
+        ticker: h.ticker,
+        isin: h.isin,
+        name: h.name,
+      });
     } else {
       directTickers.push(h.ticker);
     }
@@ -123,14 +152,29 @@ export async function buildPortfolioProfile(
   }
 
   const etfDescriptions: string[] = [];
+  const constituentGaps: EtfConstituentGap[] = [];
   for (const etf of etfHoldings) {
     const fromDb = etf.isin ? dbConstituentsByIsin[etf.isin] : undefined;
     const fromFallback = ETF_UNDERLYING_LABELS[etf.ticker];
-    const info = fromDb ?? fromFallback;
-    if (info) {
-      etfDescriptions.push(`${etf.ticker} (${info.label}: ${info.top5.join(", ")})`);
+    // The holding's display name beats the DB label (the raw ISIN) for Grok.
+    const label = etf.name && etf.name !== etf.ticker ? etf.name : null;
+    if (fromDb) {
+      etfDescriptions.push(`${etf.ticker} (${label ?? fromDb.label}: ${fromDb.top5.join(", ")})`);
     } else {
-      etfDescriptions.push(etf.ticker);
+      // No DB coverage — record the gap so the fanout can enqueue enrichment,
+      // and degrade gracefully in the meantime (hardcoded map, else name+ticker).
+      constituentGaps.push({
+        holdingId: etf.holdingId,
+        ticker: etf.ticker,
+        isin: etf.isin,
+        name: etf.name,
+        hasFallback: Boolean(fromFallback),
+      });
+      if (fromFallback) {
+        etfDescriptions.push(`${etf.ticker} (${fromFallback.label}: ${fromFallback.top5.join(", ")})`);
+      } else {
+        etfDescriptions.push(label ? `${etf.ticker} (${label})` : etf.ticker);
+      }
     }
   }
 
@@ -167,5 +211,5 @@ export async function buildPortfolioProfile(
     .filter(Boolean)
     .join(". ");
 
-  return { profile, profileSummary };
+  return { profile, profileSummary, constituentGaps };
 }
