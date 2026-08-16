@@ -255,10 +255,9 @@ export function isNearCertainMarket(outcomePrices: number[] | null | undefined):
 export const MIN_LIQUIDITY_USD = 2000;
 
 export function isBelowLiquidityFloor(liquidity: number | string | null | undefined): boolean {
-  if (liquidity == null) return false;
+  if (liquidity == null) return true;
   const value = Number(liquidity);
-  if (!Number.isFinite(value)) return false;
-  return value < MIN_LIQUIDITY_USD;
+  return !Number.isFinite(value) || value < MIN_LIQUIDITY_USD;
 }
 
 // ---------------------------------------------------------------------------
@@ -270,9 +269,8 @@ export function isBelowLiquidityFloor(liquidity: number | string | null | undefi
 //   - duration >= MIN_MARKET_DURATION_DAYS (isShortTermMarket)
 //   - leading outcome < MAX_CERTAIN_PROB (isNearCertainMarket)
 //   - liquidity >= MIN_LIQUIDITY_USD (isBelowLiquidityFloor)
-// Missing metadata (no end_date, no start_date, no liquidity) never fails a
-// check on its own — matches the existing "unknown duration passes" policy so
-// we never over-filter on incomplete Gamma data.
+// The end date and liquidity gates fail closed when Gamma omits or corrupts
+// either value. Unknown duration keeps the existing helper behavior.
 // ---------------------------------------------------------------------------
 
 export interface MarketEligibilityInput {
@@ -283,10 +281,8 @@ export interface MarketEligibilityInput {
 }
 
 export function isEligibleMarket(market: MarketEligibilityInput, now: Date = new Date()): boolean {
-  if (market.end_date) {
-    const endMs = new Date(market.end_date).getTime();
-    if (Number.isFinite(endMs) && endMs <= now.getTime()) return false;
-  }
+  const endMs = market.end_date ? new Date(market.end_date).getTime() : Number.NaN;
+  if (!Number.isFinite(endMs) || endMs <= now.getTime()) return false;
   if (isShortTermMarket(market.start_date, market.end_date)) return false;
   if (isNearCertainMarket(market.outcome_prices)) return false;
   if (isBelowLiquidityFloor(market.liquidity)) return false;
@@ -1041,7 +1037,6 @@ export async function runPolymarketFanout(
   const fanoutNow = new Date();
   const consensusByEvent = new Map<string, FlatMarket>();
   for (const m of allMarkets) {
-    if (pinnedConditionIds.has(m.condition_id)) continue;
     if (!isEligibleMarket(m, fanoutNow)) continue;
     const key = m.event_id || m.condition_id;
     const existing = consensusByEvent.get(key);

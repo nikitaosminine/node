@@ -41,7 +41,7 @@ import type {
   Direction,
 } from "./recap-types";
 import { NEWS_INCLUDE_DOMAINS, NEWS_INCLUDE_DOMAINS_SECONDARY } from "./news";
-import { isEligibleMarket } from "./polymarket";
+import { isEligibleMarket, type MarketEligibilityInput } from "./polymarket";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnySupabaseClient = SupabaseClient<any, any, any>;
@@ -61,6 +61,17 @@ interface Env {
   LANGSMITH_ENDPOINT?: string;
   // Required for org-scoped API keys (sent as x-tenant-id).
   LANGSMITH_WORKSPACE_ID?: string;
+}
+
+export interface PolymarketWatchRow {
+  polymarket_markets?: MarketEligibilityInput | null;
+}
+
+export function filterEligiblePolymarketWatchRows<T extends PolymarketWatchRow>(
+  rows: T[],
+  now: Date = new Date(),
+): T[] {
+  return rows.filter((row) => isEligibleMarket(row.polymarket_markets ?? {}, now)).slice(0, 5);
 }
 
 function db(env: Env): AnySupabaseClient {
@@ -351,7 +362,7 @@ interface RecapRowLite {
 // Step 1+2: gather facts + retrieve narrative
 // ---------------------------------------------------------------------------
 
-async function gatherContext(
+export async function gatherContext(
   env: Env,
   recap: RecapRowLite,
 ): Promise<GatheredContext | null> {
@@ -527,10 +538,7 @@ async function gatherContext(
     .order("score", { ascending: false, nullsFirst: false })
     .limit(20);
 
-  const watchRows = (watchRowsRaw ?? [])
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    .filter((r) => isEligibleMarket((r as any).polymarket_markets ?? {}))
-    .slice(0, 5);
+  const watchRows = filterEligiblePolymarketWatchRows(watchRowsRaw ?? []);
 
   // Geography exposure for the watch prompt (US% and notable ETFs).
   const { data: geoRows } = await client

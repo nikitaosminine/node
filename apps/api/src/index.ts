@@ -5565,7 +5565,7 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
            polymarket_markets!inner(
              condition_id, event_id, event_slug, event_title, market_slug,
              question, tags, outcomes, outcome_prices, liquidity, volume_24hr,
-             end_date, image, active, fetched_at
+             start_date, end_date, image, active, fetched_at
            )`,
         )
         .eq("portfolio_id", portfolioId)
@@ -5578,11 +5578,13 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
         )
         .order("is_pinned", { ascending: false })
         .order("score", { ascending: false, nullsFirst: false })
-        .limit(30);
+        .limit(60);
 
       if (error) return json({ error: error.message }, 500);
 
-      const rows = data ?? [];
+      const rows = (data ?? [])
+        .filter((r) => isEligibleMarket((r as any).polymarket_markets ?? {}))
+        .slice(0, 30);
       const pinned = rows.filter((r) => r.is_pinned);
       const rotating = rows.filter((r) => !r.is_pinned);
       return json({ pinned, rotating }, 200);

@@ -67,7 +67,7 @@ function marketRow(overrides: Record<string, unknown>) {
     liquidity: 5000,
     volume_24hr: 500,
     start_date: "2026-01-01T00:00:00Z",
-    end_date: "2026-12-31T00:00:00Z",
+    end_date: "2027-12-31T00:00:00Z",
     image: null,
     active: true,
     fetched_at: "2026-08-01T00:00:00Z",

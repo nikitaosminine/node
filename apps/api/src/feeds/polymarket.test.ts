@@ -47,7 +47,7 @@ function gammaEvent(conditionId = "0xmarket", eventId = "event-1", eventSlug = "
         liquidity: 5000,
         volume24hr: 500,
         startDate: "2026-01-01T00:00:00Z",
-        endDate: "2026-12-31T00:00:00Z",
+        endDate: "2027-12-31T00:00:00Z",
         active: true,
       },
     ],
@@ -120,9 +120,10 @@ describe("isBelowLiquidityFloor", () => {
     expect(isBelowLiquidityFloor(5000)).toBe(false);
   });
 
-  it("keeps markets with missing liquidity (never over-filter on incomplete data)", () => {
-    expect(isBelowLiquidityFloor(null)).toBe(false);
-    expect(isBelowLiquidityFloor(undefined)).toBe(false);
+  it("rejects markets with missing or invalid liquidity", () => {
+    expect(isBelowLiquidityFloor(null)).toBe(true);
+    expect(isBelowLiquidityFloor(undefined)).toBe(true);
+    expect(isBelowLiquidityFloor("not-a-number")).toBe(true);
   });
 });
 
@@ -160,13 +161,19 @@ describe("isEligibleMarket", () => {
     expect(isEligibleMarket({ ...baseMarket, liquidity: 333 }, now)).toBe(false);
   });
 
-  it("does not reject on missing metadata", () => {
+  it("rejects markets with missing or invalid required metadata", () => {
     expect(
       isEligibleMarket(
         { start_date: null, end_date: null, outcome_prices: null, liquidity: null },
         now,
       ),
-    ).toBe(true);
+    ).toBe(false);
+    expect(
+      isEligibleMarket({ ...baseMarket, end_date: "not-a-date" }, now),
+    ).toBe(false);
+    expect(
+      isEligibleMarket({ ...baseMarket, liquidity: "not-a-number" }, now),
+    ).toBe(false);
   });
 });
 
@@ -296,6 +303,41 @@ describe("fetchCandidateMarkets", () => {
 
     await expect(runPolymarketFanout(env)).rejects.toThrow("Gamma candidate pool is empty");
     expect(dbFrom).not.toHaveBeenCalled();
+  });
+
+  it("does not let an ineligible market enter the fanout candidate pool", async () => {
+    dbFrom.mockImplementation((table: string) => {
+      if (table === "polymarket_markets") {
+        return {
+          upsert: vi.fn().mockResolvedValue({ error: null }),
+          update: vi.fn(() => ({
+            eq: vi.fn(() => ({
+              or: vi.fn(() => ({
+                select: vi.fn().mockResolvedValue({ data: [], error: null }),
+              })),
+            })),
+          })),
+        };
+      }
+      throw new Error(`Unexpected table: ${table}`);
+    });
+
+    const ineligibleEvent = gammaEvent();
+    ineligibleEvent.markets[0].liquidity = 333;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        new Response(JSON.stringify([ineligibleEvent]), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      ),
+    );
+
+    await expect(runPolymarketFanout(env)).rejects.toThrow(
+      "no eligible rotating candidates remained",
+    );
+    expect(dbFrom).not.toHaveBeenCalledWith("portfolios");
   });
 });
 
