@@ -15,7 +15,8 @@ POLYMARKET_GROK_REASONING_EFFORT = "medium"
 # wrangler secret put GROK_SUB_API_KEY
 # wrangler secret put GROK_NORMALIZATION_API_KEY
 # wrangler secret put FRED_API_KEY
-# wrangler secret put EXA_SEARCH
+# wrangler secret put EXA_SEARCH   (recap agent search; news fanout uses Firecrawl)
+# wrangler secret put FIRECRAWL_API_KEY   (news fanout search + inline summaries; store the full fc-... form — code normalizes a bare token, but keep the secret canonical)
 # wrangler secret put GEMINI_API_KEY   (daily/weekly recaps)
 # wrangler secret put ADMIN_SECRET   (REQUIRED: gates /api/_debug/* and /api/agent/scheduled/fanout)
 # Optional:

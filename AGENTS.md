@@ -105,7 +105,7 @@ Migration files: `supabase/migrations/` — timestamped SQL, applied in order.
 
 **AI models (xAI Grok):** `grok-4.20-0309-reasoning` for thesis agent and benchmarks; `grok-4-1-fast-non-reasoning` for sub-agent and broker-CSV normalization; `grok-4.3` for expense-CSV normalization (`GROK_NORMALIZATION_MODEL`; `reasoning_effort` via `GROK_NORMALIZATION_EFFORT`, default `none` — reasoning over a whole CSV in one call exceeds the 90s timeout); `grok-4.6` with medium reasoning for Polymarket curation (`POLYMARKET_GROK_MODEL`, `POLYMARKET_GROK_REASONING_EFFORT`); Gemini for recaps.
 
-**Market data:** Yahoo Finance (quotes/search), FRED (economic indicators), Exa Search (web), Polymarket Gamma (prediction markets).
+**Market data:** Yahoo Finance (quotes/search), FRED (economic indicators), Firecrawl (news fanout search + summaries), Exa Search (recap agent web search), Polymarket Gamma (prediction markets).
 
 ## Environment variables
 
@@ -118,7 +118,7 @@ NEXT_PUBLIC_MIXPANEL_TOKEN=                  # optional
 ```
 
 API secrets (set via `npx wrangler secret put`):
-`SUPABASE_SERVICE_KEY`, `SUPABASE_ANON_KEY`, `GROK_MAIN_API_KEY`, `GROK_SUB_API_KEY`, `GROK_NORMALIZATION_API_KEY`, `FRED_API_KEY`, `EXA_SEARCH`, `GEMINI_API_KEY`, `ADMIN_SECRET`
+`SUPABASE_SERVICE_KEY`, `SUPABASE_ANON_KEY`, `GROK_MAIN_API_KEY`, `GROK_SUB_API_KEY`, `GROK_NORMALIZATION_API_KEY`, `FRED_API_KEY`, `EXA_SEARCH` (recaps), `FIRECRAWL_API_KEY` (news fanout; `fc-`-prefixed), `GEMINI_API_KEY`, `ADMIN_SECRET`
 
 ## Beta access
 
