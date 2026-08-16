@@ -11,6 +11,15 @@ vi.mock("@/integrations/supabase/client", () => ({
   },
 }));
 
+vi.mock("@/lib/polymarket-freshness", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/polymarket-freshness")>();
+  return {
+    ...actual,
+    isFallbackMatch: (match: { score: number | null; reason: string | null }) =>
+      match.score === 0 && match.reason === "Volume fallback",
+  };
+});
+
 type MarketInput = {
   condition_id: string;
   question: string;
@@ -86,7 +95,7 @@ describe("PolymarketFeed", () => {
       end_date: "2026-08-16T11:00:00.000Z",
     });
     mockFeedResponse([
-      match(fallback, 0, null),
+      match(fallback, 0, "Volume fallback"),
       match(curated, 0.8, "Relevant to your holdings"),
     ]);
 
@@ -99,9 +108,7 @@ describe("PolymarketFeed", () => {
     const fallbackRow = screen.getByText("Fallback market").closest("a");
     expect(fallbackRow).not.toBeNull();
     expect(fallbackRow).toHaveClass("opacity-70");
-    expect(
-      within(fallbackRow as HTMLElement).queryByText("Relevant to your holdings"),
-    ).toBeNull();
+    expect(within(fallbackRow as HTMLElement).queryByText("Volume fallback")).toBeNull();
 
     const curatedRow = screen.getByText("Curated market").closest("a");
     expect(curatedRow).not.toBeNull();
