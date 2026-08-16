@@ -268,15 +268,9 @@ export function aggregateObservationsByCompany(
   return out;
 }
 
-// Cluster-id lists kept on the rolling row, newest first, bounded so the
-// jsonb columns don't grow unbounded across months of fanout runs. Two caps:
-// evidence_cluster_ids is a short display/API list, while scored_cluster_ids
-// is the EWMA re-observation dedupe set and must comfortably exceed the
-// realistic per-company cluster count within the 7-day TTL window
-// (RESULTS_PER_COMPANY=25 per fanout, several fanouts/day) so display-cap
-// eviction can never resurrect an already-observed cluster.
+// evidence_cluster_ids is a short, count-capped display/API list — newest
+// first, bounded so the jsonb column doesn't grow unbounded.
 export const MAX_EVIDENCE_CLUSTER_IDS = 10;
-export const MAX_SCORED_CLUSTER_IDS = 200;
 
 function capIds(existing: string[], fresh: string[], max: number): string[] {
   const merged = [...fresh, ...existing.filter((id) => !fresh.includes(id))];
@@ -287,6 +281,36 @@ export function mergeEvidenceClusterIds(existing: string[], fresh: string[]): st
   return capIds(existing, fresh, MAX_EVIDENCE_CLUSTER_IDS);
 }
 
-export function mergeScoredClusterIds(existing: string[], fresh: string[]): string[] {
-  return capIds(existing, fresh, MAX_SCORED_CLUSTER_IDS);
+// scored_cluster_ids is the EWMA re-observation dedupe set. A fixed count
+// cap here is unsafe: a heavily-covered company can genuinely accumulate
+// more distinct in-window clusters than any comfortable constant bounds
+// (RESULTS_PER_COMPANY=25 per fanout x an hourly cron adds up fast), and
+// once a cap evicts an id the article resurfaces as a "new" observation and
+// re-fires the EWMA — the exact bug this dedupe set exists to prevent. So
+// entries are pruned by age instead of count: a cluster older than the news
+// TTL window can never resurface as an Exa result again (news.ts bounds its
+// search window the same way via NEWS_WINDOW_MS), so it's safe to drop from
+// the dedupe set once it ages out. MAX_SCORED_CLUSTER_IDS is kept only as a
+// defensive backstop against unbounded growth from clock skew or a stuck
+// pruning bug — it should never bind in practice.
+export const MAX_SCORED_CLUSTER_IDS = 2000;
+
+export interface ScoredClusterRecord {
+  id: string;
+  scoredAt: string;
+}
+
+export function mergeScoredClusterIds(
+  existing: ScoredClusterRecord[],
+  fresh: string[],
+  now: number,
+  ttlMs: number,
+): ScoredClusterRecord[] {
+  const freshSet = new Set(fresh);
+  const merged: ScoredClusterRecord[] = [
+    ...fresh.map((id) => ({ id, scoredAt: new Date(now).toISOString() })),
+    ...existing.filter((r) => !freshSet.has(r.id)),
+  ];
+  const withinWindow = merged.filter((r) => now - new Date(r.scoredAt).getTime() <= ttlMs);
+  return withinWindow.slice(0, MAX_SCORED_CLUSTER_IDS);
 }

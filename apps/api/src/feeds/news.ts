@@ -6,6 +6,7 @@ import {
   mergeScoredClusterIds,
   scoreClusterSentiments,
   type ClusterSentiment,
+  type ScoredClusterRecord,
   type SentimentCompanyRef,
   type SentimentTarget,
 } from "./sentiment";
@@ -86,20 +87,43 @@ const FANOUT_WINDOW = 200;
 // the allowlist works; only add a domain back after confirming Exa still indexes
 // it (a single search with includeDomains:[domain] 403s if it doesn't).
 export const NEWS_INCLUDE_DOMAINS = [
-  "ft.com", "economist.com",
-  "barrons.com", "marketwatch.com", "cnbc.com", "seekingalpha.com",
-  "morningstar.com", "imf.org", "worldbank.org", "bis.org", "ecb.europa.eu",
-  "banque-france.fr", "sec.gov", "amf-france.org", "oecd.org", "alphaville.ft.com",
-  "institutionalinvestor.com", "pensions-investments.com",
-  "zerohedge.com", "calculatedriskblog.com", "lesechos.fr", "latribune.fr",
-  "boursier.com", "boursorama.com", "challenges.fr", "euronews.com",
+  "ft.com",
+  "economist.com",
+  "barrons.com",
+  "marketwatch.com",
+  "cnbc.com",
+  "seekingalpha.com",
+  "morningstar.com",
+  "imf.org",
+  "worldbank.org",
+  "bis.org",
+  "ecb.europa.eu",
+  "banque-france.fr",
+  "sec.gov",
+  "amf-france.org",
+  "oecd.org",
+  "alphaville.ft.com",
+  "institutionalinvestor.com",
+  "pensions-investments.com",
+  "zerohedge.com",
+  "calculatedriskblog.com",
+  "lesechos.fr",
+  "latribune.fr",
+  "boursier.com",
+  "boursorama.com",
+  "challenges.fr",
+  "euronews.com",
 ];
 
 // Secondary (broader / small-cap-friendly) allowlist — only searched when the
 // premium list yields too few on-target results for a company. Tune as needed.
 export const NEWS_INCLUDE_DOMAINS_SECONDARY = [
-  "investir.lesechos.fr", "capital.fr", "usinenouvelle.com", "agefi.fr",
-  "tradingsat.com", "bfmtv.com",
+  "investir.lesechos.fr",
+  "capital.fr",
+  "usinenouvelle.com",
+  "agefi.fr",
+  "tradingsat.com",
+  "bfmtv.com",
 ];
 
 // Trigger a secondary search when fewer than this many on-target results come
@@ -110,12 +134,28 @@ const MIN_ONTARGET = 4;
 // Source-quality priority for cross-story dedup (lower = better, kept on merge).
 // Exa's score is relevance, NOT authority, so quality ranking must be explicit.
 const SOURCE_TIER: Record<string, number> = {
-  "reuters.com": 1, "bloomberg.com": 1, "ft.com": 1, "wsj.com": 1, "economist.com": 1, "apnews.com": 1,
+  "reuters.com": 1,
+  "bloomberg.com": 1,
+  "ft.com": 1,
+  "wsj.com": 1,
+  "economist.com": 1,
+  "apnews.com": 1,
   // Top French sources — human-written, high quality for this portfolio.
-  "lesechos.fr": 1, "boursier.com": 1, "boursorama.com": 1,
-  "barrons.com": 2, "cnbc.com": 2, "marketwatch.com": 2, "latribune.fr": 2,
-  "sec.gov": 2, "ecb.europa.eu": 2, "imf.org": 2, "amf-france.org": 2,
-  "seekingalpha.com": 3, "morningstar.com": 3, "challenges.fr": 3, "euronews.com": 3,
+  "lesechos.fr": 1,
+  "boursier.com": 1,
+  "boursorama.com": 1,
+  "barrons.com": 2,
+  "cnbc.com": 2,
+  "marketwatch.com": 2,
+  "latribune.fr": 2,
+  "sec.gov": 2,
+  "ecb.europa.eu": 2,
+  "imf.org": 2,
+  "amf-france.org": 2,
+  "seekingalpha.com": 3,
+  "morningstar.com": 3,
+  "challenges.fr": 3,
+  "euronews.com": 3,
 };
 function sourceTier(source: string): number {
   return SOURCE_TIER[source.replace(/^www\./i, "")] ?? 99;
@@ -123,9 +163,19 @@ function sourceTier(source: string): number {
 
 // French-language sources → drive the language of the generated summary.
 const FRENCH_DOMAINS = new Set([
-  "lesechos.fr", "investir.lesechos.fr", "boursier.com", "boursorama.com", "latribune.fr",
-  "challenges.fr", "capital.fr", "usinenouvelle.com", "agefi.fr", "tradingsat.com",
-  "bfmtv.com", "banque-france.fr", "amf-france.org",
+  "lesechos.fr",
+  "investir.lesechos.fr",
+  "boursier.com",
+  "boursorama.com",
+  "latribune.fr",
+  "challenges.fr",
+  "capital.fr",
+  "usinenouvelle.com",
+  "agefi.fr",
+  "tradingsat.com",
+  "bfmtv.com",
+  "banque-france.fr",
+  "amf-france.org",
 ]);
 function isFrenchSource(source: string): boolean {
   const s = source.replace(/^www\./i, "");
@@ -135,9 +185,39 @@ function isFrenchSource(source: string): boolean {
 // English stopwords + filler — dropped from title signatures so dedup compares
 // the distinctive tokens of a story.
 const STOPWORDS = new Set([
-  "the", "a", "an", "of", "for", "to", "in", "on", "and", "or", "as", "at", "by",
-  "from", "with", "is", "are", "be", "its", "it", "that", "this", "se", "sa",
-  "inc", "ltd", "plc", "corp", "co", "group", "news", "update", "latest",
+  "the",
+  "a",
+  "an",
+  "of",
+  "for",
+  "to",
+  "in",
+  "on",
+  "and",
+  "or",
+  "as",
+  "at",
+  "by",
+  "from",
+  "with",
+  "is",
+  "are",
+  "be",
+  "its",
+  "it",
+  "that",
+  "this",
+  "se",
+  "sa",
+  "inc",
+  "ltd",
+  "plc",
+  "corp",
+  "co",
+  "group",
+  "news",
+  "update",
+  "latest",
 ]);
 
 // ---------------------------------------------------------------------------
@@ -168,8 +248,19 @@ function canonicalKey(h: HoldingRow): string {
 
 // Map exchange suffix → ISO 2-letter country code for Exa userLocation
 const EXCHANGE_COUNTRY: Record<string, string> = {
-  PA: "FR", DE: "DE", AS: "NL", MI: "IT", L: "GB", SW: "CH",
-  MC: "ES", BE: "BE", VI: "AT", CO: "DK", HE: "FI", ST: "SE", OL: "NO",
+  PA: "FR",
+  DE: "DE",
+  AS: "NL",
+  MI: "IT",
+  L: "GB",
+  SW: "CH",
+  MC: "ES",
+  BE: "BE",
+  VI: "AT",
+  CO: "DK",
+  HE: "FI",
+  ST: "SE",
+  OL: "NO",
 };
 
 function deriveUserLocation(workList: Map<string, CompanyEntry>): string {
@@ -198,7 +289,8 @@ function hostname(url: string): string {
 // Drop stock-quote / price-chart / data pages with no editorial content, even
 // when they sit on an allowed news domain and pass category:"news".
 // Catches e.g. "Legrand ADR Stock Quote - MarketWatch" and markets.ft.com data pages.
-const LOW_VALUE_TITLE = /stock quote|share price|markets data|stock price|\bADR\b.*\bquote\b|cours de bourse|quote \(|price target|^subscribe to (read|continue)|^log ?in|^sign ?in/i;
+const LOW_VALUE_TITLE =
+  /stock quote|share price|markets data|stock price|\bADR\b.*\bquote\b|cours de bourse|quote \(|price target|^subscribe to (read|continue)|^log ?in|^sign ?in/i;
 const LOW_VALUE_PATH = /\/(quote|quotes|cours|stock-quote|share-price|chart)\b/i;
 
 function isLowValuePage(title: string, url: string): boolean {
@@ -245,9 +337,7 @@ interface CompanyEntry {
   holders: Map<string, CompanyHolder>; // portfolioId → that portfolio's identifiers
 }
 
-async function buildGlobalWorkList(
-  client: AnySupabaseClient,
-): Promise<Map<string, CompanyEntry>> {
+async function buildGlobalWorkList(client: AnySupabaseClient): Promise<Map<string, CompanyEntry>> {
   const { data, error } = await client
     .from("holdings")
     .select("ticker,isin,asset_type,name,quantity,portfolio_id")
@@ -318,7 +408,14 @@ async function exaSearchNews(
   } catch (err) {
     if (attempt >= MAX_RETRIES) throw err;
     await sleep(RETRY_BASE_MS * 2 ** (attempt - 1));
-    return exaSearchNews(apiKey, query, startPublishedDate, userLocation, includeDomains, attempt + 1);
+    return exaSearchNews(
+      apiKey,
+      query,
+      startPublishedDate,
+      userLocation,
+      includeDomains,
+      attempt + 1,
+    );
   }
 
   // Retry only transient failures. 400/401/422 are deterministic — fail fast.
@@ -328,7 +425,14 @@ async function exaSearchNews(
       throw new Error(`Exa ${res.status} after ${MAX_RETRIES} attempts: ${body}`);
     }
     await sleep(RETRY_BASE_MS * 2 ** (attempt - 1));
-    return exaSearchNews(apiKey, query, startPublishedDate, userLocation, includeDomains, attempt + 1);
+    return exaSearchNews(
+      apiKey,
+      query,
+      startPublishedDate,
+      userLocation,
+      includeDomains,
+      attempt + 1,
+    );
   }
 
   if (!res.ok) {
@@ -396,6 +500,31 @@ async function exaFetchSummaries(
 }
 
 // ---------------------------------------------------------------------------
+// Decides what a cluster's `sentiments` write should be. Grok can return
+// valid, parseable JSON that still only covers a subset of the requested
+// (cluster, company) pairs — that's success, not a scoring failure, so
+// scoreClusterSentiments reports no error. Treating "no error" as "every
+// cluster is fully scored" would write a partial or empty sentiments array
+// for the omitted pairs and silently erase whatever was already stored for
+// them. So a cluster's sentiments are only written when every company
+// requested for it got an answer; otherwise the write is skipped (null)
+// so the upsert leaves the stored data untouched, same as a full failure.
+// The companies missing this run stay eligible (not in scored_cluster_ids)
+// and get re-scored on the next fanout while their cluster is still in the
+// TTL window — no permanent loss, just a delayed observation.
+// ---------------------------------------------------------------------------
+
+export function resolveSentimentsForRow(
+  expectedCompanyCount: number,
+  scored: ClusterSentiment[],
+  sentimentError: string | null,
+): ClusterSentiment[] | null {
+  if (sentimentError) return null;
+  if (scored.length < expectedCompanyCount) return null;
+  return scored;
+}
+
+// ---------------------------------------------------------------------------
 // Cluster row builder — pure, no DB call (batch upsert happens after Phase 1)
 // Dropping the per-row pre-SELECT + GREATEST(expires_at) logic keeps subrequests
 // within the free-plan cap. expires_at = published_at + TTL is deterministic for
@@ -454,13 +583,55 @@ export function buildClusterRow(
 }
 
 // ---------------------------------------------------------------------------
-// Rolling per-company sentiment (EWMA) — up to 2 subrequests, 0 when there is
-// nothing to update. A cluster already present in the company's stored
-// scored_cluster_ids is the same article re-surfacing across fanout runs
-// within the 7-day window and must not move the EWMA again; scored_cluster_ids
-// (cap 200) is the dedupe source of truth, while evidence_cluster_ids stays a
-// 10-id display list. Companies with nothing new this run are skipped and
-// their rows left untouched. Never throws.
+// Company-sentiment update lock — guards the read-modify-write EWMA merge
+// below against a lost update when two fanout runs overlap for the same
+// company (e.g. the admin-only /_debug/run-news-fanout endpoint fired while
+// a scheduled run is still in flight). PostgREST gives no transaction that
+// spans two HTTP calls, so a plain SELECT-then-UPSERT can't be made atomic
+// from the client; the compare-and-swap has to happen in one statement on
+// the server, hence the RPC (see try_acquire_company_sentiment_lock in the
+// news-sentiment migration) instead of a second table read.
+// ---------------------------------------------------------------------------
+
+const COMPANY_SENTIMENT_LOCK_TTL_SECONDS = 60;
+
+async function acquireCompanySentimentLock(
+  client: AnySupabaseClient,
+  holder: string,
+): Promise<boolean> {
+  const { data, error } = await client.rpc("try_acquire_company_sentiment_lock", {
+    p_holder: holder,
+    p_ttl_seconds: COMPANY_SENTIMENT_LOCK_TTL_SECONDS,
+  });
+  if (error) {
+    console.error("[news] company sentiment lock acquire failed:", error.message);
+    return false;
+  }
+  return data === true;
+}
+
+async function releaseCompanySentimentLock(
+  client: AnySupabaseClient,
+  holder: string,
+): Promise<void> {
+  const { error } = await client
+    .from("company_sentiment_lock")
+    .delete()
+    .eq("id", "singleton")
+    .eq("holder", holder);
+  if (error) console.error("[news] company sentiment lock release failed:", error.message);
+}
+
+// ---------------------------------------------------------------------------
+// Rolling per-company sentiment (EWMA) — up to 4 subrequests (lock acquire,
+// prior-score lookup, batch upsert, lock release), 0 when there is nothing to
+// update. A cluster already present in the company's stored scored_cluster_ids
+// is the same article re-surfacing across fanout runs within the 7-day window
+// and must not move the EWMA again; scored_cluster_ids (pruned by age, not
+// count — see MAX_SCORED_CLUSTER_IDS in feeds/sentiment.ts) is the dedupe
+// source of truth, while evidence_cluster_ids stays a 10-id display list.
+// Companies with nothing new this run are skipped and their rows left
+// untouched. Never throws.
 // ---------------------------------------------------------------------------
 
 export async function updateRollingCompanySentiment(
@@ -469,9 +640,17 @@ export async function updateRollingCompanySentiment(
   companiesByKey: Map<string, SentimentCompanyRef>,
 ): Promise<{ companiesRescored: number; error: string | null }> {
   if (idBackedSentiments.length === 0) return { companiesRescored: 0, error: null };
-  const companyKeys = [...new Set(idBackedSentiments.map((s) => s.companyKey))];
+
+  const holder = crypto.randomUUID();
+  if (!(await acquireCompanySentimentLock(client, holder))) {
+    return {
+      companiesRescored: 0,
+      error: "company sentiment update skipped: another fanout run holds the lock",
+    };
+  }
 
   try {
+    const companyKeys = [...new Set(idBackedSentiments.map((s) => s.companyKey))];
     const { data: priorRows, error: priorError } = await client
       .from("company_sentiment")
       .select("company_key, score, evidence_cluster_ids, scored_cluster_ids")
@@ -481,14 +660,14 @@ export async function updateRollingCompanySentiment(
 
     const priorByKey = new Map<
       string,
-      { score: number; evidence_cluster_ids: string[]; scored_cluster_ids: string[] }
+      { score: number; evidence_cluster_ids: string[]; scored_cluster_ids: ScoredClusterRecord[] }
     >(
       (priorRows ?? []).map(
         (r: {
           company_key: string;
           score: number;
           evidence_cluster_ids: string[] | null;
-          scored_cluster_ids: string[] | null;
+          scored_cluster_ids: ScoredClusterRecord[] | null;
         }) => [
           r.company_key,
           {
@@ -501,13 +680,17 @@ export async function updateRollingCompanySentiment(
     );
 
     const priorScoredByCompany = new Map<string, Set<string>>(
-      [...priorByKey].map(([companyKey, prior]) => [companyKey, new Set(prior.scored_cluster_ids)]),
+      [...priorByKey].map(([companyKey, prior]) => [
+        companyKey,
+        new Set(prior.scored_cluster_ids.map((r) => r.id)),
+      ]),
     );
     const observationsByCompany = aggregateObservationsByCompany(
       idBackedSentiments,
       priorScoredByCompany,
     );
 
+    const now = Date.now();
     const companySentimentRows = [...observationsByCompany].map(([companyKey, obs]) => {
       const prior = priorByKey.get(companyKey) ?? null;
       const { score, trend } = computeEwma(prior?.score ?? null, obs.observedScore);
@@ -523,8 +706,13 @@ export async function updateRollingCompanySentiment(
           prior?.evidence_cluster_ids ?? [],
           obs.clusterKeys,
         ),
-        scored_cluster_ids: mergeScoredClusterIds(prior?.scored_cluster_ids ?? [], obs.clusterKeys),
-        updated_at: new Date().toISOString(),
+        scored_cluster_ids: mergeScoredClusterIds(
+          prior?.scored_cluster_ids ?? [],
+          obs.clusterKeys,
+          now,
+          NEWS_WINDOW_MS,
+        ),
+        updated_at: new Date(now).toISOString(),
       };
     });
 
@@ -540,6 +728,8 @@ export async function updateRollingCompanySentiment(
     const msg = err instanceof Error ? err.message : String(err);
     console.error("[news] rolling company sentiment update failed:", msg);
     return { companiesRescored: 0, error: msg };
+  } finally {
+    await releaseCompanySentimentLock(client, holder);
   }
 }
 
@@ -590,7 +780,10 @@ function titleSignature(title: string, companyNames: string[]): Set<string> {
   let t = title.toLowerCase();
   t = t.replace(/\s+[–\-|]\s+[^–\-|]*$/u, " "); // trailing " – Bloomberg" / " | Seeking Alpha"
   t = t.replace(/\([^)]*\)/g, " "); // (TTE:NYSE)
-  t = t.replace(/\$/g, " ").replace(/(\d)\s*b\b/g, "$1 billion").replace(/(\d)\s*m\b/g, "$1 million");
+  t = t
+    .replace(/\$/g, " ")
+    .replace(/(\d)\s*b\b/g, "$1 billion")
+    .replace(/(\d)\s*m\b/g, "$1 million");
   for (const name of companyNames) {
     const core = coreName(name);
     if (core) t = t.split(core).join(" ");
@@ -664,10 +857,12 @@ function dedupeByStory(
 //   1  batch match upsert
 //   1  sweep
 //   1  Grok sentiment scoring call (skipped if no survivors)
+//   1  company sentiment lock acquire (skipped if nothing scored)
 //   1  company_sentiment prior-score lookup (skipped if nothing scored)
 //   1  company_sentiment batch upsert (skipped if nothing scored)
+//   1  company sentiment lock release (skipped if nothing scored)
 //   ─────────────────
-//   N+7  total worst case (11 today, well under 50)
+//   N+9  total worst case (13 today, well under 50)
 // ---------------------------------------------------------------------------
 
 interface PendingCluster {
@@ -801,7 +996,13 @@ export async function runNewsFanout(env: Env): Promise<{
     // Primary search — premium allowlist.
     let primary: ExaSearchResponse;
     try {
-      primary = await exaSearchNews(apiKey, newsQuery, startPublishedDate, userLocation, NEWS_INCLUDE_DOMAINS);
+      primary = await exaSearchNews(
+        apiKey,
+        newsQuery,
+        startPublishedDate,
+        userLocation,
+        NEWS_INCLUDE_DOMAINS,
+      );
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error(`[news] Exa primary failed for "${company.query}":`, msg);
@@ -820,7 +1021,11 @@ export async function runNewsFanout(env: Env): Promise<{
       secondarySearches++;
       try {
         const secondary = await exaSearchNews(
-          apiKey, newsQuery, startPublishedDate, userLocation, NEWS_INCLUDE_DOMAINS_SECONDARY,
+          apiKey,
+          newsQuery,
+          startPublishedDate,
+          userLocation,
+          NEWS_INCLUDE_DOMAINS_SECONDARY,
         );
         if (!secondary.error) ingest(secondary.results ?? [], company, tickerArr, isinArr);
         else errors.push(`${company.canonicalKey} (secondary): Exa error ${secondary.error}`);
@@ -843,9 +1048,16 @@ export async function runNewsFanout(env: Env): Promise<{
 
   const survivors = [...pendingClusters.values()];
   const summaryByUrl = new Map<string, string>();
-  const frUrls = survivors.filter((p) => isFrenchSource(hostname(p.result.url ?? ""))).map((p) => p.result.url!);
-  const enUrls = survivors.filter((p) => !isFrenchSource(hostname(p.result.url ?? ""))).map((p) => p.result.url!);
-  for (const [urls, q] of [[frUrls, FR_SUMMARY_QUERY], [enUrls, EN_SUMMARY_QUERY]] as const) {
+  const frUrls = survivors
+    .filter((p) => isFrenchSource(hostname(p.result.url ?? "")))
+    .map((p) => p.result.url!);
+  const enUrls = survivors
+    .filter((p) => !isFrenchSource(hostname(p.result.url ?? "")))
+    .map((p) => p.result.url!);
+  for (const [urls, q] of [
+    [frUrls, FR_SUMMARY_QUERY],
+    [enUrls, EN_SUMMARY_QUERY],
+  ] as const) {
     if (urls.length === 0) continue;
     try {
       const m = await exaFetchSummaries(apiKey, urls, q);
@@ -900,6 +1112,9 @@ export async function runNewsFanout(env: Env): Promise<{
     if (arr) arr.push(s);
     else sentimentsByClusterKey.set(s.clusterKey, [s]);
   }
+  const expectedCompanyCountByCluster = new Map<string, number>(
+    sentimentTargets.map((t) => [t.clusterKey, t.companies.length]),
+  );
 
   // --- Batch cluster upsert (1 subrequest) -----------------------------------
   const clusterRows = survivors.map((p) => {
@@ -909,7 +1124,11 @@ export async function runNewsFanout(env: Env): Promise<{
       [...p.tickers],
       [...p.isins],
       summaryByUrl.get(p.result.url!) ?? "",
-      sentimentError ? null : (sentimentsByClusterKey.get(clusterKey) ?? []),
+      resolveSentimentsForRow(
+        expectedCompanyCountByCluster.get(clusterKey) ?? 0,
+        sentimentsByClusterKey.get(clusterKey) ?? [],
+        sentimentError,
+      ),
       companiesByKey,
     );
   });
@@ -919,10 +1138,13 @@ export async function runNewsFanout(env: Env): Promise<{
 
   if (clusterRows.length > 0) {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const { data: upserted, error: clusterBatchError } = await (client as any)
+    const { data: upserted, error: clusterBatchError } = (await (client as any)
       .from("news_clusters")
       .upsert(clusterRows, { onConflict: "cluster_key" })
-      .select("id, cluster_key") as { data: Array<{ id: string; cluster_key: string }> | null; error: { message: string } | null };
+      .select("id, cluster_key")) as {
+      data: Array<{ id: string; cluster_key: string }> | null;
+      error: { message: string } | null;
+    };
 
     if (clusterBatchError) {
       errors.push(`batch cluster upsert: ${clusterBatchError.message}`);
