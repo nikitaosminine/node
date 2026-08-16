@@ -64,10 +64,16 @@ describe("parseSentimentResponse (strict JSON)", () => {
 
   it("tolerates a response wrapped in a markdown code fence", () => {
     const { pairIndex } = buildSentimentPrompt([target]);
-    const raw = '```json\n{"scores": [{"i": 1, "sentiment": -0.5, "rationale": "Guidance cut."}]}\n```';
+    const raw =
+      '```json\n{"scores": [{"i": 1, "sentiment": -0.5, "rationale": "Guidance cut."}]}\n```';
     const result = parseSentimentResponse(raw, pairIndex);
     expect(result).toEqual([
-      { clusterKey: "cluster-1", companyKey: "ticker:ACME", score: -0.5, rationale: "Guidance cut." },
+      {
+        clusterKey: "cluster-1",
+        companyKey: "ticker:ACME",
+        score: -0.5,
+        rationale: "Guidance cut.",
+      },
     ]);
   });
 
@@ -86,8 +92,12 @@ describe("parseSentimentResponse (strict JSON)", () => {
     const { pairIndex } = buildSentimentPrompt([target]);
     expect(() => parseSentimentResponse("not json at all", pairIndex)).toThrow("not valid JSON");
     expect(() => parseSentimentResponse("", pairIndex)).toThrow("not valid JSON");
-    expect(() => parseSentimentResponse('{"scores": [{"i": 1, "sent', pairIndex)).toThrow("not valid JSON");
-    expect(() => parseSentimentResponse('{"scores": "nope"}', pairIndex)).toThrow('no "scores" array');
+    expect(() => parseSentimentResponse('{"scores": [{"i": 1, "sent', pairIndex)).toThrow(
+      "not valid JSON",
+    );
+    expect(() => parseSentimentResponse('{"scores": "nope"}', pairIndex)).toThrow(
+      'no "scores" array',
+    );
   });
 
   it("returns an empty array for a valid response whose scores array is empty", () => {
@@ -136,7 +146,9 @@ describe("invokeSentimentGrok", () => {
   });
 
   it("throws when no Grok API key is configured", async () => {
-    await expect(invokeSentimentGrok({}, "system", "user")).rejects.toThrow("No Grok API key available");
+    await expect(invokeSentimentGrok({}, "system", "user")).rejects.toThrow(
+      "No Grok API key available",
+    );
   });
 });
 

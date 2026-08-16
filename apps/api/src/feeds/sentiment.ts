@@ -72,7 +72,9 @@ Include exactly one entry per numbered pair. Do not invent pairs.`;
       i++;
       pairIndex.set(i, { clusterKey: target.clusterKey, companyKey: company.canonicalKey });
       const snippet = target.summary || target.title;
-      lines.push(`${i}. Company: ${company.name}\n   Article: "${target.title}" — ${snippet}`.trim());
+      lines.push(
+        `${i}. Company: ${company.name}\n   Article: "${target.title}" — ${snippet}`.trim(),
+      );
     }
   }
 
@@ -84,7 +86,11 @@ Include exactly one entry per numbered pair. Do not invent pairs.`;
 // Grok call — chat/completions, strict JSON object response.
 // ---------------------------------------------------------------------------
 
-export async function invokeSentimentGrok(env: Env, systemPrompt: string, userPrompt: string): Promise<string> {
+export async function invokeSentimentGrok(
+  env: Env,
+  systemPrompt: string,
+  userPrompt: string,
+): Promise<string> {
   const apiKey = env.GROK_MAIN_API_KEY ?? env.GROK_SUB_API_KEY ?? env.GROK_NORMALIZATION_API_KEY;
   if (!apiKey) throw new Error("[sentiment] No Grok API key available");
 
@@ -145,7 +151,11 @@ export function parseSentimentResponse(
     }
   }
 
-  if (!parsed || typeof parsed !== "object" || !Array.isArray((parsed as Record<string, unknown>).scores)) {
+  if (
+    !parsed ||
+    typeof parsed !== "object" ||
+    !Array.isArray((parsed as Record<string, unknown>).scores)
+  ) {
     throw new Error(`Grok sentiment response has no "scores" array: ${raw.slice(0, 200)}`);
   }
   const scores = (parsed as Record<string, unknown>).scores as unknown[];
@@ -220,7 +230,8 @@ export function computeEwma(
   }
   const next = alpha * clampedObserved + (1 - alpha) * priorScore;
   const delta = next - priorScore;
-  const trend: SentimentTrend = delta > TREND_DEADBAND ? "up" : delta < -TREND_DEADBAND ? "down" : "flat";
+  const trend: SentimentTrend =
+    delta > TREND_DEADBAND ? "up" : delta < -TREND_DEADBAND ? "down" : "flat";
   return { score: Math.round(next * 10000) / 10000, trend };
 }
 
