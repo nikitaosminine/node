@@ -82,10 +82,17 @@ describe("parseSentimentResponse (strict JSON)", () => {
     expect(parseSentimentResponse(raw, pairIndex)).toHaveLength(1);
   });
 
-  it("returns an empty array for garbage input instead of throwing", () => {
+  it("throws on unparseable or shape-invalid input so it isn't mistaken for an empty result", () => {
     const { pairIndex } = buildSentimentPrompt([target]);
-    expect(parseSentimentResponse("not json at all", pairIndex)).toEqual([]);
-    expect(parseSentimentResponse("", pairIndex)).toEqual([]);
+    expect(() => parseSentimentResponse("not json at all", pairIndex)).toThrow("not valid JSON");
+    expect(() => parseSentimentResponse("", pairIndex)).toThrow("not valid JSON");
+    expect(() => parseSentimentResponse('{"scores": [{"i": 1, "sent', pairIndex)).toThrow("not valid JSON");
+    expect(() => parseSentimentResponse('{"scores": "nope"}', pairIndex)).toThrow('no "scores" array');
+  });
+
+  it("returns an empty array for a valid response whose scores array is empty", () => {
+    const { pairIndex } = buildSentimentPrompt([target]);
+    expect(parseSentimentResponse('{"scores": []}', pairIndex)).toEqual([]);
   });
 
   it("drops entries missing a numeric sentiment", () => {
@@ -142,6 +149,37 @@ describe("scoreClusterSentiments (degrade gracefully)", () => {
     const result = await scoreClusterSentiments(env, [target]);
     expect(result.sentiments).toEqual([]);
     expect(result.error).toContain("500");
+  });
+
+  it("returns a non-null error when Grok responds 200 with unparseable content", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({ choices: [{ message: { content: '{"scores": [{"i": 1, "sent' } }] }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          ),
+      ),
+    );
+    const result = await scoreClusterSentiments(env, [target]);
+    expect(result.sentiments).toEqual([]);
+    expect(result.error).toContain("not valid JSON");
+  });
+
+  it("treats a valid response with zero scores as success, not failure", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify({ choices: [{ message: { content: '{"scores": []}' } }] }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          }),
+      ),
+    );
+    const result = await scoreClusterSentiments(env, [target]);
+    expect(result).toEqual({ sentiments: [], error: null });
   });
 
   it("returns empty with no error for an empty target list (skips the call)", async () => {

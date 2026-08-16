@@ -119,7 +119,10 @@ export async function invokeSentimentGrok(env: Env, systemPrompt: string, userPr
 // ---------------------------------------------------------------------------
 // Strict-JSON parsing — tolerant of a stray code fence, validates every item
 // against the pair index built alongside the prompt so a hallucinated
-// index/company can never be attributed to the wrong cluster.
+// index/company can never be attributed to the wrong cluster. Throws when the
+// payload is not the expected {"scores": [...]} JSON shape at all (garbage,
+// truncated output) so callers treat it as a scoring failure — distinct from
+// a valid response whose scores array is simply empty, which returns [].
 // ---------------------------------------------------------------------------
 
 export function parseSentimentResponse(
@@ -132,18 +135,20 @@ export function parseSentimentResponse(
   } catch {
     const start = raw.indexOf("{");
     const end = raw.lastIndexOf("}");
-    if (start < 0 || end <= start) return [];
+    if (start < 0 || end <= start) {
+      throw new Error(`Grok sentiment response is not valid JSON: ${raw.slice(0, 200)}`);
+    }
     try {
       parsed = JSON.parse(raw.slice(start, end + 1));
     } catch {
-      return [];
+      throw new Error(`Grok sentiment response is not valid JSON: ${raw.slice(0, 200)}`);
     }
   }
 
-  const scores =
-    parsed && typeof parsed === "object" && Array.isArray((parsed as Record<string, unknown>).scores)
-      ? ((parsed as Record<string, unknown>).scores as unknown[])
-      : [];
+  if (!parsed || typeof parsed !== "object" || !Array.isArray((parsed as Record<string, unknown>).scores)) {
+    throw new Error(`Grok sentiment response has no "scores" array: ${raw.slice(0, 200)}`);
+  }
+  const scores = (parsed as Record<string, unknown>).scores as unknown[];
 
   const out: ClusterSentiment[] = [];
   const seenIndices = new Set<number>();
@@ -223,17 +228,18 @@ export function computeEwma(
 // (mean across every cluster that mentioned it this run) before feeding
 // computeEwma — a company mentioned in 3 clusters this run gets one rolling
 // update, not three compounding ones. Clusters already recorded in that
-// company's prior evidence_cluster_ids are re-fetches surfacing again within
-// the 7-day window, not new observations, so they are excluded; a company
-// with nothing new this run is omitted entirely (its rolling row is left
-// untouched).
+// company's prior scored_cluster_ids — the re-observation dedupe set, not the
+// 10-id display-only evidence_cluster_ids list — are re-fetches surfacing
+// again within the 7-day window, not new observations, so they are excluded;
+// a company with nothing new this run is omitted entirely (its rolling row is
+// left untouched).
 export function aggregateObservationsByCompany(
   sentiments: ClusterSentiment[],
-  priorEvidenceByCompany?: Map<string, Set<string>>,
+  priorScoredByCompany?: Map<string, Set<string>>,
 ): Map<string, { observedScore: number; clusterKeys: string[] }> {
   const byCompany = new Map<string, { scores: number[]; clusterKeys: string[] }>();
   for (const s of sentiments) {
-    if (priorEvidenceByCompany?.get(s.companyKey)?.has(s.clusterKey)) continue;
+    if (priorScoredByCompany?.get(s.companyKey)?.has(s.clusterKey)) continue;
     let acc = byCompany.get(s.companyKey);
     if (!acc) {
       acc = { scores: [], clusterKeys: [] };
