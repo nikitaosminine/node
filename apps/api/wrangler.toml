@@ -5,6 +5,8 @@ compatibility_flags = ["nodejs_compat"]
 
 [vars]
 SUPABASE_URL = "https://sfqowvpuzsqgmwlecgdx.supabase.co"
+POLYMARKET_GROK_MODEL = "grok-4.6"
+POLYMARKET_GROK_REASONING_EFFORT = "medium"
 
 # Secrets (set via CLI, not in this file):
 # wrangler secret put SUPABASE_SERVICE_KEY
@@ -29,6 +31,7 @@ SUPABASE_URL = "https://sfqowvpuzsqgmwlecgdx.supabase.co"
 # wrangler secret put GROK_WEB_SEARCH_MODEL
 # wrangler secret put GROK_NORMALIZATION_MODEL  (default: grok-4.3 — expense/CSV categorization)
 # wrangler secret put GROK_NORMALIZATION_EFFORT  (default: none — none|low|medium|high; reasoning over a whole CSV times out)
+# POLYMARKET_GROK_MODEL and POLYMARKET_GROK_REASONING_EFFORT are non-secret [vars] above.
 # wrangler secret put POLYMARKET_GAMMA_BASE_URL  (default: https://gamma-api.polymarket.com)
 
 [[queues.producers]]

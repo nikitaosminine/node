@@ -67,6 +67,7 @@ In France, the average ETF investor has gone from roughly 60 years old in 2018 t
 | The Take — sub-agent | `grok-4-1-fast-non-reasoning` |
 | CSV import normalization | `grok-4-1-fast-non-reasoning` |
 | Benchmark suggestions | `grok-4.20-0309-reasoning` |
+| Polymarket portfolio curation | `grok-4.6` (`medium` reasoning) |
 
 Other providers under evaluation: DeepSeek (v4 flash/pro), additional Gemini tiers.
 

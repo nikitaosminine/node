@@ -43,6 +43,8 @@ export interface Env {
   GROK_WEB_SEARCH_MODEL?: string;
   GROK_NORMALIZATION_MODEL?: string;
   GROK_NORMALIZATION_EFFORT?: string;
+  POLYMARKET_GROK_MODEL?: string;
+  POLYMARKET_GROK_REASONING_EFFORT?: string;
   GROK_API_BASE_URL?: string;
   MAIN_AGENT_SYSTEM_PROMPT?: string;
   SUB_AGENT_SYSTEM_PROMPT?: string;
@@ -5398,7 +5400,9 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
       const adminError = requireAdmin(request, env);
       if (adminError) return adminError;
       try {
-        const result = await runPolymarketFanout(env);
+        const result = await runPolymarketFanout(env, {
+          forceRescore: url.searchParams.get("force") === "true",
+        });
         return json(result, 200);
       } catch (err) {
         return json({ error: err instanceof Error ? err.message : String(err) }, 500);
