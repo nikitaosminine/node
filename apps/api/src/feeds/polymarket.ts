@@ -996,30 +996,29 @@ export async function runPolymarketFanout(
   const marketsDeactivated = await deactivateStaleMarkets(client);
   console.log(`[polymarket] deactivated ${marketsDeactivated} resolved/stale markets`);
 
-  // 3. Snapshot prices for history, then sweep expired history rows. Keep
-  // both operations non-fatal and independently attempted: a failure in one
-  // must not suppress the other or block market matching.
+  // 3. Snapshot prices for history, then sweep expired history rows. Each
+  // step is independently non-fatal — a history-write failure shouldn't
+  // block market matching (the higher-priority half of the fanout), and an
+  // insert failure shouldn't skip the sweep either, so the table stays
+  // bounded even on a bad run.
   let priceSnapshotsWritten = 0;
   let priceHistorySwept = 0;
   try {
     priceSnapshotsWritten = await insertPriceSnapshots(client, allMarkets);
+    console.log(`[polymarket] wrote ${priceSnapshotsWritten} price snapshots`);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    errors.push(`price history: ${msg}`);
-    console.error("[polymarket] price history step failed:", msg);
+    errors.push(`price history insert: ${msg}`);
+    console.error("[polymarket] price history insert failed:", msg);
   }
-
   try {
     priceHistorySwept = await sweepExpiredPriceHistory(client);
+    console.log(`[polymarket] swept ${priceHistorySwept} expired price history rows`);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    errors.push(`price history: ${msg}`);
+    errors.push(`price history sweep: ${msg}`);
     console.error("[polymarket] price history sweep failed:", msg);
   }
-
-  console.log(
-    `[polymarket] wrote ${priceSnapshotsWritten} price snapshots, swept ${priceHistorySwept} expired history rows`,
-  );
 
   // 4. Fetch all portfolios
   const { data: portfoliosData, error: portfoliosError } = await client
