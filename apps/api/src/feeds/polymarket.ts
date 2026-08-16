@@ -742,11 +742,17 @@ export async function enqueueEtfConstituentsEnrichment(
     .from("geography_research_jobs")
     .select("holding_id,updated_at,started_at")
     .in("holding_id", holdingIds)) as {
-    data: Array<{ holding_id: string; updated_at: string | null; started_at: string | null }> | null;
+    data: Array<{
+      holding_id: string;
+      updated_at: string | null;
+      started_at: string | null;
+    }> | null;
     error: { message: string } | null;
   };
   if (jobsError) {
-    throw new Error(`[polymarket] constituents enrichment jobs lookup failed: ${jobsError.message}`);
+    throw new Error(
+      `[polymarket] constituents enrichment jobs lookup failed: ${jobsError.message}`,
+    );
   }
 
   const backoffCutoffMs = Date.now() - CONSTITUENT_ENRICHMENT_BACKOFF_HOURS * 3_600_000;
@@ -776,7 +782,9 @@ export async function enqueueEtfConstituentsEnrichment(
     { onConflict: "holding_id" },
   )) as { error: { message: string } | null };
   if (upsertError) {
-    throw new Error(`[polymarket] constituents enrichment job upsert failed: ${upsertError.message}`);
+    throw new Error(
+      `[polymarket] constituents enrichment job upsert failed: ${upsertError.message}`,
+    );
   }
 
   await Promise.all(

@@ -799,7 +799,15 @@ describe("ETF constituents in portfolio profiles", () => {
       { ...env, GEOGRAPHY_QUEUE: { send } },
       profileClient({}).client as never,
       "portfolio-1",
-      [{ holdingId: "holding-x", ticker: "MYSTERY", isin: null, name: "Mystery Fund", hasFallback: false }],
+      [
+        {
+          holdingId: "holding-x",
+          ticker: "MYSTERY",
+          isin: null,
+          name: "Mystery Fund",
+          hasFallback: false,
+        },
+      ],
     );
     expect(noIsin.enqueued).toEqual([]);
     expect(send).not.toHaveBeenCalled();

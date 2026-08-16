@@ -171,7 +171,9 @@ export async function buildPortfolioProfile(
         hasFallback: Boolean(fromFallback),
       });
       if (fromFallback) {
-        etfDescriptions.push(`${etf.ticker} (${fromFallback.label}: ${fromFallback.top5.join(", ")})`);
+        etfDescriptions.push(
+          `${etf.ticker} (${fromFallback.label}: ${fromFallback.top5.join(", ")})`,
+        );
       } else {
         etfDescriptions.push(label ? `${etf.ticker} (${label})` : etf.ticker);
       }

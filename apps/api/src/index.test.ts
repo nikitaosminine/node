@@ -25,7 +25,11 @@ const holdingRow = {
   fees: 0,
 };
 
-function geographyDb({ existingAllocations }: { existingAllocations: Array<Record<string, unknown>> }) {
+function geographyDb({
+  existingAllocations,
+}: {
+  existingAllocations: Array<Record<string, unknown>>;
+}) {
   const holdingsUpdates: Array<Record<string, unknown>> = [];
   const allocationDeletes: unknown[] = [];
   const allocationInserts: Array<Array<Record<string, unknown>>> = [];
