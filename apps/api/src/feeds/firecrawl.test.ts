@@ -174,14 +174,37 @@ describe("mapFirecrawlNewsResults", () => {
           position: 1,
           imageUrl: "data:image/jpeg;base64,AAAA",
         },
+        {
+          url: "https://www.cnbc.com/null-og-image",
+          title: "Story",
+          date: "1 day ago",
+          metadata: { ogImage: null },
+        },
       ],
       NOW,
     );
 
     expect(results[0].image).toBeNull();
+    expect(results[1].image).toBeNull();
   });
 
-  it("rejects non-http og:image values", () => {
+  it("uses Firecrawl's normalized ogImage URL", () => {
+    const { results } = mapFirecrawlNewsResults(
+      [
+        {
+          url: "https://www.cnbc.com/normalized-og-image",
+          title: "Story",
+          date: "1 day ago",
+          metadata: { ogImage: "https://images.cnbc.com/story.jpg" },
+        },
+      ],
+      NOW,
+    );
+
+    expect(results[0].image).toBe("https://images.cnbc.com/story.jpg");
+  });
+
+  it("rejects data-URI values from either metadata key", () => {
     const { results } = mapFirecrawlNewsResults(
       [
         {
@@ -190,11 +213,18 @@ describe("mapFirecrawlNewsResults", () => {
           date: "1 day ago",
           metadata: { "og:image": "data:image/png;base64,BBBB" },
         },
+        {
+          url: "https://www.cnbc.com/normalized-data-uri",
+          title: "Story",
+          date: "1 day ago",
+          metadata: { ogImage: "data:image/png;base64,CCCC" },
+        },
       ],
       NOW,
     );
 
     expect(results[0].image).toBeNull();
+    expect(results[1].image).toBeNull();
   });
 
   it("keeps results with failed scrapes: empty summary, null publishedAt when undated", () => {

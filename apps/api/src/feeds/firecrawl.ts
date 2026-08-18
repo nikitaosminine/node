@@ -42,7 +42,7 @@ export interface NewsSearchResult {
   publishedAt: string | null;
   /** Inline summary; empty string when the scrape failed (kept as-is downstream). */
   summary: string;
-  /** metadata["og:image"] when scraped; never the data-URI imageUrl. */
+  /** Scraped metadata ogImage/og:image; never the data-URI imageUrl. */
   image: string | null;
   /** Rank-decay relevance replacement for Exa's score — see providerScore(). */
   providerScore: number;
@@ -132,8 +132,11 @@ export function isGoogleWrappedUrl(url: string): boolean {
 }
 
 function resolveImage(item: FirecrawlNewsItem): string | null {
-  const ogImage = metadataString(item.metadata, "og:image");
-  return ogImage && /^https?:\/\//i.test(ogImage) ? ogImage : null;
+  const candidates = [
+    metadataString(item.metadata, "ogImage"),
+    metadataString(item.metadata, "og:image"),
+  ];
+  return candidates.find((value) => value && /^https?:\/\//i.test(value)) ?? null;
 }
 
 export function mapFirecrawlNewsResults(
