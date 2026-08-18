@@ -90,7 +90,8 @@ function endDateLabel(iso: string | null): string | null {
   if (!iso) return null;
   try {
     const d = new Date(iso);
-    return `Ends ${formatDistanceToNow(d, { addSuffix: true })}`;
+    const prefix = d.getTime() > Date.now() ? "Ends" : "Ended";
+    return `${prefix} ${formatDistanceToNow(d, { addSuffix: true })}`;
   } catch {
     return null;
   }

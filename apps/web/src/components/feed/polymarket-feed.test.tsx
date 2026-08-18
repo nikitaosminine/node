@@ -132,6 +132,39 @@ describe("PolymarketFeed", () => {
     expect(within(fallbackRow as HTMLElement).queryByText(fallbackReason)).toBeNull();
   });
 
+  it("changes an expiring row from Ends to Ended after rerendering across its end date", () => {
+    const expiring = market({
+      condition_id: "expiring",
+      question: "Expiring market",
+      fetched_at: "2026-08-16T11:55:00.000Z",
+      end_date: "2026-08-16T12:00:10.000Z",
+    });
+
+    const { rerender } = render(
+      <MarketRow
+        market={expiring}
+        isPinned={false}
+        reason="Relevant to your holdings"
+      />,
+    );
+
+    const rowLink = screen.getByText("Expiring market").closest("a");
+    expect(rowLink).not.toBeNull();
+    expect(within(rowLink as HTMLElement).getByText(/Ends in/)).toBeInTheDocument();
+
+    vi.mocked(Date.now).mockReturnValue(TEST_NOW + 15_000);
+    rerender(
+      <MarketRow
+        market={expiring}
+        isPinned={false}
+        reason="Relevant to your holdings"
+      />,
+    );
+
+    expect(within(rowLink as HTMLElement).queryByText(/Ends in/)).toBeNull();
+    expect(within(rowLink as HTMLElement).getByText(/Ended .* ago/)).toBeInTheDocument();
+  });
+
   it("derives freshness from the visible rows after search filtering", async () => {
     const visibleStale = market({
       condition_id: "visible-stale",
