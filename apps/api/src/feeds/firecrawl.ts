@@ -75,8 +75,8 @@ const RELATIVE_UNIT_MS: Record<string, number> = {
   month: 30 * 86_400_000,
 };
 
-// Firecrawl news dates are human-relative strings ("5 days ago"), never ISO.
-// Absolute forms ("Nov 12, 2017") fall through to Date.parse.
+// Firecrawl news dates are often human-relative strings ("5 days ago").
+// Absolute forms, including ISO timestamps, fall through to Date.parse.
 export function parseFirecrawlDate(raw: string | null | undefined, nowMs: number): string | null {
   if (!raw) return null;
   const text = raw.trim();

@@ -94,7 +94,9 @@ const EXA_UNSUPPORTED_NEWS_DOMAINS = new Set([
 ]);
 
 export function getExaIncludeDomains(language: "en" | "fr"): string[] {
-  const primary = NEWS_INCLUDE_DOMAINS.filter((domain) => !EXA_UNSUPPORTED_NEWS_DOMAINS.has(domain));
+  const primary = NEWS_INCLUDE_DOMAINS.filter(
+    (domain) => !EXA_UNSUPPORTED_NEWS_DOMAINS.has(domain),
+  );
   return language === "fr" ? [...primary, ...NEWS_INCLUDE_DOMAINS_SECONDARY] : primary;
 }
 
