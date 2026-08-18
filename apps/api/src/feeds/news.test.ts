@@ -341,9 +341,7 @@ describe("runNewsFanout — ETF-derived market coverage", () => {
 
     await runNewsFanout(env);
 
-    const cluster = state.clusterRows.find(
-      (r) => r.cluster_key === sharedStory.url,
-    );
+    const cluster = state.clusterRows.find((r) => r.cluster_key === sharedStory.url);
     expect(cluster).toBeDefined();
     expect(cluster!.primary_article.provider_score).toBe(1);
   });
