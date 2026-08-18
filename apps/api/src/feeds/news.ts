@@ -520,12 +520,13 @@ async function buildMarketWorkList(
 // ---------------------------------------------------------------------------
 
 function buildClusterRow(
-  result: NewsSearchResult,
+  pending: PendingCluster,
   tickers: string[],
   isins: string[],
   countries: string[] = [],
   sectors: string[] = [],
 ) {
+  const result = pending.result;
   const url = result.url;
   return {
     cluster_key: url,
@@ -537,7 +538,7 @@ function buildClusterRow(
       // Strip an occasional leading "Summary:"/"Résumé:" label.
       snippet: result.summary.replace(/^\s*(summary|résumé|resume)\s*:\s*/i, "").trim(),
       image: result.image,
-      provider_score: result.providerScore,
+      provider_score: pending.providerScore,
     },
     see_also: [] as unknown[],
     entities: { isins, tickers, countries, sectors },
@@ -1060,7 +1061,7 @@ export async function runNewsFanout(env: Env): Promise<{
 
   // --- Batch cluster upsert (1 subrequest) -----------------------------------
   const clusterRows = survivors.map((p) =>
-    buildClusterRow(p.result, [...p.tickers], [...p.isins], [...p.countries], [...p.sectors]),
+    buildClusterRow(p, [...p.tickers], [...p.isins], [...p.countries], [...p.sectors]),
   );
   let clustersUpserted = 0;
   const clusterMap = new Map<string, ClusterAccum>();

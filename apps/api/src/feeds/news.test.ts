@@ -326,6 +326,28 @@ describe("runNewsFanout — ETF-derived market coverage", () => {
     });
   });
 
+  it("persists the highest provider score when one URL matches multiple queries", async () => {
+    const sharedStory = {
+      url: "https://www.lesechos.fr/airbus-nasdaq-shared",
+      title: "Airbus and Nasdaq lead markets higher",
+      date: "2 hours ago",
+      position: 7,
+      summary: "Airbus and Nasdaq both advanced in the latest session.",
+    };
+    installFetchMock(state, {
+      companyResults: [sharedStory],
+      marketResults: [{ ...sharedStory, position: 1 }],
+    });
+
+    await runNewsFanout(env);
+
+    const cluster = state.clusterRows.find(
+      (r) => r.cluster_key === sharedStory.url,
+    );
+    expect(cluster).toBeDefined();
+    expect(cluster!.primary_article.provider_score).toBe(1);
+  });
+
   it("still derives static-override topics when a taxonomy read rejects", async () => {
     state.constituentsReject = true;
 

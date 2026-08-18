@@ -86,6 +86,18 @@ const EXCHANGE_INDEX_DEFAULTS: Record<string, Array<{ ticker: string; label: str
 
 const EXA_BASE = "https://api.exa.ai";
 
+const EXA_UNSUPPORTED_NEWS_DOMAINS = new Set([
+  "wsj.com",
+  "bloomberg.com",
+  "reuters.com",
+  "apnews.com",
+]);
+
+export function getExaIncludeDomains(language: "en" | "fr"): string[] {
+  const primary = NEWS_INCLUDE_DOMAINS.filter((domain) => !EXA_UNSUPPORTED_NEWS_DOMAINS.has(domain));
+  return language === "fr" ? [...primary, ...NEWS_INCLUDE_DOMAINS_SECONDARY] : primary;
+}
+
 // Series colors map to design-system tokens (resolved on the web). The
 // portfolio line uses the monochrome chart-accent (matches portfolio-chart.tsx);
 // indices use the categorical benchmark palette.
@@ -1045,14 +1057,8 @@ function buildResearchToolHandlers(
       }
       exaCalls++;
 
-      // Code decides the domain allowlist — the agent cannot override it. French
-      // queries also get the French-specific secondary list. These allowlists
-      // are shared with Firecrawl, while Exa rejects any unindexed domain in
-      // the whole request; a 403 surfaces as `error`, not silent empty.
       const isFrench = language === "fr";
-      const domains = isFrench
-        ? [...NEWS_INCLUDE_DOMAINS, ...NEWS_INCLUDE_DOMAINS_SECONDARY]
-        : NEWS_INCLUDE_DOMAINS;
+      const domains = getExaIncludeDomains(isFrench ? "fr" : "en");
 
       const { results, status } = await exaSearch(env.EXA_SEARCH, query, startPublished, endPublished, isFrench ? "fr" : "us", 8, domains);
       const out = results
