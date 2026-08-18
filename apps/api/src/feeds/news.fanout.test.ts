@@ -219,6 +219,17 @@ describe("runNewsFanout sentiment pipeline (end-to-end over stubbed HTTP)", () =
     expect(result.clustersScored).toBe(2);
     expect(result.companiesRescored).toBe(1);
 
+    // All newly-upserted cluster/company pairs share exactly one cheap Grok
+    // request for this fanout, keeping the Worker within its subrequest budget.
+    const grokRequests = captured.filter(
+      (r) => r.pathname === "/v1/chat/completions" && r.method === "POST",
+    );
+    expect(grokRequests).toHaveLength(1);
+    expect(grokRequests[0].body).toMatchObject({
+      model: "grok-4-1-fast-non-reasoning",
+      response_format: { type: "json_object" },
+    });
+
     // Per-cluster sentiments are folded into the single batch cluster upsert.
     const rows = clusterUpsertRows(captured);
     const clusterRequests = captured.filter(

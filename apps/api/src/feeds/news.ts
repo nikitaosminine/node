@@ -836,11 +836,11 @@ export function buildClusterRow(
     (currentSentiments ?? []).map((sentiment) => sentiment.company_key),
   );
   const preservedSentiments = priorSentiments.filter(
-    (sentiment): sentiment is Record<string, unknown> =>
-      Boolean(sentiment) &&
-      typeof sentiment === "object" &&
-      typeof (sentiment as Record<string, unknown>).company_key === "string" &&
-      !currentCompanyKeys.has((sentiment as Record<string, unknown>).company_key),
+    (sentiment): sentiment is Record<string, unknown> => {
+      if (!sentiment || typeof sentiment !== "object") return false;
+      const companyKey = (sentiment as Record<string, unknown>).company_key;
+      return typeof companyKey === "string" && !currentCompanyKeys.has(companyKey);
+    },
   );
   return {
     cluster_key: result.id ?? url,
@@ -867,7 +867,7 @@ export function buildClusterRow(
       ? {}
       : {
           sentiments: [...(currentSentiments ?? []), ...preservedSentiments],
-    }),
+        }),
     published_at: result.publishedDate!,
     fetched_at: new Date().toISOString(),
     expires_at: new Date(new Date(result.publishedDate!).getTime() + NEWS_WINDOW_MS).toISOString(),
@@ -973,7 +973,9 @@ export async function updateRollingCompanySentiment(
     try {
       const { data: pendingRows, error: pendingError } = await client
         .from("company_sentiment_pending")
-        .select("company_key, cluster_id, company_name, ticker, isin, score, rationale, observed_at");
+        .select(
+          "company_key, cluster_id, company_name, ticker, isin, score, rationale, observed_at",
+        );
 
       if (pendingError) throw new Error(pendingError.message);
 
@@ -991,7 +993,16 @@ export async function updateRollingCompanySentiment(
           ...(pendingRows ?? []).map((row: { company_key: string }) => row.company_key),
         ]),
       ];
-      let priorRows: unknown[] = [];
+      let priorRows: Array<{
+        company_key: string;
+        company_name?: string | null;
+        ticker?: string | null;
+        isin?: string | null;
+        score: number;
+        trend?: "up" | "down" | "flat" | null;
+        evidence_cluster_ids: string[] | null;
+        scored_cluster_ids: ScoredClusterRecord[] | null;
+      }> = [];
       if (readCompanyKeys.length > 0) {
         const { data, error: priorError } = await client
           .from("company_sentiment")
@@ -1055,29 +1066,18 @@ export async function updateRollingCompanySentiment(
           scored_cluster_ids: ScoredClusterRecord[];
         }
       >(
-        (priorRows ?? []).map(
-          (r: {
-            company_key: string;
-            company_name?: string | null;
-            ticker?: string | null;
-            isin?: string | null;
-            score: number;
-            trend?: "up" | "down" | "flat" | null;
-            evidence_cluster_ids: string[] | null;
-            scored_cluster_ids: ScoredClusterRecord[] | null;
-          }) => [
-            r.company_key,
-            {
-              company_name: r.company_name ?? null,
-              ticker: r.ticker ?? null,
-              isin: r.isin ?? null,
-              score: r.score,
-              trend: r.trend ?? "flat",
-              evidence_cluster_ids: r.evidence_cluster_ids ?? [],
-              scored_cluster_ids: r.scored_cluster_ids ?? [],
-            },
-          ],
-        ),
+        priorRows.map((r) => [
+          r.company_key,
+          {
+            company_name: r.company_name ?? null,
+            ticker: r.ticker ?? null,
+            isin: r.isin ?? null,
+            score: r.score,
+            trend: r.trend ?? "flat",
+            evidence_cluster_ids: r.evidence_cluster_ids ?? [],
+            scored_cluster_ids: r.scored_cluster_ids ?? [],
+          },
+        ]),
       );
 
       const expiredScoredCompanies = new Set<string>();
@@ -1141,10 +1141,13 @@ export async function updateRollingCompanySentiment(
         });
       }
 
-      const { data: applied, error: applyError } = await client.rpc("apply_company_sentiment_batch", {
-        p_holder: holder,
-        p_rows: companySentimentRows,
-      });
+      const { data: applied, error: applyError } = await client.rpc(
+        "apply_company_sentiment_batch",
+        {
+          p_holder: holder,
+          p_rows: companySentimentRows,
+        },
+      );
 
       if (applyError) throw new Error(applyError.message);
       if (applied !== true) {
@@ -1307,9 +1310,9 @@ function dedupeByStory(
 //   1    batch match upsert
 //   1    sweep
 //   1    Grok sentiment scoring call (skipped if no survivors)
-  //   ≤16  company sentiment enqueue/lock/read/write/release requests
-  //   ─────────────────
-  //   worst case physical fetches stay within the 50-subrequest cap.
+//   ≤16  company sentiment enqueue/lock/read/write/release requests
+//   ─────────────────
+//   worst case physical fetches stay within the 50-subrequest cap.
 // ---------------------------------------------------------------------------
 
 interface PendingCluster {
@@ -1585,9 +1588,7 @@ export async function runNewsFanout(
 
   const marketSearchLimit = Math.min(
     MAX_MARKET_TOPICS,
-    Math.floor(
-      (budget.availableSearchSubrequests() + marketSearchReservation) / MAX_RETRIES,
-    ),
+    Math.floor((budget.availableSearchSubrequests() + marketSearchReservation) / MAX_RETRIES),
   );
   marketEntries = selectRotatingWindow(marketCandidates, marketSearchLimit, rotationNow);
   // Drop capped-away entries so later match/dedup phases can't reference them.
@@ -1604,7 +1605,11 @@ export async function runNewsFanout(
   await runWithConcurrency(marketEntries, FETCH_CONCURRENCY, async (entry) => {
     try {
       const response = await exaSearchNews(
-        apiKey, entry.topic.query, startPublishedDate, userLocation, NEWS_INCLUDE_DOMAINS,
+        apiKey,
+        entry.topic.query,
+        startPublishedDate,
+        userLocation,
+        NEWS_INCLUDE_DOMAINS,
         budgetFetch,
       );
       if (response.error) {
@@ -1685,17 +1690,26 @@ export async function runNewsFanout(
     const { data: existingRows, error: preReadError } = await client
       .from("news_clusters")
       .select("cluster_key,entities,sentiments")
-      .in("cluster_key", survivors.map((p) => p.result.id ?? p.result.url!));
+      .in(
+        "cluster_key",
+        survivors.map((p) => p.result.id ?? p.result.url!),
+      );
     if (preReadError) {
       sentimentPreReadFailed = true;
       errors.push(`cluster entities pre-read: ${preReadError.message}`);
       console.error("[news] cluster entities pre-read failed:", preReadError.message);
     }
-    const rows = (existingRows as Array<{
-      cluster_key: string;
-      entities: { isins?: string[]; tickers?: string[]; countries?: string[]; sectors?: string[] } | null;
-      sentiments: unknown[] | null;
-    }> | null) ?? [];
+    const rows =
+      (existingRows as Array<{
+        cluster_key: string;
+        entities: {
+          isins?: string[];
+          tickers?: string[];
+          countries?: string[];
+          sectors?: string[];
+        } | null;
+        sentiments: unknown[] | null;
+      }> | null) ?? [];
     for (const row of rows) {
       const pending = pendingClusters.get(row.cluster_key);
       if (Array.isArray(row.sentiments)) {
@@ -1708,7 +1722,6 @@ export async function runNewsFanout(
         (row.entities.sectors ?? []).forEach((s) => pending.sectors.add(s));
       }
     }
-
   }
 
   // --- Sentiment scoring: one batched Grok call for every survivor's ---------
