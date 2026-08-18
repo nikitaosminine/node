@@ -11,7 +11,7 @@ import { runNewsFanout } from "./news";
 const env = {
   SUPABASE_URL: "https://supabase.example",
   SUPABASE_SERVICE_KEY: "service-key",
-  EXA_SEARCH: "exa-key",
+  FIRECRAWL_API_KEY: "fc-test-key",
 };
 
 const RECENT = new Date(Date.now() - 3_600_000).toISOString();
@@ -42,6 +42,7 @@ interface CapturedState {
   clusterRows: Array<Record<string, any>>;
   matchRows: Array<Record<string, any>>;
   searchQueries: string[];
+  searchBodies: Array<Record<string, any>>;
   existingClusters: Array<Record<string, any>>;
   holdings: Array<Record<string, any>>;
   etfConstituents: Array<Record<string, any>>;
@@ -118,48 +119,42 @@ function installFetchMock(
     "fetch",
     vi.fn(async (url: string, init?: { body?: string }) => {
       const body = JSON.parse(init?.body ?? "{}");
-      if (String(url).endsWith("/search")) {
+      if (String(url).endsWith("/v2/search")) {
         state.searchQueries.push(body.query);
-        let results: unknown[] = [];
+        state.searchBodies.push(body);
+        let news: unknown[] = [];
         if (body.query.includes("Airbus")) {
-          results = [
+          news = [
             {
-              id: "exa-airbus-1",
               url: "https://www.lesechos.fr/airbus-order",
               title: "Airbus wins major A350 order from Asian carrier",
-              publishedDate: RECENT,
-              score: 0.8,
+              date: "1 hour ago",
+              position: 1,
+              summary: "Summary for https://www.lesechos.fr/airbus-order",
             },
             ...(extra?.companyResults ?? []),
           ];
         } else if (body.query.includes("Nasdaq")) {
-          results = [
+          news = [
             {
-              id: "exa-market-1",
               url: "https://www.cnbc.com/nasdaq-rally",
               title: "Nasdaq rallies as tech stocks extend gains",
-              publishedDate: RECENT,
-              score: 0.7,
+              date: "1 hour ago",
+              position: 1,
+              summary: "Summary for https://www.cnbc.com/nasdaq-rally",
             },
             {
               // Off-topic for the US-tech relevance filter — must be dropped.
-              id: "exa-market-2",
               url: "https://www.cnbc.com/pastry-award",
               title: "Local bakery wins national pastry award",
-              publishedDate: RECENT,
-              score: 0.9,
+              date: "1 hour ago",
+              position: 2,
+              summary: "A local bakery won a national award for its croissants.",
             },
             ...(extra?.marketResults ?? []),
           ];
         }
-        return new Response(JSON.stringify({ results }), { status: 200 });
-      }
-      if (String(url).endsWith("/contents")) {
-        const results = (body.urls as string[]).map((u) => ({
-          url: u,
-          summary: `Summary for ${u}`,
-        }));
-        return new Response(JSON.stringify({ results }), { status: 200 });
+        return new Response(JSON.stringify({ success: true, data: { news } }), { status: 200 });
       }
       throw new Error(`unexpected fetch ${url}`);
     }),
@@ -174,6 +169,7 @@ describe("runNewsFanout — ETF-derived market coverage", () => {
       clusterRows: [],
       matchRows: [],
       searchQueries: [],
+      searchBodies: [],
       existingClusters: [],
       holdings: HOLDINGS,
       etfConstituents: [],
@@ -202,8 +198,10 @@ describe("runNewsFanout — ETF-derived market coverage", () => {
     expect(state.searchQueries.some((q) => q.includes("Nasdaq-100"))).toBe(true);
     expect(state.searchQueries.some((q) => q.includes("Amundi"))).toBe(false);
 
-    // Market cluster: entities.countries/sectors populated.
-    const marketCluster = state.clusterRows.find((r) => r.cluster_key === "exa-market-1");
+    // Market cluster: entities.countries/sectors populated, cluster key = URL.
+    const marketCluster = state.clusterRows.find(
+      (r) => r.cluster_key === "https://www.cnbc.com/nasdaq-rally",
+    );
     expect(marketCluster).toBeDefined();
     expect(marketCluster!.entities).toEqual({
       isins: [],
@@ -212,14 +210,16 @@ describe("runNewsFanout — ETF-derived market coverage", () => {
       sectors: ["Technology"],
     });
     expect(marketCluster!.primary_article.snippet).toContain("Summary for");
+    // Rank 1 → providerScore 1.0, persisted as provider_score.
+    expect(marketCluster!.primary_article.provider_score).toBe(1);
 
     // The off-topic result never became a cluster.
-    expect(state.clusterRows.find((r) => r.cluster_key === "exa-market-2")).toBeUndefined();
+    expect(
+      state.clusterRows.find((r) => r.cluster_key === "https://www.cnbc.com/pastry-award"),
+    ).toBeUndefined();
 
     // Market match: matched_etfs/matched_topics filled, no company fields.
-    const marketMatch = state.matchRows.find((m) =>
-      Array.isArray(m.match_reason.matched_etfs),
-    );
+    const marketMatch = state.matchRows.find((m) => Array.isArray(m.match_reason.matched_etfs));
     expect(marketMatch).toBeDefined();
     expect(marketMatch!.portfolio_id).toBe("portfolio-1");
     expect(marketMatch!.match_reason).toEqual({
@@ -232,7 +232,9 @@ describe("runNewsFanout — ETF-derived market coverage", () => {
   it("keeps per-company clusters and match_reason in their V1 shape", async () => {
     await runNewsFanout(env);
 
-    const companyCluster = state.clusterRows.find((r) => r.cluster_key === "exa-airbus-1");
+    const companyCluster = state.clusterRows.find(
+      (r) => r.cluster_key === "https://www.lesechos.fr/airbus-order",
+    );
     expect(companyCluster).toBeDefined();
     expect(companyCluster!.entities).toEqual({
       isins: ["NL0000235190"],
@@ -241,9 +243,7 @@ describe("runNewsFanout — ETF-derived market coverage", () => {
       sectors: [],
     });
 
-    const companyMatch = state.matchRows.find((m) =>
-      Array.isArray(m.match_reason.matched_tickers),
-    );
+    const companyMatch = state.matchRows.find((m) => Array.isArray(m.match_reason.matched_tickers));
     expect(companyMatch).toBeDefined();
     expect(companyMatch!.match_reason).toEqual({
       matched_tickers: ["AIR.PA"],
@@ -254,7 +254,7 @@ describe("runNewsFanout — ETF-derived market coverage", () => {
   it("unions prior-run entities into re-upserted clusters instead of clobbering them", async () => {
     state.existingClusters = [
       {
-        cluster_key: "exa-market-1",
+        cluster_key: "https://www.cnbc.com/nasdaq-rally",
         entities: { isins: ["US0378331005"], tickers: ["AAPL"], countries: [], sectors: [] },
       },
     ];
@@ -262,7 +262,9 @@ describe("runNewsFanout — ETF-derived market coverage", () => {
     const result = await runNewsFanout(env);
     expect(result.errors).toEqual([]);
 
-    const marketCluster = state.clusterRows.find((r) => r.cluster_key === "exa-market-1");
+    const marketCluster = state.clusterRows.find(
+      (r) => r.cluster_key === "https://www.cnbc.com/nasdaq-rally",
+    );
     expect(marketCluster).toBeDefined();
     expect(marketCluster!.entities).toEqual({
       isins: ["US0378331005"],
@@ -277,20 +279,20 @@ describe("runNewsFanout — ETF-derived market coverage", () => {
     installFetchMock(state, {
       companyResults: [
         {
-          id: "exa-dup-co",
           url: "https://www.lesechos.fr/airbus-nasdaq",
           title: dupTitle,
-          publishedDate: RECENT,
-          score: 0.6,
+          date: "2 hours ago",
+          position: 2,
+          summary: "Duplicate story summary.",
         },
       ],
       marketResults: [
         {
-          id: "exa-dup-mkt",
           url: "https://www.cnbc.com/airbus-nasdaq",
           title: dupTitle,
-          publishedDate: RECENT,
-          score: 0.95,
+          date: "2 hours ago",
+          position: 1,
+          summary: "Duplicate story summary.",
         },
       ],
     });
@@ -298,10 +300,14 @@ describe("runNewsFanout — ETF-derived market coverage", () => {
     const result = await runNewsFanout(env);
     expect(result.dedupedAway).toBe(1);
 
-    // The lower-tier duplicate is dropped; its market-topic entities survive on
-    // the kept company-sourced cluster.
-    expect(state.clusterRows.find((r) => r.cluster_key === "exa-dup-mkt")).toBeUndefined();
-    const survivorIdx = state.clusterRows.findIndex((r) => r.cluster_key === "exa-dup-co");
+    // The lower-tier duplicate is dropped (despite its better rank); its
+    // market-topic entities survive on the kept company-sourced cluster.
+    expect(
+      state.clusterRows.find((r) => r.cluster_key === "https://www.cnbc.com/airbus-nasdaq"),
+    ).toBeUndefined();
+    const survivorIdx = state.clusterRows.findIndex(
+      (r) => r.cluster_key === "https://www.lesechos.fr/airbus-nasdaq",
+    );
     expect(survivorIdx).toBeGreaterThanOrEqual(0);
     expect(state.clusterRows[survivorIdx].entities).toEqual({
       isins: ["NL0000235190"],
@@ -320,6 +326,26 @@ describe("runNewsFanout — ETF-derived market coverage", () => {
     });
   });
 
+  it("persists the highest provider score when one URL matches multiple queries", async () => {
+    const sharedStory = {
+      url: "https://www.lesechos.fr/airbus-nasdaq-shared",
+      title: "Airbus and Nasdaq lead markets higher",
+      date: "2 hours ago",
+      position: 7,
+      summary: "Airbus and Nasdaq both advanced in the latest session.",
+    };
+    installFetchMock(state, {
+      companyResults: [sharedStory],
+      marketResults: [{ ...sharedStory, position: 1 }],
+    });
+
+    await runNewsFanout(env);
+
+    const cluster = state.clusterRows.find((r) => r.cluster_key === sharedStory.url);
+    expect(cluster).toBeDefined();
+    expect(cluster!.primary_article.provider_score).toBe(1);
+  });
+
   it("still derives static-override topics when a taxonomy read rejects", async () => {
     state.constituentsReject = true;
 
@@ -329,7 +355,9 @@ describe("runNewsFanout — ETF-derived market coverage", () => {
     // static override still produces its market topic and clusters.
     expect(result.marketTopicsQueried).toBe(1);
     expect(result.errors).toEqual([]);
-    expect(state.clusterRows.find((r) => r.cluster_key === "exa-market-1")).toBeDefined();
+    expect(
+      state.clusterRows.find((r) => r.cluster_key === "https://www.cnbc.com/nasdaq-rally"),
+    ).toBeDefined();
   });
 
   it("warns and still derives static-override topics when a taxonomy read resolves with an error", async () => {
@@ -344,7 +372,9 @@ describe("runNewsFanout — ETF-derived market coverage", () => {
 
       expect(result.marketTopicsQueried).toBe(1);
       expect(result.errors).toEqual([]);
-      expect(state.clusterRows.find((r) => r.cluster_key === "exa-market-1")).toBeDefined();
+      expect(
+        state.clusterRows.find((r) => r.cluster_key === "https://www.cnbc.com/nasdaq-rally"),
+      ).toBeDefined();
 
       const messages = warn.mock.calls.map((c) => c.map(String).join(" "));
       expect(messages.some((m) => m.includes("etf_constituents read failed"))).toBe(true);
@@ -378,11 +408,11 @@ describe("runNewsFanout — ETF-derived market coverage", () => {
     installFetchMock(state, {
       marketResults: [
         {
-          id: "exa-avgo",
           url: "https://www.cnbc.com/broadcom-orders",
           title: "Broadcom surges on record custom accelerator orders",
-          publishedDate: RECENT,
-          score: 0.65,
+          date: "3 hours ago",
+          position: 3,
+          summary: "Broadcom reported record orders.",
         },
       ],
     });
@@ -391,15 +421,124 @@ describe("runNewsFanout — ETF-derived market coverage", () => {
 
     // One shared topic (not two), whose merged terms keep the Broadcom story.
     expect(result.marketTopicsQueried).toBe(1);
-    const avgoIdx = state.clusterRows.findIndex((r) => r.cluster_key === "exa-avgo");
+    const avgoIdx = state.clusterRows.findIndex(
+      (r) => r.cluster_key === "https://www.cnbc.com/broadcom-orders",
+    );
     expect(avgoIdx).toBeGreaterThanOrEqual(0);
 
     // Both portfolios hold an ETF mapping to the shared topic and both match
     // the story only the second ETF's constituent terms could keep.
     const avgoMatches = state.matchRows.filter((m) => m.cluster_id === `cluster-${avgoIdx}`);
-    expect(avgoMatches.map((m) => m.portfolio_id).sort()).toEqual([
-      "portfolio-1",
-      "portfolio-2",
-    ]);
+    expect(avgoMatches.map((m) => m.portfolio_id).sort()).toEqual(["portfolio-1", "portfolio-2"]);
+  });
+
+  it("sends the Firecrawl production request shape with per-kind limits", async () => {
+    await runNewsFanout(env);
+
+    for (const body of state.searchBodies) {
+      expect(body.sources).toEqual(["news"]);
+      expect(body.tbs).toBe("qdr:w");
+      expect(body.scrapeOptions).toEqual({ formats: ["summary"] });
+      expect(body.location).toBe("FR");
+      expect(Array.isArray(body.includeDomains)).toBe(true);
+    }
+    const companyBody = state.searchBodies.find((b) => b.query.includes("Airbus"));
+    expect(companyBody!.limit).toBe(10);
+    const marketBody = state.searchBodies.find((b) => b.query.includes("Nasdaq"));
+    expect(marketBody!.limit).toBe(15);
+  });
+
+  it("drops stale, tbs-leaked, undated, and google-wrapped results", async () => {
+    installFetchMock(state, {
+      marketResults: [
+        {
+          // Relative date beyond the 7-day window (tbs leak) — stale.
+          url: "https://www.cnbc.com/old-nasdaq",
+          title: "Nasdaq slides on tech stocks rout",
+          date: "2 weeks ago",
+          position: 3,
+          summary: "Old story.",
+        },
+        {
+          // Ancient absolute date (observed leak shape) — stale.
+          url: "https://www.cnbc.com/ancient-nasdaq",
+          title: "Nasdaq reshuffle: tech stocks reweighted",
+          date: "Nov 12, 2017",
+          position: 4,
+          summary: "Ancient story.",
+        },
+        {
+          url: "https://www.cnbc.com/future-nasdaq",
+          title: "Nasdaq futures point higher as tech stocks rally",
+          date: new Date(Date.now() + 3_600_000).toISOString(),
+          position: 5,
+          summary: "Future-dated story.",
+        },
+        {
+          // No date at all — undated drop.
+          url: "https://www.cnbc.com/undated-nasdaq",
+          title: "Nasdaq futures point higher as tech stocks rebound",
+          position: 5,
+          summary: "Undated story.",
+        },
+        {
+          // google.com/goto redirect wrapper — dropped at mapping.
+          url: "https://www.google.com/goto?url=AbCdEf",
+          title: "Nasdaq hits record as tech stocks rally",
+          date: "1 hour ago",
+          position: 6,
+        },
+      ],
+    });
+
+    const result = await runNewsFanout(env);
+
+    expect(result.staleDropped).toBe(3);
+    expect(result.undatedDropped).toBe(1);
+    expect(result.googleWrappedDropped).toBe(1);
+    expect(
+      state.clusterRows.find((r) => r.cluster_key === "https://www.cnbc.com/nasdaq-rally"),
+    ).toBeDefined();
+    for (const key of [
+      "https://www.cnbc.com/old-nasdaq",
+      "https://www.cnbc.com/ancient-nasdaq",
+      "https://www.cnbc.com/future-nasdaq",
+      "https://www.cnbc.com/undated-nasdaq",
+      "https://www.google.com/goto?url=AbCdEf",
+    ]) {
+      expect(state.clusterRows.find((r) => r.cluster_key === key)).toBeUndefined();
+    }
+  });
+
+  it("prefers scraped metadata dates, persists og:image, and tolerates missing summaries", async () => {
+    installFetchMock(state, {
+      companyResults: [
+        {
+          url: "https://www.wsj.com/airbus-deliveries",
+          title: "Airbus deliveries hit monthly record",
+          // The day-granular relative date loses to the exact metadata ISO.
+          date: "3 days ago",
+          position: 4,
+          // No summary (scrape failed) — the snippet stays empty.
+          imageUrl: "data:image/jpeg;base64,AAAA",
+          metadata: {
+            "article:published_time": RECENT,
+            "og:image": "https://images.wsj.net/airbus.jpg",
+          },
+        },
+      ],
+    });
+
+    await runNewsFanout(env);
+
+    const cluster = state.clusterRows.find(
+      (r) => r.cluster_key === "https://www.wsj.com/airbus-deliveries",
+    );
+    expect(cluster).toBeDefined();
+    expect(cluster!.published_at).toBe(RECENT);
+    expect(cluster!.primary_article.image).toBe("https://images.wsj.net/airbus.jpg");
+    expect(cluster!.primary_article.snippet).toBe("");
+    // Rank 4 → 0.95^3.
+    expect(cluster!.primary_article.provider_score).toBeCloseTo(0.95 ** 3, 10);
   });
 });

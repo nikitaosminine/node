@@ -1,4 +1,10 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
+import {
+  firecrawlSearchNews,
+  mapFirecrawlNewsResults,
+  type FirecrawlSearchResponse,
+  type NewsSearchResult,
+} from "./firecrawl";
 import { deriveMarketTopics, mentionsTopic, type MarketTopic } from "./market-topics";
 import { isFundLike } from "./portfolio-profile";
 
@@ -12,7 +18,7 @@ type AnySupabaseClient = SupabaseClient<any, any, any>;
 interface Env {
   SUPABASE_URL: string;
   SUPABASE_SERVICE_KEY: string;
-  EXA_SEARCH?: string;
+  FIRECRAWL_API_KEY?: string;
 }
 
 interface HoldingRow {
@@ -25,74 +31,82 @@ interface HoldingRow {
   portfolio_id: string;
 }
 
-// Exa Search API shapes (POST https://api.exa.ai/search)
-interface ExaSearchResult {
-  id?: string;
-  url?: string;
-  title?: string;
-  publishedDate?: string | null;
-  author?: string | null;
-  image?: string;
-  favicon?: string;
-  score?: number;
-  summary?: string;
-}
-
-interface ExaSearchResponse {
-  requestId?: string;
-  searchType?: string;
-  results?: ExaSearchResult[];
-  costDollars?: { total?: number };
-  error?: string;
-}
-
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
-const EXA_BASE = "https://api.exa.ai";
-const MAX_RETRIES = 3;
-const RETRY_BASE_MS = 1000;
 // 7-day window: French/European mid-caps have sparse coverage. A short window
 // often returns 0 articles; 7 days keeps the feed populated. The expires_at TTL
 // uses the same value so we don't surface stale content indefinitely.
 const CLUSTER_TTL_HOURS = 168;
 const NEWS_WINDOW_MS = CLUSTER_TTL_HOURS * 3_600_000;
-const RESULTS_PER_COMPANY = 25;
-// Bounded concurrency for the Exa fetch phase.
+// Per-query result limits. Company queries: every on-target result in the
+// 1A-114 spike sat at rank ≤ 7, so 10 loses nothing and cuts scrape credits
+// ~60% vs 25. Market queries are relevant throughout, so 15 balances coverage
+// against credit spend (~110 credits per full run at this mix).
+const RESULTS_PER_COMPANY = 10;
+const RESULTS_PER_MARKET_TOPIC = 15;
+// Bounded concurrency for the Firecrawl fetch phase (inline-summary searches
+// run 12-38s each; concurrency keeps the fanout inside cron wall-clock).
 const FETCH_CONCURRENCY = 4;
 // Distinct-company window per run (rotating-cursor insurance for growth).
 // At current scale (~4 distinct companies) this covers everything every run.
 const FANOUT_WINDOW = 200;
 // Hard cap on ETF-derived market-topic searches per run (subrequest-budget guard).
 const MAX_MARKET_TOPICS = 12;
-// Per-topic keep cap (best Exa score first) so broad market queries don't
+// Per-topic keep cap (best provider score first) so broad market queries don't
 // drown per-company coverage in the feed.
 const MARKET_RESULTS_KEPT = 12;
 
 // Source-quality allowlist: curated premium financial/news outlets. An allowlist
 // (not blocklist) decisively cuts the long tail of quote pages / SEO junk.
-// NOTE: Exa returns HTTP 403 ("domains not available") for the WHOLE request if
-// includeDomains names a domain it no longer indexes — and these were dropped
-// from Exa's index (publisher opt-outs / removed crawl): wsj.com, bloomberg.com,
-// reuters.com, apnews.com, breakingviews.reuters.com. They are removed below so
-// the allowlist works; only add a domain back after confirming Exa still indexes
-// it (a single search with includeDomains:[domain] 403s if it doesn't).
+// wsj/bloomberg/reuters/apnews were once removed because Exa dropped them from
+// its index (whole-request 403s); Firecrawl covers all four with live, dated
+// results and real through-paywall summaries (1A-114 spike), so they are back.
+// A domain with zero Firecrawl coverage just returns an empty list (no failure
+// mode, no credits billed).
 export const NEWS_INCLUDE_DOMAINS = [
-  "ft.com", "economist.com",
-  "barrons.com", "marketwatch.com", "cnbc.com", "seekingalpha.com",
-  "morningstar.com", "imf.org", "worldbank.org", "bis.org", "ecb.europa.eu",
-  "banque-france.fr", "sec.gov", "amf-france.org", "oecd.org", "alphaville.ft.com",
-  "institutionalinvestor.com", "pensions-investments.com",
-  "zerohedge.com", "calculatedriskblog.com", "lesechos.fr", "latribune.fr",
-  "boursier.com", "boursorama.com", "challenges.fr", "euronews.com",
+  "ft.com",
+  "economist.com",
+  "wsj.com",
+  "bloomberg.com",
+  "reuters.com",
+  "apnews.com",
+  "barrons.com",
+  "marketwatch.com",
+  "cnbc.com",
+  "seekingalpha.com",
+  "morningstar.com",
+  "imf.org",
+  "worldbank.org",
+  "bis.org",
+  "ecb.europa.eu",
+  "banque-france.fr",
+  "sec.gov",
+  "amf-france.org",
+  "oecd.org",
+  "alphaville.ft.com",
+  "institutionalinvestor.com",
+  "pensions-investments.com",
+  "zerohedge.com",
+  "calculatedriskblog.com",
+  "lesechos.fr",
+  "latribune.fr",
+  "boursier.com",
+  "boursorama.com",
+  "challenges.fr",
+  "euronews.com",
 ];
 
 // Secondary (broader / small-cap-friendly) allowlist — only searched when the
 // premium list yields too few on-target results for a company. Tune as needed.
 export const NEWS_INCLUDE_DOMAINS_SECONDARY = [
-  "investir.lesechos.fr", "capital.fr", "usinenouvelle.com", "agefi.fr",
-  "tradingsat.com", "bfmtv.com",
+  "investir.lesechos.fr",
+  "capital.fr",
+  "usinenouvelle.com",
+  "agefi.fr",
+  "tradingsat.com",
+  "bfmtv.com",
 ];
 
 // Trigger a secondary search when fewer than this many on-target results come
@@ -101,45 +115,77 @@ export const NEWS_INCLUDE_DOMAINS_SECONDARY = [
 const MIN_ONTARGET = 4;
 
 // Source-quality priority for cross-story dedup (lower = better, kept on merge).
-// Exa's score is relevance, NOT authority, so quality ranking must be explicit.
+// The provider score is relevance (rank), NOT authority, so quality ranking
+// must be explicit.
 const SOURCE_TIER: Record<string, number> = {
-  "reuters.com": 1, "bloomberg.com": 1, "ft.com": 1, "wsj.com": 1, "economist.com": 1, "apnews.com": 1,
+  "reuters.com": 1,
+  "bloomberg.com": 1,
+  "ft.com": 1,
+  "wsj.com": 1,
+  "economist.com": 1,
+  "apnews.com": 1,
   // Top French sources — human-written, high quality for this portfolio.
-  "lesechos.fr": 1, "boursier.com": 1, "boursorama.com": 1,
-  "barrons.com": 2, "cnbc.com": 2, "marketwatch.com": 2, "latribune.fr": 2,
-  "sec.gov": 2, "ecb.europa.eu": 2, "imf.org": 2, "amf-france.org": 2,
-  "seekingalpha.com": 3, "morningstar.com": 3, "challenges.fr": 3, "euronews.com": 3,
+  "lesechos.fr": 1,
+  "boursier.com": 1,
+  "boursorama.com": 1,
+  "barrons.com": 2,
+  "cnbc.com": 2,
+  "marketwatch.com": 2,
+  "latribune.fr": 2,
+  "sec.gov": 2,
+  "ecb.europa.eu": 2,
+  "imf.org": 2,
+  "amf-france.org": 2,
+  "seekingalpha.com": 3,
+  "morningstar.com": 3,
+  "challenges.fr": 3,
+  "euronews.com": 3,
 };
 function sourceTier(source: string): number {
   return SOURCE_TIER[source.replace(/^www\./i, "")] ?? 99;
 }
 
-// French-language sources → drive the language of the generated summary.
-const FRENCH_DOMAINS = new Set([
-  "lesechos.fr", "investir.lesechos.fr", "boursier.com", "boursorama.com", "latribune.fr",
-  "challenges.fr", "capital.fr", "usinenouvelle.com", "agefi.fr", "tradingsat.com",
-  "bfmtv.com", "banque-france.fr", "amf-france.org",
-]);
-function isFrenchSource(source: string): boolean {
-  const s = source.replace(/^www\./i, "");
-  return FRENCH_DOMAINS.has(s) || s.endsWith(".fr");
-}
-
 // English stopwords + filler — dropped from title signatures so dedup compares
 // the distinctive tokens of a story.
 const STOPWORDS = new Set([
-  "the", "a", "an", "of", "for", "to", "in", "on", "and", "or", "as", "at", "by",
-  "from", "with", "is", "are", "be", "its", "it", "that", "this", "se", "sa",
-  "inc", "ltd", "plc", "corp", "co", "group", "news", "update", "latest",
+  "the",
+  "a",
+  "an",
+  "of",
+  "for",
+  "to",
+  "in",
+  "on",
+  "and",
+  "or",
+  "as",
+  "at",
+  "by",
+  "from",
+  "with",
+  "is",
+  "are",
+  "be",
+  "its",
+  "it",
+  "that",
+  "this",
+  "se",
+  "sa",
+  "inc",
+  "ltd",
+  "plc",
+  "corp",
+  "co",
+  "group",
+  "news",
+  "update",
+  "latest",
 ]);
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
 
 function normalizeName(name: string): string {
   return name.trim().toLowerCase().replace(/\s+/g, " ");
@@ -153,10 +199,21 @@ function canonicalKey(h: HoldingRow): string {
   return `name:${normalizeName(h.name)}`;
 }
 
-// Map exchange suffix → ISO 2-letter country code for Exa userLocation
+// Map exchange suffix → ISO 2-letter country code for the Firecrawl search location
 const EXCHANGE_COUNTRY: Record<string, string> = {
-  PA: "FR", DE: "DE", AS: "NL", MI: "IT", L: "GB", SW: "CH",
-  MC: "ES", BE: "BE", VI: "AT", CO: "DK", HE: "FI", ST: "SE", OL: "NO",
+  PA: "FR",
+  DE: "DE",
+  AS: "NL",
+  MI: "IT",
+  L: "GB",
+  SW: "CH",
+  MC: "ES",
+  BE: "BE",
+  VI: "AT",
+  CO: "DK",
+  HE: "FI",
+  ST: "SE",
+  OL: "NO",
 };
 
 function deriveUserLocation(workList: Map<string, CompanyEntry>): string {
@@ -185,7 +242,8 @@ function hostname(url: string): string {
 // Drop stock-quote / price-chart / data pages with no editorial content, even
 // when they sit on an allowed news domain and pass category:"news".
 // Catches e.g. "Legrand ADR Stock Quote - MarketWatch" and markets.ft.com data pages.
-const LOW_VALUE_TITLE = /stock quote|share price|markets data|stock price|\bADR\b.*\bquote\b|cours de bourse|quote \(|price target|^subscribe to (read|continue)|^log ?in|^sign ?in/i;
+const LOW_VALUE_TITLE =
+  /stock quote|share price|markets data|stock price|\bADR\b.*\bquote\b|cours de bourse|quote \(|price target|^subscribe to (read|continue)|^log ?in|^sign ?in/i;
 const LOW_VALUE_PATH = /\/(quote|quotes|cours|stock-quote|share-price|chart)\b/i;
 
 function isLowValuePage(title: string, url: string): boolean {
@@ -455,118 +513,6 @@ async function buildMarketWorkList(
 }
 
 // ---------------------------------------------------------------------------
-// Exa Search with retry/backoff
-// ---------------------------------------------------------------------------
-
-async function exaSearchNews(
-  apiKey: string,
-  query: string,
-  startPublishedDate: string,
-  userLocation: string,
-  includeDomains: string[],
-  attempt = 1,
-): Promise<ExaSearchResponse> {
-  let res: Response;
-  try {
-    res = await fetch(`${EXA_BASE}/search`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": apiKey,
-      },
-      body: JSON.stringify({
-        query,
-        type: "auto",
-        category: "news",
-        numResults: RESULTS_PER_COMPANY,
-        startPublishedDate,
-        userLocation,
-        includeDomains,
-        // No `contents` — search returns title/url/publishedDate/image/score natively.
-        // Summaries are fetched only for survivors via the Contents API (cheaper).
-      }),
-    });
-  } catch (err) {
-    if (attempt >= MAX_RETRIES) throw err;
-    await sleep(RETRY_BASE_MS * 2 ** (attempt - 1));
-    return exaSearchNews(apiKey, query, startPublishedDate, userLocation, includeDomains, attempt + 1);
-  }
-
-  // Retry only transient failures. 400/401/422 are deterministic — fail fast.
-  if (res.status === 429 || res.status >= 500) {
-    if (attempt >= MAX_RETRIES) {
-      const body = await res.text().catch(() => "");
-      throw new Error(`Exa ${res.status} after ${MAX_RETRIES} attempts: ${body}`);
-    }
-    await sleep(RETRY_BASE_MS * 2 ** (attempt - 1));
-    return exaSearchNews(apiKey, query, startPublishedDate, userLocation, includeDomains, attempt + 1);
-  }
-
-  if (!res.ok) {
-    const body = await res.text().catch(() => "");
-    throw new Error(`Exa ${res.status}: ${body}`);
-  }
-
-  return res.json() as Promise<ExaSearchResponse>;
-}
-
-// ---------------------------------------------------------------------------
-// Exa Contents — fetch summaries for a batch of URLs in ONE call.
-// On /contents, `summary` is TOP-LEVEL (unlike /search where it nests in contents).
-// summaryQuery is written in the target language so the summary matches the article.
-// ---------------------------------------------------------------------------
-
-interface ExaContentsResponse {
-  results?: Array<{ id?: string; url?: string; summary?: string }>;
-  error?: string;
-}
-
-async function exaFetchSummaries(
-  apiKey: string,
-  urls: string[],
-  summaryQuery: string,
-  attempt = 1,
-): Promise<Map<string, string>> {
-  const out = new Map<string, string>();
-  if (urls.length === 0) return out;
-
-  let res: Response;
-  try {
-    res = await fetch(`${EXA_BASE}/contents`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "x-api-key": apiKey },
-      // Prefer Exa's cached/indexed content (what search-summary used) over a fresh
-      // livecrawl, which hits paywalls (Bloomberg/FT/MarketWatch) and returns no text.
-      body: JSON.stringify({ urls, summary: { query: summaryQuery }, maxAgeHours: 720 }),
-    });
-  } catch (err) {
-    if (attempt >= MAX_RETRIES) throw err;
-    await sleep(RETRY_BASE_MS * 2 ** (attempt - 1));
-    return exaFetchSummaries(apiKey, urls, summaryQuery, attempt + 1);
-  }
-
-  if (res.status === 429 || res.status >= 500) {
-    if (attempt >= MAX_RETRIES) {
-      const body = await res.text().catch(() => "");
-      throw new Error(`Exa contents ${res.status} after ${MAX_RETRIES} attempts: ${body}`);
-    }
-    await sleep(RETRY_BASE_MS * 2 ** (attempt - 1));
-    return exaFetchSummaries(apiKey, urls, summaryQuery, attempt + 1);
-  }
-  if (!res.ok) {
-    const body = await res.text().catch(() => "");
-    throw new Error(`Exa contents ${res.status}: ${body}`);
-  }
-
-  const json = (await res.json()) as ExaContentsResponse;
-  for (const r of json.results ?? []) {
-    const key = r.url ?? r.id;
-    if (key && r.summary) out.set(key, r.summary);
-  }
-  return out;
-}
-
-// ---------------------------------------------------------------------------
 // Cluster row builder — pure, no DB call (batch upsert happens after Phase 1)
 // Dropping the per-row pre-SELECT + GREATEST(expires_at) logic keeps subrequests
 // within the free-plan cap. expires_at = published_at + TTL is deterministic for
@@ -574,46 +520,50 @@ async function exaFetchSummaries(
 // ---------------------------------------------------------------------------
 
 function buildClusterRow(
-  result: ExaSearchResult,
+  pending: PendingCluster,
   tickers: string[],
   isins: string[],
-  summary: string,
   countries: string[] = [],
   sectors: string[] = [],
 ) {
-  const url = result.url!;
+  const result = pending.result;
+  const url = result.url;
   return {
-    cluster_key: result.id ?? url,
+    cluster_key: url,
     primary_article: {
-      title: result.title ?? "",
+      title: result.title,
       url,
       source: hostname(url),
-      published_at: result.publishedDate!,
+      published_at: result.publishedAt!,
       // Strip an occasional leading "Summary:"/"Résumé:" label.
-      snippet: summary.replace(/^\s*(summary|résumé|resume)\s*:\s*/i, "").trim(),
-      image: result.image ?? null,
-      exa_score: typeof result.score === "number" ? result.score : null,
+      snippet: result.summary.replace(/^\s*(summary|résumé|resume)\s*:\s*/i, "").trim(),
+      image: result.image,
+      provider_score: pending.providerScore,
     },
     see_also: [] as unknown[],
     entities: { isins, tickers, countries, sectors },
-    published_at: result.publishedDate!,
+    published_at: result.publishedAt!,
     fetched_at: new Date().toISOString(),
-    expires_at: new Date(new Date(result.publishedDate!).getTime() + NEWS_WINDOW_MS).toISOString(),
+    expires_at: new Date(new Date(result.publishedAt!).getTime() + NEWS_WINDOW_MS).toISOString(),
   };
 }
 
 // ---------------------------------------------------------------------------
-// Score: exaScore × recencyDecay × holdingsBooster (hybrid; each signal once)
+// Score: providerScore × recencyDecay × holdingsBooster (hybrid; each signal once)
 // ---------------------------------------------------------------------------
 
-function computeMatchScore(exaScore: number, publishedAt: string, holdingsHit: number): number {
+function computeMatchScore(
+  providerScore: number,
+  publishedAt: string,
+  holdingsHit: number,
+): number {
   // Missing score → 0.5: the result came from this company's query, so a format
   // quirk shouldn't zero it out.
-  const exa = Math.min(1, Math.max(0, Number.isFinite(exaScore) ? exaScore : 0.5));
+  const relevance = Math.min(1, Math.max(0, Number.isFinite(providerScore) ? providerScore : 0.5));
   const booster = Math.min(1.3, 1 + (Math.max(1, holdingsHit) - 1) * 0.15);
   const ageHours = (Date.now() - new Date(publishedAt).getTime()) / 3_600_000;
   const recency = Math.max(0.1, 1 - (ageHours / CLUSTER_TTL_HOURS) * 0.9);
-  return Math.round(exa * recency * booster * 10000) / 10000;
+  return Math.round(relevance * recency * booster * 10000) / 10000;
 }
 
 // ---------------------------------------------------------------------------
@@ -649,7 +599,10 @@ function titleSignature(title: string, companyNames: string[]): Set<string> {
   let t = title.toLowerCase();
   t = t.replace(/\s+[–\-|]\s+[^–\-|]*$/u, " "); // trailing " – Bloomberg" / " | Seeking Alpha"
   t = t.replace(/\([^)]*\)/g, " "); // (TTE:NYSE)
-  t = t.replace(/\$/g, " ").replace(/(\d)\s*b\b/g, "$1 billion").replace(/(\d)\s*m\b/g, "$1 million");
+  t = t
+    .replace(/\$/g, " ")
+    .replace(/(\d)\s*b\b/g, "$1 billion")
+    .replace(/(\d)\s*m\b/g, "$1 million");
   for (const name of companyNames) {
     const core = coreName(name);
     if (core) t = t.split(core).join(" ");
@@ -662,7 +615,7 @@ function titleSignature(title: string, companyNames: string[]): Set<string> {
 }
 
 // Collapse near-identical stories from different sources. Keeps the best source
-// tier (tiebreak exaScore, then recency); merges companyKeys and entity sets so
+// tier (tiebreak providerScore, then recency); merges companyKeys and entity sets so
 // attribution survives. Conservative: requires ≥3 shared distinctive tokens AND
 // ≥0.6 containment.
 function dedupeByStory(
@@ -694,14 +647,15 @@ function dedupeByStory(
 
       const pcA = pending.get(keyA)!;
       const pcB = pending.get(keyB)!;
-      const tierA = sourceTier(hostname(pcA.result.url ?? ""));
-      const tierB = sourceTier(hostname(pcB.result.url ?? ""));
+      const tierA = sourceTier(hostname(pcA.result.url));
+      const tierB = sourceTier(hostname(pcB.result.url));
       let dropKey: string;
       if (tierA !== tierB) dropKey = tierA < tierB ? keyB : keyA;
-      else if (pcA.exaScore !== pcB.exaScore) dropKey = pcA.exaScore >= pcB.exaScore ? keyB : keyA;
+      else if (pcA.providerScore !== pcB.providerScore)
+        dropKey = pcA.providerScore >= pcB.providerScore ? keyB : keyA;
       else {
-        const da = new Date(pcA.result.publishedDate ?? 0).getTime();
-        const db = new Date(pcB.result.publishedDate ?? 0).getTime();
+        const da = new Date(pcA.result.publishedAt ?? 0).getTime();
+        const db = new Date(pcB.result.publishedAt ?? 0).getTime();
         dropKey = da >= db ? keyB : keyA;
       }
       const keepKey = dropKey === keyA ? keyB : keyA;
@@ -726,24 +680,24 @@ function dedupeByStory(
 // Subrequest budget (free plan cap = 50):
 //   1    holdings query
 //   0-2  ETF taxonomy reads (etf_constituents + geography; only when ETFs are held)
-//   N    company Exa searches (one per distinct company, N=4 today)
+//   N    company Firecrawl searches (one per distinct company, N=4 today;
+//        summaries ride inline on the search call — 0 extra subrequests)
 //   ≤N   secondary company searches (only when premium results are thin)
-//   M    market-topic Exa searches (one per distinct ETF-derived topic,
+//   M    market-topic Firecrawl searches (one per distinct ETF-derived topic,
 //        M ≤ MAX_MARKET_TOPICS=12, M≈4 today; no secondary tier for topics)
-//   ≤2   Exa contents calls (batched summaries, one per language FR/EN)
 //   1    cluster entities pre-read (batched .in() on cluster_key, so a
 //        re-upsert never erases entity attribution from a previous run)
 //   1    batch cluster upsert (all at once)
 //   1    batch match upsert
 //   1    sweep
 //   ─────────────────
-//   worst case 2N+M+9 (= 21 today with N=4, M=4; ≤ 2N+21 at the topic cap),
-//   typical N+M+9 ≈ 17 — well under 50 at current scale.
+//   worst case 2N+M+7 (= 19 today with N=4, M=4; ≤ 2N+19 at the topic cap),
+//   typical N+M+7 ≈ 15 — well under 50 at current scale.
 // ---------------------------------------------------------------------------
 
 interface PendingCluster {
-  result: ExaSearchResult; // raw search result — summary fetched later via Contents API
-  exaScore: number;
+  result: NewsSearchResult; // mapped search result — summary already inline
+  providerScore: number;
   companyKeys: Set<string>; // company canonical keys AND `topic:*` market keys
   tickers: Set<string>;
   isins: Set<string>;
@@ -753,7 +707,7 @@ interface PendingCluster {
 
 interface ClusterAccum {
   publishedAt: string;
-  exaScore: number;
+  providerScore: number;
   companyKeys: Set<string>;
 }
 
@@ -763,6 +717,8 @@ export async function runNewsFanout(env: Env): Promise<{
   clustersUpserted: number;
   matchesUpserted: number;
   undatedDropped: number;
+  staleDropped: number;
+  googleWrappedDropped: number;
   lowValueDropped: number;
   offTargetDropped: number;
   offTopicDropped: number;
@@ -773,25 +729,27 @@ export async function runNewsFanout(env: Env): Promise<{
 }> {
   const errors: string[] = [];
 
-  if (!env.EXA_SEARCH) {
-    console.warn("[news] EXA_SEARCH not set — skipping news fanout");
+  if (!env.FIRECRAWL_API_KEY) {
+    console.warn("[news] FIRECRAWL_API_KEY not set — skipping news fanout");
     return {
       distinctCompaniesQueried: 0,
       marketTopicsQueried: 0,
       clustersUpserted: 0,
       matchesUpserted: 0,
       undatedDropped: 0,
+      staleDropped: 0,
+      googleWrappedDropped: 0,
       lowValueDropped: 0,
       offTargetDropped: 0,
       offTopicDropped: 0,
       secondarySearches: 0,
       dedupedAway: 0,
       expiredSwept: 0,
-      errors: ["EXA_SEARCH not configured"],
+      errors: ["FIRECRAWL_API_KEY not configured"],
     };
   }
 
-  const apiKey = env.EXA_SEARCH;
+  const apiKey = env.FIRECRAWL_API_KEY;
   const client: AnySupabaseClient = createClient(env.SUPABASE_URL, env.SUPABASE_SERVICE_KEY);
 
   // --- Build global work-list (1 subrequest) ---------------------------------
@@ -808,7 +766,9 @@ export async function runNewsFanout(env: Env): Promise<{
     errors.push(`market work-list: ${msg}`);
   }
   const marketEntries = [...marketList.values()]
-    .sort((a, b) => (a.canonicalKey < b.canonicalKey ? -1 : a.canonicalKey > b.canonicalKey ? 1 : 0))
+    .sort((a, b) =>
+      a.canonicalKey < b.canonicalKey ? -1 : a.canonicalKey > b.canonicalKey ? 1 : 0,
+    )
     .slice(0, MAX_MARKET_TOPICS);
   // Drop capped-away entries so later match/dedup phases can't reference them.
   marketList = new Map(marketEntries.map((e) => [e.canonicalKey, e]));
@@ -819,54 +779,67 @@ export async function runNewsFanout(env: Env): Promise<{
   const cursor = 0;
   const companies = allCompanies.slice(cursor, cursor + FANOUT_WINDOW);
 
-  const startPublishedDate = new Date(Date.now() - NEWS_WINDOW_MS).toISOString();
   const userLocation = deriveUserLocation(workList);
 
   // --- Phase 1: FETCH — collect results, no DB writes (N..2N+M subrequests) --
   const pendingClusters = new Map<string, PendingCluster>();
   let undatedDropped = 0;
+  let staleDropped = 0;
+  let googleWrappedDropped = 0;
   let lowValueDropped = 0;
   let offTargetDropped = 0;
   let offTopicDropped = 0;
   let secondarySearches = 0;
 
+  // Explicit ≤7-day window: Firecrawl's tbs:"qdr:w" leaks ~12% older results
+  // (some years old), so this filter — not the undated-drop — is the
+  // load-bearing recency guard now.
+  const isStale = (publishedAt: string): boolean => {
+    const ageMs = Date.now() - new Date(publishedAt).getTime();
+    return ageMs < 0 || ageMs > NEWS_WINDOW_MS;
+  };
+
   // Filter a result list for one company and add survivors to pendingClusters.
   // Returns the count of on-target (company-mentioning) results kept.
   const ingest = (
-    results: ExaSearchResult[],
+    results: NewsSearchResult[],
     company: CompanyEntry,
     tickerArr: string[],
     isinArr: string[],
   ): number => {
     let kept = 0;
     for (const result of results) {
-      if (!result.publishedDate || !result.url) {
+      if (!result.publishedAt) {
         undatedDropped++;
         continue;
       }
-      if (isLowValuePage(result.title ?? "", result.url)) {
+      if (isStale(result.publishedAt)) {
+        staleDropped++;
+        continue;
+      }
+      if (isLowValuePage(result.title, result.url)) {
         lowValueDropped++;
         continue;
       }
-      // Drift filter on the TITLE only (summary not fetched yet — see Contents step).
-      if (!mentionsCompany(result.title ?? "", [company.query])) {
+      // Drift filter on title + inline summary (summaries reliably carry the
+      // full official company name even when a paywalled title doesn't).
+      if (!mentionsCompany(`${result.title}\n${result.summary}`, [company.query])) {
         offTargetDropped++;
         continue;
       }
 
       kept++;
-      const clusterKey = result.id ?? result.url;
-      const exaScore = typeof result.score === "number" ? result.score : 0.5;
+      const clusterKey = result.url;
       const existing = pendingClusters.get(clusterKey);
       if (existing) {
-        existing.exaScore = Math.max(existing.exaScore, exaScore);
+        existing.providerScore = Math.max(existing.providerScore, result.providerScore);
         existing.companyKeys.add(company.canonicalKey);
         tickerArr.forEach((t) => existing.tickers.add(t));
         isinArr.forEach((i) => existing.isins.add(i));
       } else {
         pendingClusters.set(clusterKey, {
           result,
-          exaScore,
+          providerScore: result.providerScore,
           companyKeys: new Set([company.canonicalKey]),
           tickers: new Set(tickerArr),
           isins: new Set(isinArr),
@@ -879,41 +852,42 @@ export async function runNewsFanout(env: Env): Promise<{
   };
 
   // Market analog of `ingest`: topic-relevance drift filter instead of the
-  // company-name filter, plus a per-topic keep cap (best Exa score first).
-  const ingestMarket = (results: ExaSearchResult[], entry: MarketEntry): void => {
-    const survivors: Array<{ result: ExaSearchResult; exaScore: number }> = [];
+  // company-name filter, plus a per-topic keep cap (best provider score first).
+  const ingestMarket = (results: NewsSearchResult[], entry: MarketEntry): void => {
+    const survivors: NewsSearchResult[] = [];
     for (const result of results) {
-      if (!result.publishedDate || !result.url) {
+      if (!result.publishedAt) {
         undatedDropped++;
         continue;
       }
-      if (isLowValuePage(result.title ?? "", result.url)) {
+      if (isStale(result.publishedAt)) {
+        staleDropped++;
+        continue;
+      }
+      if (isLowValuePage(result.title, result.url)) {
         lowValueDropped++;
         continue;
       }
-      if (!mentionsTopic(result.title ?? "", entry.topic)) {
+      if (!mentionsTopic(`${result.title}\n${result.summary}`, entry.topic)) {
         offTopicDropped++;
         continue;
       }
-      survivors.push({
-        result,
-        exaScore: typeof result.score === "number" ? result.score : 0.5,
-      });
+      survivors.push(result);
     }
 
-    survivors.sort((a, b) => b.exaScore - a.exaScore);
-    for (const s of survivors.slice(0, MARKET_RESULTS_KEPT)) {
-      const clusterKey = s.result.id ?? s.result.url!;
+    survivors.sort((a, b) => b.providerScore - a.providerScore);
+    for (const result of survivors.slice(0, MARKET_RESULTS_KEPT)) {
+      const clusterKey = result.url;
       const existing = pendingClusters.get(clusterKey);
       if (existing) {
-        existing.exaScore = Math.max(existing.exaScore, s.exaScore);
+        existing.providerScore = Math.max(existing.providerScore, result.providerScore);
         existing.companyKeys.add(entry.canonicalKey);
         entry.topic.countries.forEach((c) => existing.countries.add(c));
         entry.topic.sectors.forEach((sec) => existing.sectors.add(sec));
       } else {
         pendingClusters.set(clusterKey, {
-          result: s.result,
-          exaScore: s.exaScore,
+          result,
+          providerScore: result.providerScore,
           companyKeys: new Set([entry.canonicalKey]),
           tickers: new Set(),
           isins: new Set(),
@@ -936,35 +910,69 @@ export async function runNewsFanout(env: Env): Promise<{
     // News-intent phrasing nudges ranking toward articles over reference pages.
     const newsQuery = `${company.query} latest news and developments`;
 
+    // Extract mapped results, tallying the shared drop counters. Firecrawl
+    // errors surface either as thrown non-2xx statuses or as an in-body
+    // success:false/error — normalize both to null + errors[] entry.
+    const mapped = (
+      response: FirecrawlSearchResponse,
+      label: string,
+    ): NewsSearchResult[] | null => {
+      if (response.success === false || response.error) {
+        console.error(
+          `[news] Firecrawl API error for "${label}":`,
+          response.error ?? "success=false",
+        );
+        return null;
+      }
+      const { results, googleWrappedDropped: dropped } = mapFirecrawlNewsResults(
+        response.data?.news ?? [],
+        Date.now(),
+      );
+      googleWrappedDropped += dropped;
+      return results;
+    };
+
     // Primary search — premium allowlist.
-    let primary: ExaSearchResponse;
+    let primaryResults: NewsSearchResult[] | null;
     try {
-      primary = await exaSearchNews(apiKey, newsQuery, startPublishedDate, userLocation, NEWS_INCLUDE_DOMAINS);
+      const primary = await firecrawlSearchNews(apiKey, {
+        query: newsQuery,
+        limit: RESULTS_PER_COMPANY,
+        location: userLocation,
+        includeDomains: NEWS_INCLUDE_DOMAINS,
+      });
+      primaryResults = mapped(primary, company.query);
+      if (!primaryResults) {
+        errors.push(`${company.canonicalKey}: Firecrawl error ${primary.error ?? "success=false"}`);
+        return;
+      }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      console.error(`[news] Exa primary failed for "${company.query}":`, msg);
+      console.error(`[news] Firecrawl primary failed for "${company.query}":`, msg);
       errors.push(`${company.canonicalKey}: ${msg}`);
       return;
     }
-    if (primary.error) {
-      console.error(`[news] Exa API error for "${company.query}":`, primary.error);
-      errors.push(`${company.canonicalKey}: Exa error ${primary.error}`);
-      return;
-    }
-    const onTarget = ingest(primary.results ?? [], company, tickerArr, isinArr);
+    const onTarget = ingest(primaryResults, company, tickerArr, isinArr);
 
     // Tiered fallback — too few on-target premium results → broaden once.
     if (onTarget < MIN_ONTARGET) {
       secondarySearches++;
       try {
-        const secondary = await exaSearchNews(
-          apiKey, newsQuery, startPublishedDate, userLocation, NEWS_INCLUDE_DOMAINS_SECONDARY,
-        );
-        if (!secondary.error) ingest(secondary.results ?? [], company, tickerArr, isinArr);
-        else errors.push(`${company.canonicalKey} (secondary): Exa error ${secondary.error}`);
+        const secondary = await firecrawlSearchNews(apiKey, {
+          query: newsQuery,
+          limit: RESULTS_PER_COMPANY,
+          location: userLocation,
+          includeDomains: NEWS_INCLUDE_DOMAINS_SECONDARY,
+        });
+        const secondaryResults = mapped(secondary, `${company.query} (secondary)`);
+        if (secondaryResults) ingest(secondaryResults, company, tickerArr, isinArr);
+        else
+          errors.push(
+            `${company.canonicalKey} (secondary): Firecrawl error ${secondary.error ?? "success=false"}`,
+          );
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
-        console.error(`[news] Exa secondary failed for "${company.query}":`, msg);
+        console.error(`[news] Firecrawl secondary failed for "${company.query}":`, msg);
         errors.push(`${company.canonicalKey} (secondary): ${msg}`);
       }
     }
@@ -974,18 +982,29 @@ export async function runNewsFanout(env: Env): Promise<{
   // coverage is dense there, so no secondary tier: keeps the budget deterministic.
   await runWithConcurrency(marketEntries, FETCH_CONCURRENCY, async (entry) => {
     try {
-      const response = await exaSearchNews(
-        apiKey, entry.topic.query, startPublishedDate, userLocation, NEWS_INCLUDE_DOMAINS,
-      );
-      if (response.error) {
-        console.error(`[news] Exa API error for topic "${entry.topic.topicKey}":`, response.error);
-        errors.push(`${entry.canonicalKey}: Exa error ${response.error}`);
+      const response = await firecrawlSearchNews(apiKey, {
+        query: entry.topic.query,
+        limit: RESULTS_PER_MARKET_TOPIC,
+        location: userLocation,
+        includeDomains: NEWS_INCLUDE_DOMAINS,
+      });
+      if (response.success === false || response.error) {
+        console.error(
+          `[news] Firecrawl API error for topic "${entry.topic.topicKey}":`,
+          response.error ?? "success=false",
+        );
+        errors.push(`${entry.canonicalKey}: Firecrawl error ${response.error ?? "success=false"}`);
         return;
       }
-      ingestMarket(response.results ?? [], entry);
+      const { results, googleWrappedDropped: dropped } = mapFirecrawlNewsResults(
+        response.data?.news ?? [],
+        Date.now(),
+      );
+      googleWrappedDropped += dropped;
+      ingestMarket(results, entry);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      console.error(`[news] Exa market search failed for "${entry.topic.topicKey}":`, msg);
+      console.error(`[news] Firecrawl market search failed for "${entry.topic.topicKey}":`, msg);
       errors.push(`${entry.canonicalKey}: ${msg}`);
     }
   });
@@ -996,27 +1015,10 @@ export async function runNewsFanout(env: Env): Promise<{
   for (const [key, entry] of marketList) queryByKey.set(key, entry.topic.label);
   const dedupedAway = dedupeByStory(pendingClusters, queryByKey);
 
-  // --- Fetch summaries for survivors only, in the article's language ---------
-  const EN_SUMMARY_QUERY =
-    "Summarize the key business, financial, and strategic developments in this article in 2-3 sentences.";
-  const FR_SUMMARY_QUERY =
-    "Résumez les principaux développements commerciaux, financiers et stratégiques de cet article en 2 à 3 phrases.";
-
+  // Summaries arrived inline with each search result (scrapeOptions summary
+  // format) — no separate contents/scrape phase. Results whose scrape failed
+  // keep an empty snippet, exactly as before.
   const survivors = [...pendingClusters.values()];
-  const summaryByUrl = new Map<string, string>();
-  const frUrls = survivors.filter((p) => isFrenchSource(hostname(p.result.url ?? ""))).map((p) => p.result.url!);
-  const enUrls = survivors.filter((p) => !isFrenchSource(hostname(p.result.url ?? ""))).map((p) => p.result.url!);
-  for (const [urls, q] of [[frUrls, FR_SUMMARY_QUERY], [enUrls, EN_SUMMARY_QUERY]] as const) {
-    if (urls.length === 0) continue;
-    try {
-      const m = await exaFetchSummaries(apiKey, urls, q);
-      for (const [u, s] of m) summaryByUrl.set(u, s);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.error("[news] Exa contents (summaries) failed:", msg);
-      errors.push(`contents: ${msg}`);
-    }
-  }
 
   // --- Merge prior-run entity attribution (1 subrequest) ---------------------
   // The upsert below is last-writer-wins on the whole row: without this union a
@@ -1031,15 +1033,24 @@ export async function runNewsFanout(env: Env): Promise<{
     const { data: existingRows, error: preReadError } = await client
       .from("news_clusters")
       .select("cluster_key,entities")
-      .in("cluster_key", survivors.map((p) => p.result.id ?? p.result.url!));
+      .in(
+        "cluster_key",
+        survivors.map((p) => p.result.url),
+      );
     if (preReadError) {
       errors.push(`cluster entities pre-read: ${preReadError.message}`);
       console.error("[news] cluster entities pre-read failed:", preReadError.message);
     }
-    const rows = (existingRows as Array<{
-      cluster_key: string;
-      entities: { isins?: string[]; tickers?: string[]; countries?: string[]; sectors?: string[] } | null;
-    }> | null) ?? [];
+    const rows =
+      (existingRows as Array<{
+        cluster_key: string;
+        entities: {
+          isins?: string[];
+          tickers?: string[];
+          countries?: string[];
+          sectors?: string[];
+        } | null;
+      }> | null) ?? [];
     for (const row of rows) {
       const pending = pendingClusters.get(row.cluster_key);
       if (!pending || !row.entities) continue;
@@ -1052,24 +1063,20 @@ export async function runNewsFanout(env: Env): Promise<{
 
   // --- Batch cluster upsert (1 subrequest) -----------------------------------
   const clusterRows = survivors.map((p) =>
-    buildClusterRow(
-      p.result,
-      [...p.tickers],
-      [...p.isins],
-      summaryByUrl.get(p.result.url!) ?? "",
-      [...p.countries],
-      [...p.sectors],
-    ),
+    buildClusterRow(p, [...p.tickers], [...p.isins], [...p.countries], [...p.sectors]),
   );
   let clustersUpserted = 0;
   const clusterMap = new Map<string, ClusterAccum>();
 
   if (clusterRows.length > 0) {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const { data: upserted, error: clusterBatchError } = await (client as any)
+    const { data: upserted, error: clusterBatchError } = (await (client as any)
       .from("news_clusters")
       .upsert(clusterRows, { onConflict: "cluster_key" })
-      .select("id, cluster_key") as { data: Array<{ id: string; cluster_key: string }> | null; error: { message: string } | null };
+      .select("id, cluster_key")) as {
+      data: Array<{ id: string; cluster_key: string }> | null;
+      error: { message: string } | null;
+    };
 
     if (clusterBatchError) {
       errors.push(`batch cluster upsert: ${clusterBatchError.message}`);
@@ -1079,8 +1086,8 @@ export async function runNewsFanout(env: Env): Promise<{
         const pending = pendingClusters.get(row.cluster_key);
         if (pending) {
           clusterMap.set(row.id, {
-            publishedAt: pending.result.publishedDate ?? new Date().toISOString(),
-            exaScore: pending.exaScore,
+            publishedAt: pending.result.publishedAt ?? new Date().toISOString(),
+            providerScore: pending.providerScore,
             companyKeys: pending.companyKeys,
           });
         }
@@ -1166,7 +1173,7 @@ export async function runNewsFanout(env: Env): Promise<{
       matchRows.push({
         portfolio_id: portfolioId,
         cluster_id: clusterId,
-        score: computeMatchScore(cluster.exaScore, cluster.publishedAt, acc.keys.size),
+        score: computeMatchScore(cluster.providerScore, cluster.publishedAt, acc.keys.size),
         match_reason: matchReason,
       });
     }
@@ -1201,6 +1208,8 @@ export async function runNewsFanout(env: Env): Promise<{
     clustersUpserted,
     matchesUpserted,
     undatedDropped,
+    staleDropped,
+    googleWrappedDropped,
     lowValueDropped,
     offTargetDropped,
     offTopicDropped,

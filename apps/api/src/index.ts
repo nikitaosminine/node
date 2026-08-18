@@ -57,6 +57,9 @@ export interface Env {
   SUB_AGENT_PLANNING_SYSTEM_PROMPT?: string;
   FRED_API_KEY?: string;
   EXA_SEARCH?: string;
+  // Firecrawl search for the news fanout (must carry the fc- prefix; the
+  // provider module normalizes a bare token). Exa remains for recaps only.
+  FIRECRAWL_API_KEY?: string;
   POLYMARKET_GAMMA_BASE_URL?: string;
   GEMINI_API_KEY?: string;
   GEMINI_MODEL?: string;
@@ -5540,10 +5543,13 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
         )
         .eq("portfolio_id", portfolioId)
         .gt("news_clusters.expires_at", new Date().toISOString())
-        // Minimum score floor. Score is exaScore × recency × holdingsBooster,
-        // whose distribution differs from the previous provider's entity-weight
-        // one — so this starts permissive and MUST be recalibrated empirically
-        // from observed Exa output (see plan verification step).
+        // Minimum score floor. Score is providerScore × recency × holdingsBooster.
+        // Under Firecrawl's rank decay (0.95^(rank−1), clamped ≥0.2) a rank-10
+        // article never falls below 0.063 and a rank-15 article reaches the
+        // 0.05 serving floor only at the very end of the 7-day window. The floor
+        // keeps its permissive intent and only trims the bottom-rank near-expiry
+        // tail; junk control lives in the fanout filters. Revisit upward (~0.10)
+        // only after observing served distributions (1A-114 spike, dimension 5).
         .gte("score", 0.05)
         .order("score", { ascending: false })
         .limit(limit);
@@ -5847,9 +5853,11 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
     } catch (error) {
       console.error("daily snapshot fanout failed", error);
     }
-    // News fanout — decoupled from the hourly cron to a few times/day to cut Exa
-    // spend. Runs only on these cron slots (not the hourly "5 * * * *"): weekday
-    // morning, afternoon, and evening. Manual runs go via /api/_debug/run-news-fanout.
+    // News fanout — decoupled from the hourly cron to a few times/day to cut
+    // search-provider spend (~110 Firecrawl credits per run at the current
+    // limit-10/15 mix). Runs only on these cron slots (not the hourly
+    // "5 * * * *"): weekday morning, afternoon, and evening. Manual runs go via
+    // /api/_debug/run-news-fanout.
     const NEWS_CRON_SLOTS = new Set(["30 6 * * 2-6", "30 16 * * 1-5", "0 21 * * 1-5"]);
     if (NEWS_CRON_SLOTS.has(controller.cron)) {
       try {
