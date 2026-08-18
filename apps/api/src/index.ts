@@ -90,13 +90,13 @@ const INVOCATION_SUBREQUEST_BUDGET = 50;
 
 export interface InvocationSubrequestBudget {
   remaining(): number;
+  fetch: typeof globalThis.fetch;
 }
 
 export async function withInvocationSubrequestBudget<T>(
   work: (budget: InvocationSubrequestBudget) => Promise<T>,
 ): Promise<T> {
-  const originalFetch = globalThis.fetch;
-  const nativeFetch = originalFetch.bind(globalThis);
+  const nativeFetch = globalThis.fetch.bind(globalThis);
   let used = 0;
   const guardedFetch: typeof globalThis.fetch = async (input, init) => {
     if (used >= INVOCATION_SUBREQUEST_BUDGET) {
@@ -106,12 +106,10 @@ export async function withInvocationSubrequestBudget<T>(
     return nativeFetch(input, init);
   };
 
-  globalThis.fetch = guardedFetch;
-  try {
-    return await work({ remaining: () => INVOCATION_SUBREQUEST_BUDGET - used });
-  } finally {
-    globalThis.fetch = originalFetch;
-  }
+  return work({
+    remaining: () => INVOCATION_SUBREQUEST_BUDGET - used,
+    fetch: guardedFetch,
+  });
 }
 
 // Deterministic UUID from a stable input string (SHA-256 → UUID format).
@@ -1115,8 +1113,11 @@ function resolveFastHoldingGeography(
   };
 }
 
-async function runGeographyMonthlyRefresh(env: Env): Promise<void> {
-  const { data, error } = await adminDb(env).from("portfolios").select("id");
+async function runGeographyMonthlyRefresh(
+  env: Env,
+  fetchImpl?: typeof globalThis.fetch,
+): Promise<void> {
+  const { data, error } = await adminDb(env, { fetch: fetchImpl }).from("portfolios").select("id");
   if (error) throw new Error(`monthly geography refresh portfolio lookup failed: ${error.message}`);
   const portfolioIds = (data ?? []).map((r) => String(r.id));
   await Promise.all(
@@ -1124,6 +1125,7 @@ async function runGeographyMonthlyRefresh(env: Env): Promise<void> {
       enqueuePendingGeographyResearch(env, portfolioId, "monthly_refresh", {
         force: true,
         includeResearched: true,
+        fetch: fetchImpl,
       }).catch((err) => console.error(`monthly geography refresh failed for ${portfolioId}:`, err)),
     ),
   );
@@ -1277,9 +1279,9 @@ async function recomputePortfolioGeography(env: Env, portfolioId: string): Promi
 async function pendingFundLikeHoldingIds(
   env: Env,
   portfolioId: string,
-  options: { includeResearched?: boolean } = {},
+  options: { includeResearched?: boolean; fetch?: typeof globalThis.fetch } = {},
 ): Promise<string[]> {
-  const client = adminDb(env);
+  const client = adminDb(env, { fetch: options.fetch });
   const { data, error } = await client
     .from("holdings")
     .select("id,ticker,name,asset_type")
@@ -1319,11 +1321,12 @@ async function enqueuePendingGeographyResearch(
   env: Env,
   portfolioId: string,
   reason: GeographyQueueMessage["reason"],
-  options: { force?: boolean; includeResearched?: boolean } = {},
+  options: { force?: boolean; includeResearched?: boolean; fetch?: typeof globalThis.fetch } = {},
 ): Promise<{ queued: boolean; pendingResearchCount: number; holdingIds: string[]; sentHoldingIds: string[] }> {
-  const client = adminDb(env);
+  const client = adminDb(env, { fetch: options.fetch });
   const holdingIds = await pendingFundLikeHoldingIds(env, portfolioId, {
     includeResearched: options.includeResearched,
+    fetch: options.fetch,
   });
   if (holdingIds.length === 0) {
     return { queued: false, pendingResearchCount: 0, holdingIds, sentHoldingIds: [] };
@@ -3184,7 +3187,11 @@ async function appendTodaySnapshot(env: Env, portfolioId: string): Promise<strin
   return date;
 }
 
-async function enqueueDailySnapshotsForClosedMarkets(env: Env, scheduledTime: number): Promise<void> {
+async function enqueueDailySnapshotsForClosedMarkets(
+  env: Env,
+  scheduledTime: number,
+  fetchImpl?: typeof globalThis.fetch,
+): Promise<void> {
   if (!env.SNAPSHOT_QUEUE) return;
   const scheduledAt = new Date(scheduledTime);
   const timeKey = `${scheduledAt.getUTCHours()}:${String(scheduledAt.getUTCMinutes()).padStart(2, "0")}`;
@@ -3197,7 +3204,7 @@ async function enqueueDailySnapshotsForClosedMarkets(env: Env, scheduledTime: nu
   const exchanges = exchangesByTime[timeKey] ?? [];
   if (exchanges.length === 0) return;
 
-  const { data, error } = await adminDb(env)
+  const { data, error } = await adminDb(env, { fetch: fetchImpl })
     .from("portfolios")
     .select("id")
     .in("primary_exchange", exchanges);
@@ -3346,8 +3353,9 @@ async function createAndQueueRecap(
     periodStart: string;
     periodEnd: string;
   },
+  fetchImpl?: typeof globalThis.fetch,
 ): Promise<string | null> {
-  const client = adminDb(env);
+  const client = adminDb(env, { fetch: fetchImpl });
   const { data, error } = await client
     .from("recaps")
     .insert({
@@ -3376,8 +3384,9 @@ async function createAndQueueRecap(
 async function runWeeklyRecapFanout(
   env: Env,
   options: { now: Date; dryRun?: boolean },
+  fetchImpl?: typeof globalThis.fetch,
 ): Promise<{ dryRun: boolean; checkedPortfolios: number; duePortfolios: number; queued: number; queuedIds: string[] }> {
-  const client = adminDb(env);
+  const client = adminDb(env, { fetch: fetchImpl });
   const [{ data: portfolios, error: pErr }, { data: userSettings, error: sErr }] = await Promise.all([
     client.from("portfolios").select("id,user_id"),
     client.from("agent_user_settings").select("user_id,timezone"),
@@ -3418,7 +3427,7 @@ async function runWeeklyRecapFanout(
       type: "weekly",
       periodStart,
       periodEnd,
-    });
+    }, fetchImpl);
     if (id) queuedIds.push(id);
   }
 
@@ -3433,7 +3442,7 @@ async function runWeeklyRecapFanout(
 
 async function runScheduledFanout(
   env: Env,
-  options: { now: Date; dryRun?: boolean; source: "cron" | "manual" },
+  options: { now: Date; dryRun?: boolean; source: "cron" | "manual"; fetch?: typeof globalThis.fetch },
 ): Promise<{
   source: "cron" | "manual";
   dryRun: boolean;
@@ -3446,7 +3455,7 @@ async function runScheduledFanout(
     throw new Error("Server misconfiguration: AGENT_RUNS_QUEUE binding is missing");
   }
 
-  const client = adminDb(env);
+  const client = adminDb(env, { fetch: options.fetch });
   const [{ data: portfolios, error: portfoliosError }, { data: userSettings, error: userSettingsError }, { data: portfolioSettings, error: portfolioSettingsError }] =
     await Promise.all([
       client.from("portfolios").select("id,user_id"),
@@ -3515,7 +3524,7 @@ async function runScheduledFanout(
 
   const queuedRunIds: string[] = [];
   for (const target of dueTargets) {
-    const run = await createRun(adminDb(env), {
+    const run = await createRun(client, {
       userId: String(target.user_id),
       portfolioId: String(target.id),
       triggerType: "scheduled",
@@ -5883,12 +5892,17 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
         await runScheduledFanout(env, {
           now: new Date(controller.scheduledTime),
           source: "cron",
+          fetch: invocationBudget.fetch,
         });
       } catch (error) {
         console.error("scheduled fanout failed", error);
       }
       try {
-        await enqueueDailySnapshotsForClosedMarkets(env, controller.scheduledTime);
+        await enqueueDailySnapshotsForClosedMarkets(
+          env,
+          controller.scheduledTime,
+          invocationBudget.fetch,
+        );
       } catch (error) {
         console.error("daily snapshot fanout failed", error);
       }
@@ -5900,13 +5914,14 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
         try {
           await runNewsFanout(env, {
             availableSubrequests: invocationBudget.remaining(),
+            fetch: invocationBudget.fetch,
           });
         } catch (error) {
           console.error("news fanout failed", error);
         }
       }
       try {
-        await runPolymarketFanout(env);
+        await runPolymarketFanout(env, { fetch: invocationBudget.fetch });
       } catch (error) {
         console.error("polymarket fanout failed", error);
       }
@@ -5915,7 +5930,11 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
       // snapshot commit in queue(), not here.
       if (controller.cron === "5 * * * *") {
         try {
-          await runWeeklyRecapFanout(env, { now: new Date(controller.scheduledTime) });
+          await runWeeklyRecapFanout(
+            env,
+            { now: new Date(controller.scheduledTime) },
+            invocationBudget.fetch,
+          );
         } catch (error) {
           console.error("weekly recap fanout failed", error);
         }
@@ -5925,7 +5944,7 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
         const scheduledDate = new Date(controller.scheduledTime);
         if (scheduledDate.getUTCDate() === 1 && scheduledDate.getUTCHours() === 0) {
           try {
-            await runGeographyMonthlyRefresh(env);
+            await runGeographyMonthlyRefresh(env, invocationBudget.fetch);
           } catch (error) {
             console.error("monthly geography refresh failed", error);
           }

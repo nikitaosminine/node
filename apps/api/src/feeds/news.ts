@@ -264,7 +264,10 @@ class NewsSubrequestBudget {
   private reserved = 0;
   private activeReservation: number | null = null;
 
-  constructor(private readonly limit: number = NEWS_SUBREQUEST_BUDGET) {}
+  constructor(
+    private readonly limit: number = NEWS_SUBREQUEST_BUDGET,
+    private readonly fetchImpl: NewsFetch = globalThis.fetch,
+  ) {}
 
   reserve(count: number): void {
     if (this.used + this.reserved + count > this.limit) {
@@ -293,7 +296,7 @@ class NewsSubrequestBudget {
     }
     if (this.activeReservation !== null) this.activeReservation--;
     this.used++;
-    return globalThis.fetch(input, init);
+    return this.fetchImpl(input, init);
   }
 }
 
@@ -1327,7 +1330,7 @@ interface ClusterAccum {
 
 export async function runNewsFanout(
   env: Env,
-  options: { availableSubrequests?: number } = {},
+  options: { availableSubrequests?: number; fetch?: NewsFetch } = {},
 ): Promise<{
   distinctCompaniesQueried: number;
   marketTopicsQueried: number;
@@ -1371,7 +1374,7 @@ export async function runNewsFanout(
     0,
     Math.min(NEWS_SUBREQUEST_BUDGET, options.availableSubrequests ?? NEWS_SUBREQUEST_BUDGET),
   );
-  const budget = new NewsSubrequestBudget(availableSubrequests);
+  const budget = new NewsSubrequestBudget(availableSubrequests, options.fetch);
   const budgetFetch = budget.fetch.bind(budget);
   const client: AnySupabaseClient = createClient(env.SUPABASE_URL, env.SUPABASE_SERVICE_KEY, {
     global: { fetch: budgetFetch },

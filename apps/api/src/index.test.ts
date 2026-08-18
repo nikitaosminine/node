@@ -201,18 +201,20 @@ describe("withInvocationSubrequestBudget", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     await withInvocationSubrequestBudget(async (budget) => {
+      expect(globalThis.fetch).toBe(fetchMock);
       expect(budget.remaining()).toBe(50);
-      await fetch("https://example.test");
+      await budget.fetch("https://example.test");
       expect(budget.remaining()).toBe(49);
       for (let i = 0; i < 49; i++) {
-        await fetch("https://example.test");
+        await budget.fetch("https://example.test");
       }
-      await expect(fetch("https://example.test")).rejects.toThrow(
+      await expect(budget.fetch("https://example.test")).rejects.toThrow(
         "scheduled invocation subrequest budget exhausted",
       );
+      await fetch("https://example.test");
     });
 
-    expect(fetchMock).toHaveBeenCalledTimes(50);
+    expect(fetchMock).toHaveBeenCalledTimes(51);
     expect(globalThis.fetch).toBe(fetchMock);
   });
 });
