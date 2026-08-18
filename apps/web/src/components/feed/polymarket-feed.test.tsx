@@ -141,11 +141,7 @@ describe("PolymarketFeed", () => {
     });
 
     const { rerender } = render(
-      <MarketRow
-        market={expiring}
-        isPinned={false}
-        reason="Relevant to your holdings"
-      />,
+      <MarketRow market={expiring} isPinned={false} reason="Relevant to your holdings" />,
     );
 
     const rowLink = screen.getByText("Expiring market").closest("a");
@@ -153,13 +149,7 @@ describe("PolymarketFeed", () => {
     expect(within(rowLink as HTMLElement).getByText(/Ends in/)).toBeInTheDocument();
 
     vi.mocked(Date.now).mockReturnValue(TEST_NOW + 15_000);
-    rerender(
-      <MarketRow
-        market={expiring}
-        isPinned={false}
-        reason="Relevant to your holdings"
-      />,
-    );
+    rerender(<MarketRow market={expiring} isPinned={false} reason="Relevant to your holdings" />);
 
     expect(within(rowLink as HTMLElement).queryByText(/Ends in/)).toBeNull();
     expect(within(rowLink as HTMLElement).getByText(/Ended .* ago/)).toBeInTheDocument();

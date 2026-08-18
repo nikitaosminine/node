@@ -391,8 +391,7 @@ export function PolymarketFeed({ portfolioId }: PolymarketFeedProps) {
     : categoryMarkets.filter((m) => filterMarket(m.question));
 
   // Freshness derives from the data itself (`fetched_at` on rendered rows), not
-  // client fetch time — prices refresh at most hourly regardless of when the
-  // browser last polled.
+  // client fetch time — the server may return rows older than the last browser poll.
   const freshnessSourceMarkets = isPersonalized
     ? [...pinnedFiltered, ...rotatingFiltered].map((m) => m.polymarket_markets)
     : categoryFiltered;
