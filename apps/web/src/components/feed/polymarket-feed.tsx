@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback, useMemo, type ReactNode } from "react";
 import { TrendingUp, Pin, CalendarDays } from "lucide-react";
-import { formatDistanceToNow, isPast } from "date-fns";
+import { formatDistanceToNow } from "date-fns";
 import { FeedShell } from "@/components/feed/feed-shell";
 import {
   CategoryPills,
@@ -11,6 +11,8 @@ import {
 } from "@/components/feed/category-pills";
 import { ExpandableSearch } from "@/components/feed/expandable-search";
 import { API_BASE_URL } from "@/lib/api";
+import { cn } from "@/lib/utils";
+import { maxFetchedAt, formatAge, isStale, isFallbackMatch } from "@/lib/polymarket-freshness";
 
 const POLL_INTERVAL_MS = 5 * 60 * 1000;
 
@@ -88,8 +90,8 @@ function endDateLabel(iso: string | null): string | null {
   if (!iso) return null;
   try {
     const d = new Date(iso);
-    if (isPast(d)) return "Resolved";
-    return `Ends ${formatDistanceToNow(d, { addSuffix: true })}`;
+    const prefix = d.getTime() > Date.now() ? "Ends" : "Ended";
+    return `${prefix} ${formatDistanceToNow(d, { addSuffix: true })}`;
   } catch {
     return null;
   }
@@ -105,17 +107,6 @@ function formatVolume(v: number | null | undefined): string | null {
   if (v >= 1_000_000) return `$${(v / 1_000_000).toFixed(1)}M`;
   if (v >= 1_000) return `$${Math.round(v / 1_000)}k`;
   return `$${Math.round(v)}`;
-}
-
-/** Live "updated Xs ago" — recomputed on each tick of `now` */
-function formatUpdatedAgo(since: Date | null, now: number): string | null {
-  if (!since) return null;
-  const secs = Math.max(0, Math.round((now - since.getTime()) / 1000));
-  if (secs < 60) return `${secs}s ago`;
-  const mins = Math.floor(secs / 60);
-  if (mins < 60) return `${mins}m ago`;
-  const hrs = Math.floor(mins / 60);
-  return `${hrs}h ago`;
 }
 
 // ---------------------------------------------------------------------------
@@ -156,14 +147,17 @@ function ProbabilityBar({ pairs }: { pairs: Array<{ label: string; prob: number 
 // Market row — used for both personalized and category tabs
 // ---------------------------------------------------------------------------
 
-function MarketRow({
+export function MarketRow({
   market,
   isPinned,
   reason,
+  muted = false,
 }: {
   market: PolymarketMarket;
   isPinned: boolean;
   reason: string | null;
+  /** Volume-fallback row (curation failed) — render de-emphasized, never as a "pick" */
+  muted?: boolean;
 }) {
   const pairs = market.outcomes
     .map((label, i) => ({ label, prob: market.outcome_prices[i] ?? 0 }))
@@ -177,7 +171,10 @@ function MarketRow({
         href={polymarketHref(market)}
         target="_blank"
         rel="noopener noreferrer"
-        className="flex w-full gap-3 px-5 py-3.5 transition-colors hover:bg-surface-2/40"
+        className={cn(
+          "flex w-full gap-3 px-5 py-3.5 transition-colors hover:bg-surface-2/40",
+          muted && "opacity-70",
+        )}
       >
         {/* Left thumbnail */}
         <div className="h-12 w-12 shrink-0 overflow-hidden rounded-md bg-surface-2">
@@ -204,7 +201,12 @@ function MarketRow({
           {/* Question + pinned badge */}
           <div className="flex items-start gap-1.5">
             {isPinned && <Pin className="mt-0.5 h-3 w-3 shrink-0 text-foreground-muted/60" />}
-            <h3 className="line-clamp-2 text-[15px] font-medium leading-snug text-foreground">
+            <h3
+              className={cn(
+                "line-clamp-2 text-[15px] font-medium leading-snug",
+                muted ? "text-foreground-muted" : "text-foreground",
+              )}
+            >
               {market.question}
             </h3>
           </div>
@@ -214,7 +216,9 @@ function MarketRow({
 
           {/* Footer: reason + volume + end date */}
           <div className="flex min-w-0 items-center justify-between gap-2 text-[11px] text-foreground-muted/70">
-            {reason && !isPinned && <span className="min-w-0 line-clamp-2 italic">{reason}</span>}
+            {reason && !isPinned && !muted && (
+              <span className="min-w-0 line-clamp-2 italic">{reason}</span>
+            )}
             <div className="ml-auto flex shrink-0 items-center gap-2.5">
               {volLabel && <span className="tabular-nums">{volLabel} vol</span>}
               {endLabel && (
@@ -252,9 +256,7 @@ export function PolymarketFeed({ portfolioId }: PolymarketFeedProps) {
   const [categoryLoading, setCategoryLoading] = useState(false);
   const [categoryError, setCategoryError] = useState<string | null>(null);
 
-  // "updated Xs ago" tracking — lastUpdated set on each successful fetch,
-  // nowTick re-renders the relative label every 15s
-  const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
+  // nowTick re-renders the "prices as of Xm ago" label every 15s
   const [nowTick, setNowTick] = useState(() => Date.now());
 
   useEffect(() => {
@@ -287,7 +289,6 @@ export function PolymarketFeed({ portfolioId }: PolymarketFeedProps) {
           pinned: dedupeByEvent(raw.pinned),
           rotating: dedupeByEvent(raw.rotating),
         });
-        setLastUpdated(new Date());
       } catch (err) {
         setPersonalizedError(
           err instanceof Error ? err.message : "Couldn't load markets, retrying…",
@@ -320,7 +321,6 @@ export function PolymarketFeed({ portfolioId }: PolymarketFeedProps) {
       }
       const data = (await res.json()) as PolymarketMarket[];
       setCategoryMarkets(data);
-      setLastUpdated(new Date());
     } catch (err) {
       setCategoryError(err instanceof Error ? err.message : "Couldn't load markets, retrying…");
     } finally {
@@ -378,9 +378,29 @@ export function PolymarketFeed({ portfolioId }: PolymarketFeedProps) {
   const currentError = isPersonalized ? personalizedError : categoryError;
   const showSkeleton = isLoading && !hasData;
 
+  const filterMarket = (question: string) =>
+    !search.trim() || question.toLowerCase().includes(search.toLowerCase());
+  const pinnedFiltered = isPersonalized
+    ? personalizedData.pinned.filter((m) => filterMarket(m.polymarket_markets.question))
+    : [];
+  const rotatingFiltered = isPersonalized
+    ? personalizedData.rotating.filter((m) => filterMarket(m.polymarket_markets.question))
+    : [];
+  const categoryFiltered = isPersonalized
+    ? []
+    : categoryMarkets.filter((m) => filterMarket(m.question));
+
+  // Freshness derives from the data itself (`fetched_at` on rendered rows), not
+  // client fetch time — the server may return rows older than the last browser poll.
+  const freshnessSourceMarkets = isPersonalized
+    ? [...pinnedFiltered, ...rotatingFiltered].map((m) => m.polymarket_markets)
+    : categoryFiltered;
+  const dataAsOf = maxFetchedAt(freshnessSourceMarkets.map((m) => m.fetched_at));
+  const dataIsStale = isStale(dataAsOf, nowTick);
+  const ageLabel = dataAsOf ? formatAge(dataAsOf, nowTick) : null;
+
   // Subtitle is ALWAYS a non-empty string → header height stays constant →
   // no vertical jump in the pill layout animation.
-  const updatedLabel = formatUpdatedAgo(lastUpdated, nowTick);
   let subtitle: string;
   if (showSkeleton) {
     subtitle = "Loading…";
@@ -388,7 +408,8 @@ export function PolymarketFeed({ portfolioId }: PolymarketFeedProps) {
     subtitle = "Connection issue";
   } else {
     const parts = [`${count} ${count === 1 ? "market" : "markets"} tracked`];
-    if (updatedLabel) parts.push(`updated ${updatedLabel}`);
+    if (dataIsStale) parts.push("data may be stale");
+    else if (ageLabel) parts.push(`prices as of ${ageLabel}`);
     subtitle = parts.join(" · ");
   }
 
@@ -409,10 +430,6 @@ export function PolymarketFeed({ portfolioId }: PolymarketFeedProps) {
     </div>
   );
 
-  // Client-side search filter applied to displayed markets
-  const filterMarket = (question: string) =>
-    !search.trim() || question.toLowerCase().includes(search.toLowerCase());
-
   // Body content (only rendered when not showing skeletons)
   let body: ReactNode;
   if (currentError && !hasData) {
@@ -432,12 +449,9 @@ export function PolymarketFeed({ portfolioId }: PolymarketFeedProps) {
       </li>
     );
   } else if (isPersonalized) {
-    const pinnedFiltered = personalizedData.pinned.filter((m) =>
-      filterMarket(m.polymarket_markets.question),
-    );
-    const rotatingFiltered = personalizedData.rotating.filter((m) =>
-      filterMarket(m.polymarket_markets.question),
-    );
+    // Curation failed for this batch: the fanout fell back to top-by-volume rows.
+    // Detected read-side (score=0 + reason=null) until the `source` column ships.
+    const rotatingHasFallback = rotatingFiltered.some(isFallbackMatch);
     body = (
       <>
         {pinnedFiltered.map((match) => (
@@ -448,12 +462,18 @@ export function PolymarketFeed({ portfolioId }: PolymarketFeedProps) {
             reason={match.reason}
           />
         ))}
+        {rotatingHasFallback && (
+          <li className="px-5 py-2 text-[10px] font-semibold uppercase tracking-[0.12em] text-foreground-muted/60">
+            Trending on Polymarket — personalization is catching up
+          </li>
+        )}
         {rotatingFiltered.map((match) => (
           <MarketRow
             key={match.polymarket_markets.condition_id}
             market={match.polymarket_markets}
             isPinned={false}
-            reason={match.reason}
+            reason={isFallbackMatch(match) ? null : match.reason}
+            muted={isFallbackMatch(match)}
           />
         ))}
         {pinnedFiltered.length === 0 && rotatingFiltered.length === 0 && (
@@ -464,10 +484,9 @@ export function PolymarketFeed({ portfolioId }: PolymarketFeedProps) {
       </>
     );
   } else {
-    const filtered = categoryMarkets.filter((m) => filterMarket(m.question));
     body =
-      filtered.length > 0 ? (
-        filtered.map((market) => (
+      categoryFiltered.length > 0 ? (
+        categoryFiltered.map((market) => (
           <MarketRow key={market.condition_id} market={market} isPinned={false} reason={null} />
         ))
       ) : (
@@ -482,6 +501,7 @@ export function PolymarketFeed({ portfolioId }: PolymarketFeedProps) {
       title="Markets"
       liveColor="green"
       liveLabel="Polymarket"
+      stale={dataIsStale}
       subtitle={subtitle}
       headerSlot={headerSlot}
       onRefresh={handleRefresh}

@@ -9,6 +9,8 @@ interface FeedShellProps {
   liveColor?: "red" | "green";
   /** Badge text after "LIVE · " — defaults to News (red) / Markets (green) */
   liveLabel?: string;
+  /** Data is old enough to be untrustworthy — replaces the live badge with a muted stale notice */
+  stale?: boolean;
   /** Small subtitle below the title, e.g. "8 articles" or "4 markets tracked" */
   subtitle?: string;
   onRefresh?: () => void;
@@ -39,6 +41,7 @@ export function FeedShell({
   title,
   liveColor,
   liveLabel,
+  stale = false,
   subtitle,
   onRefresh,
   rightSlot,
@@ -59,8 +62,16 @@ export function FeedShell({
       <header className="flex shrink-0 flex-col gap-2 border-b border-hairline px-5 py-4">
         <div className="flex items-start justify-between gap-4">
           <div className="flex flex-col gap-0.5">
-            {/* LIVE · NEWS / LIVE · MARKETS pulsating badge */}
-            {liveColor && (
+            {/* Live badge while current, or a muted stale notice when data is old */}
+            {liveColor && stale && (
+              <div className="flex items-center gap-1.5">
+                <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-foreground-muted/40" />
+                <span className="text-[10px] font-semibold uppercase tracking-[0.15em] text-foreground-muted/60">
+                  Data may be stale
+                </span>
+              </div>
+            )}
+            {liveColor && !stale && (
               <div className="flex items-center gap-1.5">
                 <span className="relative flex h-1.5 w-1.5">
                   <span
