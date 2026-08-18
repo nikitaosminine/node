@@ -200,8 +200,11 @@ describe("withInvocationSubrequestBudget", () => {
     const fetchMock = vi.fn(async () => new Response(null, { status: 200 }));
     vi.stubGlobal("fetch", fetchMock);
 
-    await withInvocationSubrequestBudget(async () => {
-      for (let i = 0; i < 50; i++) {
+    await withInvocationSubrequestBudget(async (budget) => {
+      expect(budget.remaining()).toBe(50);
+      await fetch("https://example.test");
+      expect(budget.remaining()).toBe(49);
+      for (let i = 0; i < 49; i++) {
         await fetch("https://example.test");
       }
       await expect(fetch("https://example.test")).rejects.toThrow(

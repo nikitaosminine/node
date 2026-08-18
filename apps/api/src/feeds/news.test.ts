@@ -477,6 +477,23 @@ describe("runNewsFanout — ETF-derived market coverage", () => {
     expect(state.subrequestCount).toBeLessThanOrEqual(50);
   });
 
+  it("reduces company coverage when the scheduled invocation has less capacity", async () => {
+    state.holdings = Array.from({ length: 100 }, (_, i) => ({
+      id: `h-company-${i}`,
+      ticker: `C${i}`,
+      isin: null,
+      asset_type: "EQUITY",
+      name: `Company ${i}`,
+      quantity: 1,
+      portfolio_id: `portfolio-${i}`,
+    }));
+
+    const result = await runNewsFanout(env, { availableSubrequests: 40 });
+
+    expect(result.distinctCompaniesQueried).toBe(1);
+    expect(state.subrequestCount).toBeLessThanOrEqual(40);
+  });
+
   it("counts physical Exa retries and degrades before the hard budget", async () => {
     vi.useFakeTimers();
     state.holdings = Array.from({ length: 100 }, (_, i) => ({

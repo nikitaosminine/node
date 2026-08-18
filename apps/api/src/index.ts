@@ -88,7 +88,13 @@ function json(body: unknown, status = 200): Response {
 
 const INVOCATION_SUBREQUEST_BUDGET = 50;
 
-export async function withInvocationSubrequestBudget<T>(work: () => Promise<T>): Promise<T> {
+export interface InvocationSubrequestBudget {
+  remaining(): number;
+}
+
+export async function withInvocationSubrequestBudget<T>(
+  work: (budget: InvocationSubrequestBudget) => Promise<T>,
+): Promise<T> {
   const originalFetch = globalThis.fetch;
   const nativeFetch = originalFetch.bind(globalThis);
   let used = 0;
@@ -102,7 +108,7 @@ export async function withInvocationSubrequestBudget<T>(work: () => Promise<T>):
 
   globalThis.fetch = guardedFetch;
   try {
-    return await work();
+    return await work({ remaining: () => INVOCATION_SUBREQUEST_BUDGET - used });
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -5872,7 +5878,7 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
     return json({ error: "Not found" }, 404);
   },
   async scheduled(controller: ScheduledController, env: Env, _ctx: ExecutionContext): Promise<void> {
-    return withInvocationSubrequestBudget(async () => {
+    return withInvocationSubrequestBudget(async (invocationBudget) => {
       try {
         await runScheduledFanout(env, {
           now: new Date(controller.scheduledTime),
@@ -5892,7 +5898,9 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
       const NEWS_CRON_SLOTS = new Set(["30 6 * * 2-6", "30 16 * * 1-5", "0 21 * * 1-5"]);
       if (NEWS_CRON_SLOTS.has(controller.cron)) {
         try {
-          await runNewsFanout(env);
+          await runNewsFanout(env, {
+            availableSubrequests: invocationBudget.remaining(),
+          });
         } catch (error) {
           console.error("news fanout failed", error);
         }

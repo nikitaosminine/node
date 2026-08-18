@@ -264,8 +264,10 @@ class NewsSubrequestBudget {
   private reserved = 0;
   private activeReservation: number | null = null;
 
+  constructor(private readonly limit: number = NEWS_SUBREQUEST_BUDGET) {}
+
   reserve(count: number): void {
-    if (this.used + this.reserved + count > NEWS_SUBREQUEST_BUDGET) {
+    if (this.used + this.reserved + count > this.limit) {
       throw new NewsSubrequestBudgetExceededError();
     }
     this.reserved += count;
@@ -278,14 +280,14 @@ class NewsSubrequestBudget {
   }
 
   availableSearchSubrequests(): number {
-    return Math.max(0, NEWS_SUBREQUEST_BUDGET - this.used - this.reserved);
+    return Math.max(0, this.limit - this.used - this.reserved);
   }
 
   async fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
     if (
-      this.used >= NEWS_SUBREQUEST_BUDGET ||
+      this.used >= this.limit ||
       (this.activeReservation !== null && this.activeReservation <= 0) ||
-      (this.activeReservation === null && this.used + this.reserved >= NEWS_SUBREQUEST_BUDGET)
+      (this.activeReservation === null && this.used + this.reserved >= this.limit)
     ) {
       throw new NewsSubrequestBudgetExceededError();
     }
@@ -1323,7 +1325,10 @@ interface ClusterAccum {
   companyKeys: Set<string>;
 }
 
-export async function runNewsFanout(env: Env): Promise<{
+export async function runNewsFanout(
+  env: Env,
+  options: { availableSubrequests?: number } = {},
+): Promise<{
   distinctCompaniesQueried: number;
   marketTopicsQueried: number;
   clustersUpserted: number;
@@ -1362,7 +1367,11 @@ export async function runNewsFanout(env: Env): Promise<{
   }
 
   const apiKey = env.EXA_SEARCH;
-  const budget = new NewsSubrequestBudget();
+  const availableSubrequests = Math.max(
+    0,
+    Math.min(NEWS_SUBREQUEST_BUDGET, options.availableSubrequests ?? NEWS_SUBREQUEST_BUDGET),
+  );
+  const budget = new NewsSubrequestBudget(availableSubrequests);
   const budgetFetch = budget.fetch.bind(budget);
   const client: AnySupabaseClient = createClient(env.SUPABASE_URL, env.SUPABASE_SERVICE_KEY, {
     global: { fetch: budgetFetch },
@@ -1390,7 +1399,20 @@ export async function runNewsFanout(env: Env): Promise<{
   const allCompanies = [...workList.values()].sort((a, b) =>
     a.canonicalKey < b.canonicalKey ? -1 : a.canonicalKey > b.canonicalKey ? 1 : 0,
   );
-  const companies = selectRotatingWindow(allCompanies, FANOUT_WINDOW, rotationNow);
+  const companySearchLimit = Math.min(
+    FANOUT_WINDOW,
+    Math.max(
+      1,
+      Math.floor(
+        (availableSubrequests -
+          MAX_MARKET_TOPICS -
+          MAX_FIXED_FANOUT_SUBREQUESTS -
+          MAX_COMPANY_SENTIMENT_SUBREQUESTS) /
+          2,
+      ),
+    ),
+  );
+  const companies = selectRotatingWindow(allCompanies, companySearchLimit, rotationNow);
 
   const startPublishedDate = new Date(Date.now() - NEWS_WINDOW_MS).toISOString();
   const userLocation = deriveUserLocation(workList);
