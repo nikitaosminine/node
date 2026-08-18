@@ -468,6 +468,13 @@ describe("runNewsFanout — ETF-derived market coverage", () => {
           summary: "Ancient story.",
         },
         {
+          url: "https://www.cnbc.com/future-nasdaq",
+          title: "Nasdaq futures point higher as tech stocks rally",
+          date: new Date(Date.now() + 3_600_000).toISOString(),
+          position: 5,
+          summary: "Future-dated story.",
+        },
+        {
           // No date at all — undated drop.
           url: "https://www.cnbc.com/undated-nasdaq",
           title: "Nasdaq futures point higher as tech stocks rebound",
@@ -486,12 +493,16 @@ describe("runNewsFanout — ETF-derived market coverage", () => {
 
     const result = await runNewsFanout(env);
 
-    expect(result.staleDropped).toBe(2);
+    expect(result.staleDropped).toBe(3);
     expect(result.undatedDropped).toBe(1);
     expect(result.googleWrappedDropped).toBe(1);
+    expect(
+      state.clusterRows.find((r) => r.cluster_key === "https://www.cnbc.com/nasdaq-rally"),
+    ).toBeDefined();
     for (const key of [
       "https://www.cnbc.com/old-nasdaq",
       "https://www.cnbc.com/ancient-nasdaq",
+      "https://www.cnbc.com/future-nasdaq",
       "https://www.cnbc.com/undated-nasdaq",
       "https://www.google.com/goto?url=AbCdEf",
     ]) {

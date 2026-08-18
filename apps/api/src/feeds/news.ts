@@ -794,8 +794,10 @@ export async function runNewsFanout(env: Env): Promise<{
   // Explicit ≤7-day window: Firecrawl's tbs:"qdr:w" leaks ~12% older results
   // (some years old), so this filter — not the undated-drop — is the
   // load-bearing recency guard now.
-  const isStale = (publishedAt: string): boolean =>
-    Date.now() - new Date(publishedAt).getTime() > NEWS_WINDOW_MS;
+  const isStale = (publishedAt: string): boolean => {
+    const ageMs = Date.now() - new Date(publishedAt).getTime();
+    return ageMs < 0 || ageMs > NEWS_WINDOW_MS;
+  };
 
   // Filter a result list for one company and add survivors to pendingClusters.
   // Returns the count of on-target (company-mentioning) results kept.
