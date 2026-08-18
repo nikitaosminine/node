@@ -379,8 +379,15 @@ describe("runNewsFanout sentiment pipeline (end-to-end over stubbed HTTP)", () =
     expect(result.clustersUpserted).toBe(2);
     expect(result.matchesUpserted).toBe(2);
     expect(result.errors).toContain("cluster entities pre-read: cluster pre-read failed");
+    expect(result.clustersScored).toBe(0);
+    expect(result.companiesRescored).toBe(0);
     for (const row of clusterUpsertRows(captured)) {
       expect(row).not.toHaveProperty("sentiments");
     }
+    expect(
+      captured.some(
+        (r) => r.pathname === "/rest/v1/rpc/apply_company_sentiment_batch" && r.method === "POST",
+      ),
+    ).toBe(false);
   });
 });

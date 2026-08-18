@@ -1753,11 +1753,13 @@ export async function runNewsFanout(
   // --- Batch cluster upsert ---------------------------------------------------
   const clusterRows = survivors.map((p) => {
     const clusterKey = p.result.id ?? p.result.url!;
-    const resolvedSentiments = resolveSentimentsForRow(
-      expectedCompanyKeysByCluster.get(clusterKey) ?? [],
-      sentimentsByClusterKey.get(clusterKey) ?? [],
-      sentimentError,
-    );
+    const resolvedSentiments = sentimentPreReadFailed
+      ? null
+      : resolveSentimentsForRow(
+          expectedCompanyKeysByCluster.get(clusterKey) ?? [],
+          sentimentsByClusterKey.get(clusterKey) ?? [],
+          sentimentError,
+        );
     resolvedSentimentsByClusterKey.set(clusterKey, resolvedSentiments);
     return buildClusterRow(
       p.result,
