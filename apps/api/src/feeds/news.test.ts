@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   buildClusterRow,
   MAX_COMPANY_SEARCHES_PER_RUN,
+  NEWS_CRON_SLOTS,
   resolveSentimentsForRow,
   selectRotatingWindow,
   updateRollingCompanySentiment,
@@ -21,7 +22,7 @@ import { runNewsFanout } from "./news";
 const env = {
   SUPABASE_URL: "https://supabase.example",
   SUPABASE_SERVICE_KEY: "service-key",
-  EXA_SEARCH: "exa-key",
+  FIRECRAWL_API_KEY: "fc-key",
   GROK_MAIN_API_KEY: "grok-key",
 };
 
@@ -101,7 +102,7 @@ function installDbMock(state: CapturedState): void {
             in: async () => ({ data: state.existingClusters, error: null }),
           }),
           upsert: (rows: Array<Record<string, any>>) => {
-      state.clusterRows.push(...rows);
+            state.clusterRows.push(...rows);
             return {
               select: async () => ({
                 data: rows.map((r) => {
@@ -121,7 +122,11 @@ function installDbMock(state: CapturedState): void {
         };
       case "company_sentiment_pending":
         return {
-          select: async () => ({ data: [], error: null }),
+          select: () => ({
+            order: () => ({
+              limit: async () => ({ data: [], error: null }),
+            }),
+          }),
         };
       case "company_sentiment_lock":
         return {
@@ -152,9 +157,22 @@ function installDbMock(state: CapturedState): void {
   });
 }
 
+interface SearchFixture {
+  id?: string;
+  url: string;
+  title: string;
+  publishedDate: string;
+  score: number;
+  summary?: string;
+}
+
 function installFetchMock(
   state: CapturedState,
-  extra?: { companyResults?: unknown[]; marketResults?: unknown[]; exaStatus?: number },
+  extra?: {
+    companyResults?: SearchFixture[];
+    marketResults?: SearchFixture[];
+    firecrawlStatus?: number;
+  },
 ): void {
   vi.stubGlobal(
     "fetch",
@@ -162,19 +180,23 @@ function installFetchMock(
       state.subrequestCount++;
       const body = JSON.parse(init?.body ?? "{}");
       if (String(url).includes("api.x.ai")) {
-        return new Response(JSON.stringify({ choices: [{ message: { content: '{"scores":[]}' } }] }), {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        });
+        return new Response(
+          JSON.stringify({ choices: [{ message: { content: '{"scores":[]}' } }] }),
+          {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          },
+        );
       }
-      if (String(url).endsWith("/search")) {
+      if (String(url).endsWith("/v2/search")) {
         state.searchQueries.push(body.query);
-        if (extra?.exaStatus) return new Response("exa down", { status: extra.exaStatus });
-        let results: unknown[] = [];
+        if (extra?.firecrawlStatus)
+          return new Response("Firecrawl down", { status: extra.firecrawlStatus });
+        let results: SearchFixture[] = [];
         if (body.query.includes("Airbus")) {
           results = [
             {
-              id: "exa-airbus-1",
+              id: "https://www.lesechos.fr/airbus-order",
               url: "https://www.lesechos.fr/airbus-order",
               title: "Airbus wins major A350 order from Asian carrier",
               publishedDate: RECENT,
@@ -185,7 +207,7 @@ function installFetchMock(
         } else if (body.query.includes("Nasdaq")) {
           results = [
             {
-              id: "exa-market-1",
+              id: "https://www.cnbc.com/nasdaq-rally",
               url: "https://www.cnbc.com/nasdaq-rally",
               title: "Nasdaq rallies as tech stocks extend gains",
               publishedDate: RECENT,
@@ -193,7 +215,7 @@ function installFetchMock(
             },
             {
               // Off-topic for the US-tech relevance filter — must be dropped.
-              id: "exa-market-2",
+              id: "https://www.cnbc.com/pastry-award",
               url: "https://www.cnbc.com/pastry-award",
               title: "Local bakery wins national pastry award",
               publishedDate: RECENT,
@@ -202,14 +224,21 @@ function installFetchMock(
             ...(extra?.marketResults ?? []),
           ];
         }
-        return new Response(JSON.stringify({ results }), { status: 200 });
-      }
-      if (String(url).endsWith("/contents")) {
-        const results = (body.urls as string[]).map((u) => ({
-          url: u,
-          summary: `Summary for ${u}`,
-        }));
-        return new Response(JSON.stringify({ results }), { status: 200 });
+        return new Response(
+          JSON.stringify({
+            success: true,
+            data: {
+              news: results.map((result) => ({
+                url: result.url,
+                title: result.title,
+                summary: result.summary ?? `Summary for ${result.url}`,
+                metadata: { "article:published_time": result.publishedDate },
+                position: Math.max(1, Math.round((1 - result.score) * 10)),
+              })),
+            },
+          }),
+          { status: 200 },
+        );
       }
       throw new Error(`unexpected fetch ${url}`);
     }),
@@ -257,7 +286,9 @@ describe("runNewsFanout — ETF-derived market coverage", () => {
     expect(state.searchQueries.some((q) => q.includes("Amundi"))).toBe(false);
 
     // Market cluster: entities.countries/sectors populated.
-    const marketCluster = state.clusterRows.find((r) => r.cluster_key === "exa-market-1");
+    const marketCluster = state.clusterRows.find(
+      (r) => r.cluster_key === "https://www.cnbc.com/nasdaq-rally",
+    );
     expect(marketCluster).toBeDefined();
     expect(marketCluster!.entities).toEqual({
       isins: [],
@@ -268,12 +299,12 @@ describe("runNewsFanout — ETF-derived market coverage", () => {
     expect(marketCluster!.primary_article.snippet).toContain("Summary for");
 
     // The off-topic result never became a cluster.
-    expect(state.clusterRows.find((r) => r.cluster_key === "exa-market-2")).toBeUndefined();
+    expect(
+      state.clusterRows.find((r) => r.cluster_key === "https://www.cnbc.com/pastry-award"),
+    ).toBeUndefined();
 
     // Market match: matched_etfs/matched_topics filled, no company fields.
-    const marketMatch = state.matchRows.find((m) =>
-      Array.isArray(m.match_reason.matched_etfs),
-    );
+    const marketMatch = state.matchRows.find((m) => Array.isArray(m.match_reason.matched_etfs));
     expect(marketMatch).toBeDefined();
     expect(marketMatch!.portfolio_id).toBe("portfolio-1");
     expect(marketMatch!.match_reason).toEqual({
@@ -286,7 +317,9 @@ describe("runNewsFanout — ETF-derived market coverage", () => {
   it("keeps per-company clusters and match_reason in their V1 shape", async () => {
     await runNewsFanout(env);
 
-    const companyCluster = state.clusterRows.find((r) => r.cluster_key === "exa-airbus-1");
+    const companyCluster = state.clusterRows.find(
+      (r) => r.cluster_key === "https://www.lesechos.fr/airbus-order",
+    );
     expect(companyCluster).toBeDefined();
     expect(companyCluster!.entities).toEqual({
       isins: ["NL0000235190"],
@@ -295,9 +328,7 @@ describe("runNewsFanout — ETF-derived market coverage", () => {
       sectors: [],
     });
 
-    const companyMatch = state.matchRows.find((m) =>
-      Array.isArray(m.match_reason.matched_tickers),
-    );
+    const companyMatch = state.matchRows.find((m) => Array.isArray(m.match_reason.matched_tickers));
     expect(companyMatch).toBeDefined();
     expect(companyMatch!.match_reason).toEqual({
       matched_tickers: ["AIR.PA"],
@@ -305,10 +336,49 @@ describe("runNewsFanout — ETF-derived market coverage", () => {
     });
   });
 
+  it("uses Firecrawl inline summaries for drift filtering and drops stale or future news", async () => {
+    installFetchMock(state, {
+      companyResults: [
+        {
+          url: "https://www.ft.com/a350-production",
+          title: "A350 production outlook improves",
+          summary: "Airbus SE increased the A350 production target after strong orders.",
+          publishedDate: RECENT,
+          score: 0.7,
+        },
+        {
+          url: "https://www.ft.com/airbus-old",
+          title: "Airbus announces an old order",
+          publishedDate: new Date(Date.now() - 8 * 24 * 3_600_000).toISOString(),
+          score: 0.6,
+        },
+        {
+          url: "https://www.ft.com/airbus-future",
+          title: "Airbus announces a future order",
+          publishedDate: new Date(Date.now() + 3_600_000).toISOString(),
+          score: 0.6,
+        },
+      ],
+    });
+
+    const result = await runNewsFanout(env);
+
+    expect(result.staleDropped).toBe(4); // primary and fallback both return the two stale items
+    expect(result.errors).toEqual([]);
+    const summaryOnly = state.clusterRows.find(
+      (row) => row.cluster_key === "https://www.ft.com/a350-production",
+    );
+    expect(summaryOnly?.primary_article.snippet).toBe(
+      "Airbus SE increased the A350 production target after strong orders.",
+    );
+    expect(state.clusterRows.some((row) => row.cluster_key.endsWith("airbus-old"))).toBe(false);
+    expect(state.clusterRows.some((row) => row.cluster_key.endsWith("airbus-future"))).toBe(false);
+  });
+
   it("unions prior-run entities into re-upserted clusters instead of clobbering them", async () => {
     state.existingClusters = [
       {
-        cluster_key: "exa-market-1",
+        cluster_key: "https://www.cnbc.com/nasdaq-rally",
         entities: { isins: ["US0378331005"], tickers: ["AAPL"], countries: [], sectors: [] },
       },
     ];
@@ -316,7 +386,9 @@ describe("runNewsFanout — ETF-derived market coverage", () => {
     const result = await runNewsFanout(env);
     expect(result.errors).toEqual([]);
 
-    const marketCluster = state.clusterRows.find((r) => r.cluster_key === "exa-market-1");
+    const marketCluster = state.clusterRows.find(
+      (r) => r.cluster_key === "https://www.cnbc.com/nasdaq-rally",
+    );
     expect(marketCluster).toBeDefined();
     expect(marketCluster!.entities).toEqual({
       isins: ["US0378331005"],
@@ -331,7 +403,7 @@ describe("runNewsFanout — ETF-derived market coverage", () => {
     installFetchMock(state, {
       companyResults: [
         {
-          id: "exa-dup-co",
+          id: "https://www.lesechos.fr/airbus-nasdaq",
           url: "https://www.lesechos.fr/airbus-nasdaq",
           title: dupTitle,
           publishedDate: RECENT,
@@ -340,7 +412,7 @@ describe("runNewsFanout — ETF-derived market coverage", () => {
       ],
       marketResults: [
         {
-          id: "exa-dup-mkt",
+          id: "https://www.cnbc.com/airbus-nasdaq",
           url: "https://www.cnbc.com/airbus-nasdaq",
           title: dupTitle,
           publishedDate: RECENT,
@@ -354,8 +426,12 @@ describe("runNewsFanout — ETF-derived market coverage", () => {
 
     // The lower-tier duplicate is dropped; its market-topic entities survive on
     // the kept company-sourced cluster.
-    expect(state.clusterRows.find((r) => r.cluster_key === "exa-dup-mkt")).toBeUndefined();
-    const survivorIdx = state.clusterRows.findIndex((r) => r.cluster_key === "exa-dup-co");
+    expect(
+      state.clusterRows.find((r) => r.cluster_key === "https://www.cnbc.com/airbus-nasdaq"),
+    ).toBeUndefined();
+    const survivorIdx = state.clusterRows.findIndex(
+      (r) => r.cluster_key === "https://www.lesechos.fr/airbus-nasdaq",
+    );
     expect(survivorIdx).toBeGreaterThanOrEqual(0);
     expect(state.clusterRows[survivorIdx].entities).toEqual({
       isins: ["NL0000235190"],
@@ -365,7 +441,7 @@ describe("runNewsFanout — ETF-derived market coverage", () => {
     });
 
     const survivorMatch = state.matchRows.find(
-      (m) => m.cluster_id === state.clusterIds.get("exa-dup-co"),
+      (m) => m.cluster_id === state.clusterIds.get("https://www.lesechos.fr/airbus-nasdaq"),
     );
     expect(survivorMatch).toBeDefined();
     expect(survivorMatch!.match_reason).toEqual({
@@ -385,7 +461,9 @@ describe("runNewsFanout — ETF-derived market coverage", () => {
     // static override still produces its market topic and clusters.
     expect(result.marketTopicsQueried).toBe(1);
     expect(result.errors).toEqual([]);
-    expect(state.clusterRows.find((r) => r.cluster_key === "exa-market-1")).toBeDefined();
+    expect(
+      state.clusterRows.find((r) => r.cluster_key === "https://www.cnbc.com/nasdaq-rally"),
+    ).toBeDefined();
   });
 
   it("warns and still derives static-override topics when a taxonomy read resolves with an error", async () => {
@@ -400,7 +478,9 @@ describe("runNewsFanout — ETF-derived market coverage", () => {
 
       expect(result.marketTopicsQueried).toBe(1);
       expect(result.errors).toEqual([]);
-      expect(state.clusterRows.find((r) => r.cluster_key === "exa-market-1")).toBeDefined();
+      expect(
+        state.clusterRows.find((r) => r.cluster_key === "https://www.cnbc.com/nasdaq-rally"),
+      ).toBeDefined();
 
       const messages = warn.mock.calls.map((c) => c.map(String).join(" "));
       expect(messages.some((m) => m.includes("etf_constituents read failed"))).toBe(true);
@@ -434,7 +514,7 @@ describe("runNewsFanout — ETF-derived market coverage", () => {
     installFetchMock(state, {
       marketResults: [
         {
-          id: "exa-avgo",
+          id: "https://www.cnbc.com/broadcom-orders",
           url: "https://www.cnbc.com/broadcom-orders",
           title: "Broadcom surges on record custom accelerator orders",
           publishedDate: RECENT,
@@ -447,17 +527,14 @@ describe("runNewsFanout — ETF-derived market coverage", () => {
 
     // One shared topic (not two), whose merged terms keep the Broadcom story.
     expect(result.marketTopicsQueried).toBe(1);
-    expect(state.clusterIds.get("exa-avgo")).toBeDefined();
+    expect(state.clusterIds.get("https://www.cnbc.com/broadcom-orders")).toBeDefined();
 
     // Both portfolios hold an ETF mapping to the shared topic and both match
     // the story only the second ETF's constituent terms could keep.
     const avgoMatches = state.matchRows.filter(
-      (m) => m.cluster_id === state.clusterIds.get("exa-avgo"),
+      (m) => m.cluster_id === state.clusterIds.get("https://www.cnbc.com/broadcom-orders"),
     );
-    expect(avgoMatches.map((m) => m.portfolio_id).sort()).toEqual([
-      "portfolio-1",
-      "portfolio-2",
-    ]);
+    expect(avgoMatches.map((m) => m.portfolio_id).sort()).toEqual(["portfolio-1", "portfolio-2"]);
   });
 
   it("keeps a large company universe within the subrequest budget", async () => {
@@ -494,7 +571,7 @@ describe("runNewsFanout — ETF-derived market coverage", () => {
     expect(state.subrequestCount).toBeLessThanOrEqual(40);
   });
 
-  it("counts physical Exa retries and degrades before the hard budget", async () => {
+  it("counts physical Firecrawl retries and degrades before the hard budget", async () => {
     vi.useFakeTimers();
     state.holdings = Array.from({ length: 100 }, (_, i) => ({
       id: `h-company-${i}`,
@@ -505,7 +582,7 @@ describe("runNewsFanout — ETF-derived market coverage", () => {
       quantity: 1,
       portfolio_id: `portfolio-${i}`,
     }));
-    installFetchMock(state, { exaStatus: 500 });
+    installFetchMock(state, { firecrawlStatus: 500 });
 
     try {
       const run = runNewsFanout(env);
@@ -520,7 +597,11 @@ describe("runNewsFanout — ETF-derived market coverage", () => {
 
   it("rotates market topics within the retry-aware remaining search capacity", async () => {
     vi.useFakeTimers();
-    const start = Date.now();
+    const runTimes = [
+      Date.UTC(2026, 8, 21, 16, 30),
+      Date.UTC(2026, 8, 21, 21, 0),
+      Date.UTC(2026, 8, 22, 6, 30),
+    ];
     state.holdings = [
       ...Array.from({ length: 5 }, (_, i) => ({
         id: `h-company-${i}`,
@@ -568,15 +649,15 @@ describe("runNewsFanout — ETF-derived market coverage", () => {
         portfolio_id: "portfolio-1",
       },
     ];
-    installFetchMock(state, { exaStatus: 500 });
+    installFetchMock(state, { firecrawlStatus: 500 });
 
     const topicQueries = new Set<string>();
     const topicMarkers = ["Nasdaq", "S&P 500", "China and South Korea", "Japanese economy"];
     try {
-      for (let runIndex = 0; runIndex < 3; runIndex++) {
+      for (const scheduledAt of runTimes) {
         state.searchQueries = [];
         state.subrequestCount = 0;
-        vi.setSystemTime(start + runIndex * 3_600_000);
+        vi.setSystemTime(scheduledAt);
         const run = runNewsFanout(env);
         await vi.runAllTimersAsync();
         const result = await run;
@@ -597,11 +678,12 @@ describe("runNewsFanout — ETF-derived market coverage", () => {
 });
 
 const sentimentResult = {
-  id: "cluster-1",
   url: "https://example.com/acme-earnings",
   title: "Acme Corp posts record earnings",
-  publishedDate: "2026-08-10T08:00:00.000Z",
-  score: 0.9,
+  publishedAt: "2026-08-10T08:00:00.000Z",
+  summary: "Strong quarter.",
+  image: null,
+  providerScore: 0.9,
 };
 
 const companiesByKey = new Map<string, SentimentCompanyRef>([
@@ -659,14 +741,28 @@ describe("buildClusterRow sentiment persistence", () => {
   });
 
   it("writes an explicit empty sentiments array when scoring succeeded but returned nothing for the cluster", () => {
-    const row = buildClusterRow(sentimentResult, ["ACME"], [], "Strong quarter.", [], companiesByKey);
+    const row = buildClusterRow(
+      sentimentResult,
+      ["ACME"],
+      [],
+      "Strong quarter.",
+      [],
+      companiesByKey,
+    );
     expect(row).toHaveProperty("sentiments", []);
   });
 
   it("omits the sentiments key entirely when scoring failed, so the upsert preserves stored data", () => {
-    const row = buildClusterRow(sentimentResult, ["ACME"], [], "Strong quarter.", null, companiesByKey);
+    const row = buildClusterRow(
+      sentimentResult,
+      ["ACME"],
+      [],
+      "Strong quarter.",
+      null,
+      companiesByKey,
+    );
     expect(row).not.toHaveProperty("sentiments");
-    expect(row.cluster_key).toBe("cluster-1");
+    expect(row.cluster_key).toBe(sentimentResult.url);
     expect(row.entities).toEqual({ isins: [], tickers: ["ACME"], countries: [], sectors: [] });
   });
 });
@@ -693,29 +789,50 @@ describe("resolveSentimentsForRow", () => {
 
   it("requires the exact requested company keys, not just the expected count", () => {
     expect(
-      resolveSentimentsForRow(
-        ["ticker:BETA"],
-        [{ ...scored[0], companyKey: "ticker:ACME" }],
-        null,
-      ),
+      resolveSentimentsForRow(["ticker:BETA"], [{ ...scored[0], companyKey: "ticker:ACME" }], null),
     ).toBeNull();
   });
 
   it("preserves stored data (null) when scoring failed outright", () => {
-    expect(resolveSentimentsForRow(["ticker:ACME"], [], "Grok sentiment scoring failed (500)")).toBeNull();
+    expect(
+      resolveSentimentsForRow(["ticker:ACME"], [], "Grok sentiment scoring failed (500)"),
+    ).toBeNull();
   });
 });
 
 describe("selectRotatingWindow", () => {
-  it("keeps each run bounded and reaches every entry over the rotation", () => {
-    const entries = Array.from({ length: 10 }, (_, i) => `company-${i}`);
-    const hour = 3_600_000;
+  it("reaches all 12 companies across the actual weekday news cron slots", () => {
+    expect(NEWS_CRON_SLOTS).toEqual(["30 6 * * 2-6", "30 16 * * 1-5", "0 21 * * 1-5"]);
+    expect(MAX_COMPANY_SEARCHES_PER_RUN).toBe(4);
+    const entries = Array.from({ length: 12 }, (_, i) => `company-${i}`);
+    const monday = Date.UTC(2026, 8, 21);
+    const slots: Array<[number, number, number]> = [
+      [0, 16, 30],
+      [0, 21, 0],
+      [1, 6, 30],
+      [1, 16, 30],
+      [1, 21, 0],
+      [2, 6, 30],
+      [2, 16, 30],
+      [2, 21, 0],
+      [3, 6, 30],
+      [3, 16, 30],
+      [3, 21, 0],
+      [4, 6, 30],
+      [4, 16, 30],
+      [4, 21, 0],
+      [5, 6, 30],
+    ];
     const seen = new Set<string>();
 
-    for (let run = 0; run < entries.length; run++) {
-      const selected = selectRotatingWindow(entries, MAX_COMPANY_SEARCHES_PER_RUN, run * hour);
-      expect(selected).toHaveLength(MAX_COMPANY_SEARCHES_PER_RUN);
-      selected.forEach((entry) => seen.add(entry));
+    for (let week = 0; week < 3; week++) {
+      for (const [day, hour, minute] of slots) {
+        const scheduledAt =
+          monday + (week * 7 + day) * 24 * 3_600_000 + hour * 3_600_000 + minute * 60_000;
+        const selected = selectRotatingWindow(entries, MAX_COMPANY_SEARCHES_PER_RUN, scheduledAt);
+        expect(selected).toHaveLength(4);
+        selected.forEach((entry) => seen.add(entry));
+      }
     }
 
     expect(seen).toEqual(new Set(entries));
@@ -737,6 +854,7 @@ function mockSentimentClient(
     lockSequence?: boolean[];
     applySequence?: boolean[];
     pendingRows?: Array<Record<string, unknown>>;
+    onApply?: (rows: Array<Record<string, unknown>>) => Array<Record<string, unknown>>;
   } = {},
 ) {
   const applies: Array<{ rows: Array<Record<string, unknown>>; holder: unknown }> = [];
@@ -748,6 +866,12 @@ function mockSentimentClient(
   const lockSequence = [...(opts.lockSequence ?? [])];
   const applySequence = [...(opts.applySequence ?? [])];
   const pendingRows = opts.pendingRows ?? [];
+  let nextPendingId = 1;
+  for (const row of pendingRows) {
+    if (typeof row.id !== "number") row.id = nextPendingId;
+    nextPendingId = Math.max(nextPendingId, Number(row.id) + 1);
+    if (!row.published_at) row.published_at = row.observed_at ?? new Date().toISOString();
+  }
   const client = {
     rpc: async (fn: string, args: unknown) => {
       rpcCalls.push({ fn, args });
@@ -762,7 +886,7 @@ function mockSentimentClient(
               pending.company_key === row.company_key && pending.cluster_id === row.cluster_id,
           );
           if (existingIndex < 0) {
-            pendingRows.push(row);
+            pendingRows.push({ ...row, id: nextPendingId++ });
           } else {
             pendingRows[existingIndex] = { ...pendingRows[existingIndex], ...row };
           }
@@ -777,6 +901,9 @@ function mockSentimentClient(
         applies.push({ rows: p_rows, holder: p_holder });
         const accepted = applySequence.shift() ?? applyAccepted;
         if (accepted) {
+          for (const row of opts.onApply?.(p_rows) ?? []) {
+            pendingRows.push({ ...row, id: nextPendingId++ });
+          }
           const completed = new Set(
             p_rows.flatMap((row) =>
               (row.scored_cluster_ids as Array<{ id: string }>).map(
@@ -785,15 +912,14 @@ function mockSentimentClient(
             ),
           );
           for (let i = pendingRows.length - 1; i >= 0; i--) {
-            const prior = priorRows.find(
-              (row) => row.company_key === pendingRows[i].company_key,
-            );
+            const prior = priorRows.find((row) => row.company_key === pendingRows[i].company_key);
             const alreadyScored = prior?.scored_cluster_ids?.some(
               (scored) => scored.id === pendingRows[i].cluster_id,
             );
+            const observedAt = pendingRows[i].observed_at;
             const expired =
-              typeof pendingRows[i].observed_at === "string" &&
-              Date.parse(pendingRows[i].observed_at) < Date.now() - 7 * 24 * 3_600_000;
+              typeof observedAt === "string" &&
+              Date.parse(observedAt) < Date.now() - 7 * 24 * 3_600_000;
             if (
               completed.has(`${pendingRows[i].company_key}:${pendingRows[i].cluster_id}`) ||
               alreadyScored ||
@@ -801,6 +927,19 @@ function mockSentimentClient(
             ) {
               pendingRows.splice(i, 1);
             }
+          }
+          for (const row of p_rows) {
+            const updated: PriorRow = {
+              company_key: String(row.company_key),
+              score: Number(row.score),
+              evidence_cluster_ids: row.evidence_cluster_ids as string[],
+              scored_cluster_ids: row.scored_cluster_ids as ScoredClusterRecord[],
+            };
+            const priorIndex = priorRows.findIndex(
+              (prior) => prior.company_key === updated.company_key,
+            );
+            if (priorIndex < 0) priorRows.push(updated);
+            else priorRows[priorIndex] = updated;
           }
         }
         return { data: accepted, error: null };
@@ -822,14 +961,34 @@ function mockSentimentClient(
       }
       if (table === "company_sentiment_pending") {
         return {
-          select: async () => ({ data: pendingRows, error: null }),
+          select: () => ({
+            order: () => ({
+              limit: (count: number) => {
+                const page = (beforeId = Infinity) => ({
+                  data: pendingRows
+                    .filter((row) => Number(row.id) < beforeId)
+                    .sort((a, b) => Number(b.id) - Number(a.id))
+                    .slice(0, count),
+                  error: null,
+                });
+                return {
+                  lt: async (_column: string, beforeId: number) => page(beforeId),
+                  then: (resolve: (value: ReturnType<typeof page>) => unknown) =>
+                    Promise.resolve(page()).then(resolve),
+                };
+              },
+            }),
+          }),
         };
       }
       return {
         select: () => ({
           in: async (_column: string, keys: string[]) => {
             companyReadKeys.push(keys);
-            return { data: priorRows, error: null };
+            return {
+              data: priorRows.filter((row) => keys.includes(row.company_key)).slice(0, 1000),
+              error: null,
+            };
           },
         }),
       };
@@ -1000,9 +1159,7 @@ describe("updateRollingCompanySentiment", () => {
     const outcome = await updateRollingCompanySentiment(client, [], new Map());
     expect(outcome).toEqual({ companiesRescored: 0, error: null });
     expect(applies).toHaveLength(0);
-    expect(rpcCalls.map((call) => call.fn)).toEqual([
-      "try_acquire_company_sentiment_lock",
-    ]);
+    expect(rpcCalls.map((call) => call.fn)).toEqual(["try_acquire_company_sentiment_lock"]);
   });
 
   it("acquires and releases the update lock around a successful run", async () => {
@@ -1051,7 +1208,9 @@ describe("updateRollingCompanySentiment", () => {
     );
 
     expect(outcome).toEqual({ companiesRescored: 1, error: null });
-    expect(rpcCalls.filter((call) => call.fn === "try_acquire_company_sentiment_lock")).toHaveLength(2);
+    expect(
+      rpcCalls.filter((call) => call.fn === "try_acquire_company_sentiment_lock"),
+    ).toHaveLength(2);
     expect(applies).toHaveLength(1);
   });
 
@@ -1085,11 +1244,7 @@ describe("updateRollingCompanySentiment", () => {
     expect(pendingRows).toHaveLength(1);
 
     const second = mockSentimentClient([], { pendingRows });
-    const secondOutcome = await updateRollingCompanySentiment(
-      second.client,
-      [],
-      companiesByKey,
-    );
+    const secondOutcome = await updateRollingCompanySentiment(second.client, [], companiesByKey);
 
     expect(secondOutcome).toEqual({ companiesRescored: 1, error: null });
     expect(second.applies).toHaveLength(1);
@@ -1120,5 +1275,105 @@ describe("updateRollingCompanySentiment", () => {
     );
 
     expect(companyReadKeys).toEqual([["ticker:ACME"]]);
+  });
+
+  it("eventually drains 1,001 distinct companies in bounded pages without resetting prior scores", async () => {
+    const observedAt = new Date().toISOString();
+    const publishedAt = new Date(Date.now() - 3_600_000).toISOString();
+    const oldPublishedAt = new Date(Date.now() - 24 * 3_600_000).toISOString();
+    const priorRows: PriorRow[] = Array.from({ length: 1001 }, (_, index) => ({
+      company_key: `ticker:C${index}`,
+      score: 0.2,
+      evidence_cluster_ids: [`old-${index}`],
+      scored_cluster_ids: [
+        {
+          id: `old-${index}`,
+          scoredAt: observedAt,
+          publishedAt: oldPublishedAt,
+        },
+      ],
+    }));
+    const pendingRows: Array<Record<string, unknown>> = priorRows.map((prior, index) => ({
+      company_key: prior.company_key,
+      cluster_id: `fresh-${index}`,
+      company_name: `Company ${index}`,
+      ticker: `C${index}`,
+      isin: null,
+      score: 0.8,
+      rationale: "Improved outlook.",
+      published_at: publishedAt,
+      observed_at: observedAt,
+    }));
+    const { client, applies, companyReadKeys } = mockSentimentClient(priorRows, { pendingRows });
+
+    for (const remaining of [601, 201, 0]) {
+      const outcome = await updateRollingCompanySentiment(client, [], new Map());
+      expect(outcome.error).toBeNull();
+      expect(pendingRows).toHaveLength(remaining);
+    }
+
+    expect(applies.map((apply) => apply.rows.length)).toEqual([400, 400, 201]);
+    expect(companyReadKeys.every((keys) => keys.length <= 125)).toBe(true);
+    expect(new Set(companyReadKeys.flat()).size).toBe(1001);
+    priorRows.forEach((prior, index) => {
+      expect(prior.score).toBe(0.41); // one EWMA update from 0.2 and 0.8
+      expect(prior.evidence_cluster_ids).toEqual([`fresh-${index}`, `old-${index}`]);
+      expect(prior.scored_cluster_ids?.map((record) => record.id)).toEqual([
+        `fresh-${index}`,
+        `old-${index}`,
+      ]);
+    });
+  });
+
+  it("keeps a distinct observation enqueued during acknowledgement for the next run", async () => {
+    const observedAt = new Date().toISOString();
+    const pendingRows: Array<Record<string, unknown>> = [
+      {
+        company_key: "ticker:ACME",
+        cluster_id: "first",
+        company_name: "Acme Corp",
+        ticker: "ACME",
+        isin: null,
+        score: 0.7,
+        rationale: "First article.",
+        published_at: new Date(Date.now() - 2 * 3_600_000).toISOString(),
+        observed_at: observedAt,
+      },
+    ];
+    let injected = false;
+    const { client, applies } = mockSentimentClient([], {
+      pendingRows,
+      onApply: () => {
+        if (injected) return [];
+        injected = true;
+        return [
+          {
+            company_key: "ticker:ACME",
+            cluster_id: "later",
+            company_name: "Acme Corp",
+            ticker: "ACME",
+            isin: null,
+            score: -0.5,
+            rationale: "Later article.",
+            published_at: new Date(Date.now() - 3_600_000).toISOString(),
+            observed_at: observedAt,
+          },
+        ];
+      },
+    });
+
+    expect(await updateRollingCompanySentiment(client, [], new Map())).toEqual({
+      companiesRescored: 1,
+      error: null,
+    });
+    expect(pendingRows.map((row) => row.cluster_id)).toEqual(["later"]);
+    expect(await updateRollingCompanySentiment(client, [], new Map())).toEqual({
+      companiesRescored: 1,
+      error: null,
+    });
+    expect(pendingRows).toHaveLength(0);
+    expect(applies[0].rows[0].score).toBe(0.7);
+    expect(applies[1].rows[0].score).toBe(0.28);
+    expect(applies[1].rows[0].evidence_cluster_ids).toEqual(["later", "first"]);
   });
 });

@@ -34,6 +34,7 @@ export interface ClusterSentiment {
   companyKey: string;
   score: number;
   rationale: string;
+  publishedAt?: string;
 }
 
 interface GrokChatResponse {
@@ -308,6 +309,20 @@ export function mergeEvidenceClusterIds(existing: string[], fresh: string[]): st
 export interface ScoredClusterRecord {
   id: string;
   scoredAt: string;
+  publishedAt?: string;
+}
+
+// The display evidence list follows article publication time, including older
+// articles observed by a later fanout. scoredAt remains the dedupe TTL clock.
+export function latestEvidenceClusterIds(records: ScoredClusterRecord[]): string[] {
+  return [...records]
+    .sort((a, b) => {
+      const publicationDelta =
+        Date.parse(b.publishedAt ?? b.scoredAt) - Date.parse(a.publishedAt ?? a.scoredAt);
+      return publicationDelta || Date.parse(b.scoredAt) - Date.parse(a.scoredAt);
+    })
+    .slice(0, MAX_EVIDENCE_CLUSTER_IDS)
+    .map((record) => record.id);
 }
 
 export function mergeScoredClusterIds(
@@ -315,10 +330,15 @@ export function mergeScoredClusterIds(
   fresh: string[],
   now: number,
   ttlMs: number,
+  publishedAtById: Map<string, string> = new Map(),
 ): ScoredClusterRecord[] {
   const freshSet = new Set(fresh);
   const merged: ScoredClusterRecord[] = [
-    ...fresh.map((id) => ({ id, scoredAt: new Date(now).toISOString() })),
+    ...fresh.map((id) => ({
+      id,
+      scoredAt: new Date(now).toISOString(),
+      publishedAt: publishedAtById.get(id) ?? new Date(now).toISOString(),
+    })),
     ...existing.filter((r) => !freshSet.has(r.id)),
   ];
   const withinWindow = merged.filter((r) => now - new Date(r.scoredAt).getTime() <= ttlMs);

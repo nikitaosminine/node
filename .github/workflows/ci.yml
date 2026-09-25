@@ -18,7 +18,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: 'npm'
+          cache: "npm"
           cache-dependency-path: apps/web/package-lock.json
       - run: npm ci
         working-directory: apps/web
@@ -32,12 +32,26 @@ jobs:
   check-api:
     name: API — typecheck & test
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: node_sentiment_test
+          POSTGRES_PASSWORD: local-ci-only
+          POSTGRES_DB: node_sentiment_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U node_sentiment_test -d node_sentiment_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: 'npm'
+          cache: "npm"
           cache-dependency-path: apps/api/package-lock.json
       - run: npm ci
         working-directory: apps/api
@@ -45,3 +59,7 @@ jobs:
         working-directory: apps/api
       - run: npm test
         working-directory: apps/api
+      - run: npm run test:postgres
+        working-directory: apps/api
+        env:
+          PG_SENTIMENT_TEST_URL: postgresql://node_sentiment_test:local-ci-only@127.0.0.1:5432/node_sentiment_test

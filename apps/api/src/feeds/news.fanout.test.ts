@@ -1,5 +1,5 @@
 // End-to-end fanout test: runs the real runNewsFanout over a stubbed HTTP
-// layer (Exa search/contents, Grok chat/completions, Supabase PostgREST) and
+// layer (Firecrawl search, Grok chat/completions, Supabase PostgREST) and
 // asserts on the actual rows the Worker would persist — per-cluster sentiments
 // folded into the news_clusters upsert, and the EWMA-updated company_sentiment
 // row — plus the graceful-degradation path when the Grok call fails.
@@ -17,7 +17,7 @@ const SUPABASE_URL = "http://supabase.local";
 const env = {
   SUPABASE_URL,
   SUPABASE_SERVICE_KEY: "service-key",
-  EXA_SEARCH: "exa-key",
+  FIRECRAWL_API_KEY: "fc-key",
   GROK_MAIN_API_KEY: "grok-key",
 };
 
@@ -43,6 +43,7 @@ const exaResults = [
 interface CapturedRequest {
   method: string;
   pathname: string;
+  columns: string | null;
   body: unknown;
 }
 
@@ -54,20 +55,28 @@ function stubFanoutHttp(options: {
   grokScores?: Array<{ i: number; sentiment: number; rationale: string }>;
   multiCompany?: boolean;
   clusterPreReadStatus?: number;
+  existingClusters?: Array<Record<string, unknown>>;
+  emptyNews?: boolean;
+  pendingRows?: Array<Record<string, unknown>>;
 }) {
   const captured: CapturedRequest[] = [];
   let nextClusterId = 1;
-  const results = options.multiCompany
-    ? [
-        {
-          id: "exa-shared",
-          url: "https://www.cnbc.com/acme-beta-joint-expansion",
-          title: "Acme Corp and Beta Corp announce a joint expansion",
-          publishedDate: publishedAt,
-          score: 0.9,
-        },
-      ]
-    : exaResults;
+  const storedSentiments = new Map<string, unknown>(
+    (options.existingClusters ?? []).map((row) => [String(row.cluster_key), row.sentiments]),
+  );
+  const results = options.emptyNews
+    ? []
+    : options.multiCompany
+      ? [
+          {
+            id: "exa-shared",
+            url: "https://www.cnbc.com/acme-beta-joint-expansion",
+            title: "Acme Corp and Beta Corp announce a joint expansion",
+            publishedDate: publishedAt,
+            score: 0.9,
+          },
+        ]
+      : exaResults;
 
   const jsonResponse = (body: unknown, status = 200, headers: Record<string, string> = {}) =>
     new Response(body === null ? null : JSON.stringify(body), {
@@ -80,19 +89,27 @@ function stubFanoutHttp(options: {
     const method = init?.method ?? "GET";
     const rawBody = typeof init?.body === "string" ? init.body : null;
     const body = rawBody ? JSON.parse(rawBody) : null;
-    captured.push({ method, pathname: url.pathname, body });
+    captured.push({
+      method,
+      pathname: url.pathname,
+      columns: url.searchParams.get("columns"),
+      body,
+    });
 
-    // --- Exa ---------------------------------------------------------------
-      if (url.hostname === "api.exa.ai" && url.pathname === "/search") {
+    // --- Firecrawl -----------------------------------------------------------
+    if (url.hostname === "api.firecrawl.dev" && url.pathname === "/v2/search") {
       const isPrimary = (body as { includeDomains: string[] }).includeDomains.includes("ft.com");
-      return jsonResponse({ results: isPrimary ? results : [] });
-    }
-    if (url.hostname === "api.exa.ai" && url.pathname === "/contents") {
       return jsonResponse({
-        results: results.map((result) => ({
-          url: result.url,
-          summary: result.title,
-        })),
+        success: true,
+        data: {
+          news: (isPrimary ? results : []).map((result) => ({
+            url: result.url,
+            title: result.title,
+            summary: result.title,
+            metadata: { "article:published_time": result.publishedDate },
+            position: result.score === 0.9 ? 1 : 2,
+          })),
+        },
       });
     }
 
@@ -147,11 +164,29 @@ function stubFanoutHttp(options: {
       if (options.clusterPreReadStatus && options.clusterPreReadStatus !== 200) {
         return jsonResponse({ message: "cluster pre-read failed" }, options.clusterPreReadStatus);
       }
-      return jsonResponse([]);
+      return jsonResponse(options.existingClusters ?? []);
     }
     if (url.pathname === "/rest/v1/news_clusters" && method === "POST") {
+      const rows = body as Array<Record<string, unknown>>;
+      const columns = new Set(
+        (url.searchParams.get("columns") ?? "")
+          .split(",")
+          .map((column) => column.replaceAll('"', "")),
+      );
+      if (columns.has("sentiments") && rows.some((row) => !("sentiments" in row))) {
+        return jsonResponse(
+          { message: "null value in column sentiments violates not-null constraint" },
+          400,
+        );
+      }
+      for (const row of rows) {
+        if ("sentiments" in row) storedSentiments.set(String(row.cluster_key), row.sentiments);
+        else if (!storedSentiments.has(String(row.cluster_key))) {
+          storedSentiments.set(String(row.cluster_key), []);
+        }
+      }
       return jsonResponse(
-        (body as Array<{ cluster_key: string }>).map((row) => ({
+        rows.map((row) => ({
           id: `db-${nextClusterId++}`,
           cluster_key: row.cluster_key,
         })),
@@ -168,13 +203,17 @@ function stubFanoutHttp(options: {
           score: 0,
           evidence_cluster_ids: ["old-1"],
           scored_cluster_ids: [
-            { id: "old-1", scoredAt: new Date(Date.now() - 3_600_000).toISOString() },
+            {
+              id: "old-1",
+              scoredAt: new Date(Date.now() - 3_600_000).toISOString(),
+              publishedAt: new Date(Date.now() - 3 * 24 * 3_600_000).toISOString(),
+            },
           ],
         },
       ]);
     }
     if (url.pathname === "/rest/v1/company_sentiment_pending" && method === "GET") {
-      return jsonResponse([]);
+      return jsonResponse(options.pendingRows ?? []);
     }
     if (url.pathname === "/rest/v1/portfolio_news_matches" && method === "POST") {
       return jsonResponse(null, 201);
@@ -196,7 +235,7 @@ function stubFanoutHttp(options: {
   });
 
   vi.stubGlobal("fetch", fetchMock);
-  return { captured };
+  return { captured, storedSentiments };
 }
 
 function clusterUpsertRows(captured: CapturedRequest[]): Array<Record<string, unknown>> {
@@ -235,11 +274,16 @@ describe("runNewsFanout sentiment pipeline (end-to-end over stubbed HTTP)", () =
     const clusterRequests = captured.filter(
       (r) => r.pathname === "/rest/v1/news_clusters" && r.method === "POST",
     );
-    expect(clusterRequests.every((request) => {
-      const rows = request.body as Array<Record<string, unknown>>;
-      return new Set(rows.map((row) => Object.prototype.hasOwnProperty.call(row, "sentiments"))).size === 1;
-    })).toBe(true);
-    expect(rows.map((r) => r.cluster_key)).toEqual(["exa-1", "exa-2"]);
+    expect(
+      clusterRequests.every((request) => {
+        const rows = request.body as Array<Record<string, unknown>>;
+        return (
+          new Set(rows.map((row) => Object.prototype.hasOwnProperty.call(row, "sentiments")))
+            .size === 1
+        );
+      }),
+    ).toBe(true);
+    expect(rows.map((r) => r.cluster_key)).toEqual(exaResults.map((result) => result.url));
     expect(rows[0].sentiments).toEqual([
       {
         company_key: "ticker:ACME",
@@ -295,29 +339,55 @@ describe("runNewsFanout sentiment pipeline (end-to-end over stubbed HTTP)", () =
     // (exa-2, ACME) pair is silently omitted. exa-2's write must be skipped
     // (preserving any stored sentiment) instead of persisting [], and only
     // exa-1 may be folded into the rolling score.
-    const { captured } = stubFanoutHttp({
+    const priorSentiments = [{ company_key: "ticker:BETA", score: -0.2, rationale: "Prior." }];
+    const { captured, storedSentiments } = stubFanoutHttp({
       grokStatus: 200,
       grokScores: [{ i: 1, sentiment: 0.7, rationale: "Earnings beat." }],
+      existingClusters: [
+        {
+          cluster_key: exaResults[1].url,
+          entities: { isins: [], tickers: [], countries: [], sectors: [] },
+          sentiments: priorSentiments,
+        },
+      ],
     });
 
     const result = await runNewsFanout(env);
 
+    expect(result.clustersUpserted).toBe(2);
+    expect(result.matchesUpserted).toBe(2);
     const rows = clusterUpsertRows(captured);
     const clusterRequests = captured.filter(
       (r) => r.pathname === "/rest/v1/news_clusters" && r.method === "POST",
     );
     expect(clusterRequests).toHaveLength(2);
-    expect(clusterRequests.every((request) => {
-      const rows = request.body as Array<Record<string, unknown>>;
-      return new Set(rows.map((row) => Object.prototype.hasOwnProperty.call(row, "sentiments"))).size === 1;
-    })).toBe(true);
-    expect(rows.map((r) => r.cluster_key)).toEqual(["exa-1", "exa-2"]);
+    // The real Supabase client serializes each upsert's union of row keys as
+    // `columns`. A mixed request would default the omitted NOT NULL column to
+    // SQL NULL and reject the entire batch in PostgREST.
+    expect(
+      clusterRequests[0].columns?.split(",").map((column) => column.replaceAll('"', "")),
+    ).toContain("sentiments");
+    expect(
+      clusterRequests[1].columns?.split(",").map((column) => column.replaceAll('"', "")),
+    ).not.toContain("sentiments");
+    expect(result.errors).toEqual([]);
+    expect(
+      clusterRequests.every((request) => {
+        const rows = request.body as Array<Record<string, unknown>>;
+        return (
+          new Set(rows.map((row) => Object.prototype.hasOwnProperty.call(row, "sentiments")))
+            .size === 1
+        );
+      }),
+    ).toBe(true);
+    expect(rows.map((r) => r.cluster_key)).toEqual(exaResults.map((result) => result.url));
     expect((rows[0].sentiments as Array<Record<string, unknown>>).map((s) => s.score)).toEqual([
       0.7,
     ]);
     // The unanswered cluster omits the key entirely so the conflict upsert
     // leaves previously stored sentiments untouched.
     expect(rows[1]).not.toHaveProperty("sentiments");
+    expect(storedSentiments.get(exaResults[1].url)).toEqual(priorSentiments);
 
     // Only the answered cluster reaches the rolling score: EWMA over prior 0
     // with alpha=0.35 and a single 0.7 observation → 0.245. exa-2 is NOT
@@ -400,5 +470,47 @@ describe("runNewsFanout sentiment pipeline (end-to-end over stubbed HTTP)", () =
         (r) => r.pathname === "/rest/v1/rpc/apply_company_sentiment_batch" && r.method === "POST",
       ),
     ).toBe(false);
+  });
+
+  it("drains durable sentiment from a prior run when Firecrawl returns no articles", async () => {
+    const { captured } = stubFanoutHttp({
+      grokStatus: 200,
+      emptyNews: true,
+      pendingRows: [
+        {
+          id: 42,
+          company_key: "ticker:ACME",
+          cluster_id: "db-pending",
+          company_name: "Acme Corp",
+          ticker: "ACME",
+          isin: null,
+          score: 0.7,
+          rationale: "Strong quarter.",
+          published_at: new Date(Date.now() - 3_600_000).toISOString(),
+          observed_at: new Date().toISOString(),
+        },
+      ],
+    });
+
+    const result = await runNewsFanout(env);
+    expect(result.clustersUpserted).toBe(0);
+    expect(result.matchesUpserted).toBe(0);
+    expect(result.clustersScored).toBe(0);
+    expect(result.companiesRescored).toBe(1);
+    expect(result.errors).toEqual([]);
+    expect(captured.some((request) => request.pathname === "/v1/chat/completions")).toBe(false);
+
+    const apply = captured.find(
+      (request) =>
+        request.pathname === "/rest/v1/rpc/apply_company_sentiment_batch" &&
+        request.method === "POST",
+    );
+    expect(apply).toBeDefined();
+    const row = (apply!.body as { p_rows: Array<Record<string, unknown>> }).p_rows[0];
+    expect(row).toMatchObject({
+      company_key: "ticker:ACME",
+      score: 0.245,
+      evidence_cluster_ids: ["db-pending", "old-1"],
+    });
   });
 });

@@ -23,7 +23,7 @@ import {
   extractAndNormalizeConstituents,
   upsertEtfConstituents,
 } from "./feeds/etf-constituents";
-import { runNewsFanout } from "./feeds/news";
+import { NEWS_CRON_SLOTS, runNewsFanout } from "./feeds/news";
 import {
   runPolymarketFanout,
   NON_FINANCIAL_RE,
@@ -57,6 +57,8 @@ export interface Env {
   SUB_AGENT_PLANNING_SYSTEM_PROMPT?: string;
   FRED_API_KEY?: string;
   EXA_SEARCH?: string;
+  // Firecrawl serves news search; Exa remains available to recaps.
+  FIRECRAWL_API_KEY?: string;
   POLYMARKET_GAMMA_BASE_URL?: string;
   GEMINI_API_KEY?: string;
   GEMINI_MODEL?: string;
@@ -5593,10 +5595,8 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
         )
         .eq("portfolio_id", portfolioId)
         .gt("news_clusters.expires_at", new Date().toISOString())
-        // Minimum score floor. Score is exaScore × recency × holdingsBooster,
-        // whose distribution differs from the previous provider's entity-weight
-        // one — so this starts permissive and MUST be recalibrated empirically
-        // from observed Exa output (see plan verification step).
+        // Minimum score floor. Firecrawl rank decay combines with recency and
+        // holdings overlap; the permissive floor trims near-expiry low-rank news.
         .gte("score", 0.05)
         .order("score", { ascending: false })
         .limit(limit);
@@ -5906,11 +5906,10 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
       } catch (error) {
         console.error("daily snapshot fanout failed", error);
       }
-      // News fanout — decoupled from the hourly cron to a few times/day to cut Exa
-      // spend. Runs only on these cron slots (not the hourly "5 * * * *"): weekday
+      // News fanout — decoupled from the hourly cron to a few times/day to limit
+      // Firecrawl credits. Runs only on these cron slots (not "5 * * * *"): weekday
       // morning, afternoon, and evening. Manual runs go via /api/_debug/run-news-fanout.
-      const NEWS_CRON_SLOTS = new Set(["30 6 * * 2-6", "30 16 * * 1-5", "0 21 * * 1-5"]);
-      if (NEWS_CRON_SLOTS.has(controller.cron)) {
+      if (NEWS_CRON_SLOTS.some((slot) => slot === controller.cron)) {
         try {
           await runNewsFanout(env, {
             availableSubrequests: invocationBudget.remaining(),

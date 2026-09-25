@@ -36,7 +36,7 @@ create table if not exists public.company_sentiment (
   -- capped at 10 (see MAX_EVIDENCE_CLUSTER_IDS in feeds/sentiment.ts) —
   -- display/API list only, NOT the dedupe set
   scored_cluster_ids    jsonb not null default '[]'::jsonb,
-  -- full re-observation dedupe set: array of {id, scoredAt} for every
+  -- full re-observation dedupe set: array of {id, scoredAt, publishedAt} for every
   -- news_clusters.id already folded into this company's EWMA. Pruned by age
   -- using the news TTL window.
   updated_at            timestamptz not null default now()
@@ -92,6 +92,7 @@ create policy "Service role can manage company sentiment lock"
   with check (true);
 
 create table if not exists public.company_sentiment_pending (
+  id           bigint generated always as identity primary key,
   company_key  text not null,
   cluster_id   text not null,
   company_name text not null,
@@ -99,8 +100,9 @@ create table if not exists public.company_sentiment_pending (
   isin         text,
   score        numeric(5, 4) not null check (score >= -1 and score <= 1),
   rationale    text not null default '',
+  published_at timestamptz not null,
   observed_at timestamptz not null default now(),
-  primary key (company_key, cluster_id)
+  unique (company_key, cluster_id)
 );
 
 alter table public.company_sentiment_pending enable row level security;
@@ -121,15 +123,15 @@ set search_path = ''
 as $$
 begin
   insert into public.company_sentiment_pending (
-    company_key, cluster_id, company_name, ticker, isin, score, rationale, observed_at
+    company_key, cluster_id, company_name, ticker, isin, score, rationale, published_at, observed_at
   )
   select
     r.company_key, r.cluster_id, r.company_name, r.ticker, r.isin,
-    r.score, r.rationale, r.observed_at
+    r.score, r.rationale, r.published_at, r.observed_at
   from (
     select distinct on (raw.company_key, raw.cluster_id)
       raw.company_key, raw.cluster_id, raw.company_name, raw.ticker,
-      raw.isin, raw.score, raw.rationale, raw.observed_at
+      raw.isin, raw.score, raw.rationale, raw.published_at, raw.observed_at
     from jsonb_to_recordset(p_rows) as raw(
       company_key text,
       cluster_id text,
@@ -138,6 +140,7 @@ begin
       isin text,
       score numeric,
       rationale text,
+      published_at timestamptz,
       observed_at timestamptz
     )
     order by raw.company_key, raw.cluster_id, raw.observed_at desc nulls last
@@ -148,6 +151,7 @@ begin
         isin = excluded.isin,
         score = excluded.score,
         rationale = excluded.rationale,
+        published_at = excluded.published_at,
         observed_at = excluded.observed_at;
 
   return true;
@@ -155,6 +159,7 @@ end;
 $$;
 
 revoke all on function public.enqueue_company_sentiment_pending(jsonb) from public;
+revoke all on function public.enqueue_company_sentiment_pending(jsonb) from anon, authenticated;
 grant execute on function public.enqueue_company_sentiment_pending(jsonb) to service_role;
 
 -- Atomically takes the singleton lock row if it is unheld or its holder's
@@ -183,6 +188,7 @@ end;
 $$;
 
 revoke all on function public.try_acquire_company_sentiment_lock(text, int) from public;
+revoke all on function public.try_acquire_company_sentiment_lock(text, int) from anon, authenticated;
 grant execute on function public.try_acquire_company_sentiment_lock(text, int) to service_role;
 
 -- Writes the rolling company_sentiment rows only if p_holder still holds a
@@ -260,4 +266,5 @@ end;
 $$;
 
 revoke all on function public.apply_company_sentiment_batch(text, jsonb) from public;
+revoke all on function public.apply_company_sentiment_batch(text, jsonb) from anon, authenticated;
 grant execute on function public.apply_company_sentiment_batch(text, jsonb) to service_role;

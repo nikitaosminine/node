@@ -5,6 +5,7 @@ import {
   buildSentimentPrompt,
   computeEwma,
   invokeSentimentGrok,
+  latestEvidenceClusterIds,
   mergeEvidenceClusterIds,
   mergeScoredClusterIds,
   parseSentimentResponse,
@@ -15,6 +16,32 @@ import {
 afterEach(() => {
   vi.useRealTimers();
   vi.unstubAllGlobals();
+});
+
+describe("publication-ordered evidence", () => {
+  it("keeps the ten newest articles across runs even when search returns older articles later", () => {
+    const now = Date.parse("2026-09-25T12:00:00.000Z");
+    const prior = [
+      {
+        id: "prior-new",
+        scoredAt: new Date(now - 3_600_000).toISOString(),
+        publishedAt: "2026-09-25T11:00:00.000Z",
+      },
+    ];
+    const fresh = Array.from({ length: 12 }, (_, index) => `fresh-${index}`);
+    const publishedAt = new Map(
+      fresh.map((id, index) => [id, new Date(now - (13 - index) * 3_600_000).toISOString()]),
+    );
+
+    const scored = mergeScoredClusterIds(prior, fresh, now, 7 * 24 * 3_600_000, publishedAt);
+    const evidence = latestEvidenceClusterIds(scored);
+
+    expect(evidence).toHaveLength(10);
+    expect(evidence[0]).toBe("prior-new");
+    expect(evidence.slice(1)).toEqual(fresh.slice(3).reverse());
+    expect(evidence).not.toContain("fresh-0");
+    expect(scored).toHaveLength(13); // full dedupe set remains separate from display cap
+  });
 });
 
 const env = { GROK_MAIN_API_KEY: "grok-key" };
