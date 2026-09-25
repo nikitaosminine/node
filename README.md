@@ -29,7 +29,7 @@ Node closes both gaps: bridge great UX with AI-driven utility, and build a syste
 
 - **Daily / weekly recaps** — plain-language explanations of what moved your portfolio and *why*, mapped to the exact holdings you own (agentic loop + deterministic data merge)
 - **Holdings-tailored news feed**
-- **Prediction-market feed** (Polymarket) for live macro context
+- **Prediction-market feed** (Polymarket) for macro context with freshness-aware states
 - **Benchmark overlay** with AI-suggested comparisons
 - **Allocation breakdown** — sector, asset type, geography
 - **Live prices**

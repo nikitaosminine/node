@@ -152,7 +152,9 @@ describe("PolymarketFeed", () => {
     render(<PolymarketFeed portfolioId="portfolio-1" />);
 
     expect(await screen.findByText("Curated-only market")).toBeInTheDocument();
-    expect(screen.queryByText("Trending on Polymarket — personalization is catching up")).toBeNull();
+    expect(
+      screen.queryByText("Trending on Polymarket — personalization is catching up"),
+    ).toBeNull();
   });
 
   it("updates fallback heading visibility when search filters rotating rows", async () => {
@@ -179,7 +181,9 @@ describe("PolymarketFeed", () => {
     fireEvent.change(searchInput, { target: { value: "Curated search" } });
     expect(screen.getByText("Curated search market")).toBeInTheDocument();
     expect(screen.queryByText("Fallback search market")).toBeNull();
-    expect(screen.queryByText("Trending on Polymarket — personalization is catching up")).toBeNull();
+    expect(
+      screen.queryByText("Trending on Polymarket — personalization is catching up"),
+    ).toBeNull();
 
     fireEvent.change(searchInput, { target: { value: "Fallback search" } });
     expect(screen.getByText("Fallback search market")).toBeInTheDocument();
