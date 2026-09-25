@@ -8,9 +8,9 @@
 - **Automated Portfolio Briefs**: Agentic loop combining Gemini 
   and Exa Search to deliver daily 3-slide visual recaps and 
   Saturday weekly recaps grounded in the user's actual holdings.
-- **Live Macro Context**: Integrates financial headlines alongside 
-  live Polymarket prediction market probabilities to surface 
-  macro trends relevant to user holdings.
+- **Macro Context**: Integrates financial headlines alongside
+  Polymarket prediction market probabilities and clearly labeled
+  freshness states to surface macro trends relevant to user holdings.
 - **Performance Analytics**: High-density workspace for asset 
   allocation tracking, benchmark comparisons, and portfolio value 
   trends — no banking app bloat, no upsells.
