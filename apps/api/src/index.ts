@@ -6027,10 +6027,20 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
 
       if (isNewsFanoutQueueMessage(message.body)) {
         try {
-          await runNewsFanout(env, { scheduledTime: message.body.scheduledTime });
+          const result = await runNewsFanout(env, { scheduledTime: message.body.scheduledTime });
+          if (
+            result.errors.length > 0 &&
+            result.clustersUpserted === 0 &&
+            result.matchesUpserted === 0
+          ) {
+            throw new Error(`news fanout produced no coverage: ${result.errors.join("; ")}`);
+          }
           message.ack();
         } catch (error) {
-          console.error("news fanout queue failed", error);
+          console.error(
+            "news fanout queue failed",
+            error instanceof Error ? error.message : String(error),
+          );
           message.retry();
         }
         continue;

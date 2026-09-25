@@ -1,10 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const { dbFrom } = vi.hoisted(() => ({ dbFrom: vi.fn() }));
+const { dbFrom, dbRpc } = vi.hoisted(() => ({ dbFrom: vi.fn(), dbRpc: vi.fn() }));
 
 vi.mock("@supabase/supabase-js", () => ({
-  createClient: vi.fn(() => ({ from: dbFrom })),
+  createClient: vi.fn(() => ({ from: dbFrom, rpc: dbRpc })),
 }));
+vi.mock("./feeds/recaps", () => ({ generateRecap: vi.fn().mockResolvedValue(undefined) }));
 
 import worker, {
   researchPortfolioEtfGeography,
@@ -106,6 +107,7 @@ function stubGrokGeographyResearch(payload: Record<string, unknown>) {
 
 beforeEach(() => {
   dbFrom.mockReset();
+  dbRpc.mockReset();
   vi.spyOn(console, "error").mockImplementation(() => undefined);
   vi.spyOn(console, "log").mockImplementation(() => undefined);
   vi.spyOn(console, "warn").mockImplementation(() => undefined);
@@ -226,6 +228,7 @@ describe("withInvocationSubrequestBudget", () => {
 describe("scheduled news queue handoff", () => {
   it("enqueues news before the shared scheduled work can consume its budget", async () => {
     const sent: unknown[] = [];
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("[]", { status: 200 })));
     const queueEnv = {
       ...env,
       RECAP_QUEUE: { send: vi.fn(async (message: unknown) => sent.push(message)) },
@@ -245,7 +248,7 @@ describe("scheduled news queue handoff", () => {
     ]);
   });
 
-  it("acks a news queue delivery safely when the configured provider is absent", async () => {
+  it("retries a news queue delivery when the provider key is absent", async () => {
     const ack = vi.fn();
     const retry = vi.fn();
     await worker.queue(
@@ -257,6 +260,133 @@ describe("scheduled news queue handoff", () => {
             retry,
           },
         ],
+      } as unknown as Parameters<typeof worker.queue>[0],
+      env,
+    );
+
+    expect(ack).not.toHaveBeenCalled();
+    expect(retry).toHaveBeenCalledOnce();
+  });
+
+  it("safely acknowledges duplicate successful deliveries", async () => {
+    const holdingsQuery = {
+      gt: vi.fn().mockResolvedValue({ data: [], error: null }),
+    };
+    dbFrom.mockImplementation((table: string) => {
+      if (table === "holdings") return { select: vi.fn(() => holdingsQuery) };
+      if (table === "news_clusters") {
+        return {
+          delete: vi.fn(() => ({
+            lt: vi.fn().mockResolvedValue({ count: 0, error: null }),
+          })),
+        };
+      }
+      if (table === "company_sentiment_pending") {
+        return { select: vi.fn(() => ({ order: vi.fn(() => ({ limit: vi.fn().mockResolvedValue({ data: [], error: null }) })) })) };
+      }
+      if (table === "company_sentiment_lock") {
+        return { delete: vi.fn(() => ({ eq: vi.fn(() => ({ eq: vi.fn().mockResolvedValue({ error: null }) })) })) };
+      }
+      throw new Error(`unexpected table ${table}`);
+    });
+    dbRpc.mockResolvedValue({ data: true, error: null });
+    const queueEnv = { ...env, FIRECRAWL_API_KEY: "fc-key" } as Env;
+    const ack1 = vi.fn();
+    const retry1 = vi.fn();
+    const ack2 = vi.fn();
+    const retry2 = vi.fn();
+    const body = { type: "news_fanout", scheduledTime: Date.UTC(2026, 8, 21, 6, 30) } as const;
+    const makeBatch = (ack: () => void, retry: () => void) =>
+      ({ messages: [{ body, ack, retry }] }) as unknown as Parameters<typeof worker.queue>[0];
+
+    vi.useFakeTimers();
+    vi.setSystemTime(Date.UTC(2026, 8, 21, 21, 0));
+    try {
+      await worker.queue(makeBatch(ack1, retry1), queueEnv);
+      await worker.queue(makeBatch(ack2, retry2), queueEnv);
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect(ack1).toHaveBeenCalledOnce();
+    expect(ack2).toHaveBeenCalledOnce();
+    expect(retry1).not.toHaveBeenCalled();
+    expect(retry2).not.toHaveBeenCalled();
+  });
+
+  it("retries a total provider failure instead of acknowledging it", async () => {
+    const holdingsQuery = {
+      gt: vi.fn().mockResolvedValue({
+        data: [
+          {
+            id: "holding-1",
+            ticker: "ACME",
+            isin: null,
+            asset_type: "EQUITY",
+            name: "Acme Corp",
+            quantity: 1,
+            portfolio_id: "portfolio-1",
+          },
+        ],
+        error: null,
+      }),
+    };
+    dbFrom.mockImplementation((table: string) => {
+      if (table === "holdings") return { select: vi.fn(() => holdingsQuery) };
+      if (table === "news_clusters") {
+        return {
+          delete: vi.fn(() => ({
+            lt: vi.fn().mockResolvedValue({ count: 0, error: null }),
+          })),
+        };
+      }
+      throw new Error(`unexpected table ${table}`);
+    });
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("provider down", { status: 500 })));
+    const ack = vi.fn();
+    const retry = vi.fn();
+
+    vi.useFakeTimers();
+    try {
+      const delivery = worker.queue(
+        {
+          messages: [
+            {
+              body: { type: "news_fanout", scheduledTime: Date.UTC(2026, 8, 21, 16, 30) },
+              ack,
+              retry,
+            },
+          ],
+        } as unknown as Parameters<typeof worker.queue>[0],
+        { ...env, FIRECRAWL_API_KEY: "fc-key" } as Env,
+      );
+      await vi.runAllTimersAsync();
+      await delivery;
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect(ack).not.toHaveBeenCalled();
+    expect(retry).toHaveBeenCalledOnce();
+  });
+
+  it("keeps recap queue messages on their existing acknowledgement path", async () => {
+    dbFrom.mockImplementation((table: string) => {
+      if (table !== "recaps") throw new Error(`unexpected table ${table}`);
+      return {
+        update: vi.fn(() => ({
+          eq: vi.fn(() => ({
+            eq: vi.fn().mockResolvedValue({ error: null }),
+          })),
+        })),
+      };
+    });
+    const ack = vi.fn();
+    const retry = vi.fn();
+
+    await worker.queue(
+      {
+        messages: [{ body: { recapId: "recap-1" }, ack, retry }],
       } as unknown as Parameters<typeof worker.queue>[0],
       env,
     );

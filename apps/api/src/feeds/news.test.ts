@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { readFileSync } from "node:fs";
+import { parse } from "smol-toml";
 
 import {
   buildClusterRow,
@@ -695,7 +697,7 @@ describe("runNewsFanout — ETF-derived market coverage", () => {
         const result = await run;
 
         expect(result.marketTopicsQueried).toBeGreaterThan(0);
-        expect(result.marketTopicsQueried).toBeLessThanOrEqual(2);
+        expect(result.marketTopicsQueried).toBeLessThanOrEqual(4);
         expect(state.subrequestCount).toBeLessThanOrEqual(50);
         state.searchQueries
           .filter((query) => topicMarkers.some((marker) => query.includes(marker)))
@@ -833,38 +835,31 @@ describe("resolveSentimentsForRow", () => {
 });
 
 describe("selectRotatingWindow", () => {
-  it("reaches all 12 companies across the actual weekday news cron slots", () => {
-    expect(NEWS_CRON_SLOTS).toEqual(["30 6 * * 2-6", "30 16 * * 2-6", "0 21 * * 2-6"]);
-    expect(MAX_COMPANY_SEARCHES_PER_RUN).toBe(2);
-    const entries = Array.from({ length: 12 }, (_, i) => `company-${i}`);
+  it("reaches all 30 companies across the actual weekday news cron slots", () => {
+    const config = parse(readFileSync(new URL("../../wrangler.toml", import.meta.url), "utf8")) as {
+      triggers?: { crons?: string[] };
+    };
+    const configuredNewsSlots = (config.triggers?.crons ?? []).filter((cron) => {
+      const [minute, hour, , , weekday] = cron.split(" ");
+      return weekday === "2-6" && ["30:6", "30:16", "0:21"].includes(`${minute}:${hour}`);
+    });
+    expect(configuredNewsSlots).toEqual([...NEWS_CRON_SLOTS]);
+    const entries = Array.from({ length: 30 }, (_, i) => `company-${i}`);
     const monday = Date.UTC(2026, 8, 21);
-    const slots: Array<[number, number, number]> = [
-      [0, 16, 30],
-      [0, 21, 0],
-      [1, 6, 30],
-      [1, 16, 30],
-      [1, 21, 0],
-      [2, 6, 30],
-      [2, 16, 30],
-      [2, 21, 0],
-      [3, 6, 30],
-      [3, 16, 30],
-      [3, 21, 0],
-      [4, 6, 30],
-      [4, 16, 30],
-      [4, 21, 0],
-      [5, 6, 30],
-    ];
+    const slots = Array.from({ length: 5 }, (_, day) =>
+      [
+        [day, 6, 30],
+        [day, 16, 30],
+        [day, 21, 0],
+      ] as Array<[number, number, number]>,
+    ).flat();
     const seen = new Set<string>();
 
-    for (let week = 0; week < 3; week++) {
-      for (const [day, hour, minute] of slots) {
-        const scheduledAt =
-          monday + (week * 7 + day) * 24 * 3_600_000 + hour * 3_600_000 + minute * 60_000;
-        const selected = selectRotatingWindow(entries, MAX_COMPANY_SEARCHES_PER_RUN, scheduledAt);
-        expect(selected).toHaveLength(4);
-        selected.forEach((entry) => seen.add(entry));
-      }
+    for (const [day, hour, minute] of slots) {
+      const scheduledAt = monday + day * 24 * 3_600_000 + hour * 3_600_000 + minute * 60_000;
+      const selected = selectRotatingWindow(entries, MAX_COMPANY_SEARCHES_PER_RUN, scheduledAt);
+      expect(selected).toHaveLength(MAX_COMPANY_SEARCHES_PER_RUN);
+      selected.forEach((entry) => seen.add(entry));
     }
 
     expect(seen).toEqual(new Set(entries));

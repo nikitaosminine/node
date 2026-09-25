@@ -88,7 +88,7 @@ const NEWS_RUN_MINUTES_OF_WEEK = NEWS_CRON_SLOTS.flatMap((cron) => {
   const [minuteText, hourText, , , dayRange] = cron.split(" ");
   const [firstDay, lastDay] = dayRange.split("-").map(Number);
   return Array.from({ length: lastDay - firstDay + 1 }, (_, offset) => {
-    const mondayBasedDay = (firstDay + offset + 6) % 7;
+    const mondayBasedDay = (firstDay + offset + 5) % 7;
     return mondayBasedDay * 24 * 60 + Number(hourText) * 60 + Number(minuteText);
   });
 }).sort((a, b) => a - b);
@@ -1233,24 +1233,7 @@ export async function runNewsFanout(
 
   if (!env.FIRECRAWL_API_KEY) {
     console.warn("[news] FIRECRAWL_API_KEY not set — skipping news fanout");
-    return {
-      distinctCompaniesQueried: 0,
-      marketTopicsQueried: 0,
-      clustersUpserted: 0,
-      matchesUpserted: 0,
-      undatedDropped: 0,
-      staleDropped: 0,
-      googleWrappedDropped: 0,
-      lowValueDropped: 0,
-      offTargetDropped: 0,
-      offTopicDropped: 0,
-      secondarySearches: 0,
-      dedupedAway: 0,
-      expiredSwept: 0,
-      clustersScored: 0,
-      companiesRescored: 0,
-      errors: ["FIRECRAWL_API_KEY not configured"],
-    };
+    throw new Error("FIRECRAWL_API_KEY not configured");
   }
 
   const apiKey = env.FIRECRAWL_API_KEY;
@@ -1860,6 +1843,14 @@ export async function runNewsFanout(
 
   if (sweepError) {
     console.error("[news] expired sweep failed:", sweepError.message);
+  }
+
+  if (
+    (allCompanies.length > 0 || marketCandidates.length > 0) &&
+    companies.length === 0 &&
+    marketEntries.length === 0
+  ) {
+    errors.push("news fanout produced no search coverage");
   }
 
   const result = {
