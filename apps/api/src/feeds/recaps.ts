@@ -539,6 +539,7 @@ export async function gatherContext(
   // endpoint (design doc 1A-122 P3) — end_date > now, duration >= 14d,
   // near-certain < 0.97, liquidity >= $2k. Over-fetch since some rows will
   // be filtered out post-query.
+  const watchEligibilityNow = new Date();
   const { data: watchRowsRaw } = await client
     .from("portfolio_polymarket_matches")
     .select(
@@ -547,12 +548,14 @@ export async function gatherContext(
     )
     .eq("portfolio_id", recap.portfolio_id)
     .eq("polymarket_markets.active", true)
+    .gt("polymarket_markets.end_date", watchEligibilityNow.toISOString())
     .order("is_pinned", { ascending: false })
     .order("score", { ascending: false, nullsFirst: false })
     .limit(20);
 
   const watchRows = filterEligiblePolymarketWatchRows(
     (watchRowsRaw ?? []) as unknown as PolymarketWatchRow[],
+    watchEligibilityNow,
   );
 
   // Geography exposure for the watch prompt (US% and notable ETFs).

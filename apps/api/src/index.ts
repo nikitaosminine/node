@@ -5826,6 +5826,7 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
       const auth = await requirePortfolioAccess(request, env, portfolioId);
       if (auth instanceof Response) return auth;
 
+      const eligibilityNow = new Date();
       const { data, error } = await auth.db
         .from("portfolio_polymarket_matches")
         .select(
@@ -5838,11 +5839,7 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
         )
         .eq("portfolio_id", portfolioId)
         .eq("polymarket_markets.active", true)
-        // Defense in depth against stale/resolved markets that haven't been
-        // deactivated by the fanout yet — mirrors recaps.ts's watch-slide filter.
-        .or(`end_date.is.null,end_date.gte.${new Date().toISOString()}`, {
-          referencedTable: "polymarket_markets",
-        })
+        .gt("polymarket_markets.end_date", eligibilityNow.toISOString())
         .order("is_pinned", { ascending: false })
         .order("score", { ascending: false, nullsFirst: false })
         .limit(60);
@@ -5850,7 +5847,9 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
       if (error) return json({ error: error.message }, 500);
 
       const rows = (data ?? [])
-        .filter((r) => isEligibleMarket((r as any).polymarket_markets ?? {}))
+        .filter((r) =>
+          isEligibleMarket((r as any).polymarket_markets ?? {}, eligibilityNow),
+        )
         .slice(0, 30);
       const pinned = rows.filter((r) => r.is_pinned);
       const rotating = rows.filter((r) => !r.is_pinned);
@@ -6070,6 +6069,7 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
       }
 
       const limit = Math.min(Number(url.searchParams.get("limit") ?? "30"), 60);
+      const eligibilityNow = new Date();
 
       const { data, error } = await auth.db
         .from("polymarket_markets")
@@ -6078,9 +6078,7 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
         )
         .contains("tags", JSON.stringify([{ id: tagId }]))
         .eq("active", true)
-        // Defense in depth against stale/resolved markets that haven't been
-        // deactivated by the fanout yet — mirrors recaps.ts's watch-slide filter.
-        .or(`end_date.is.null,end_date.gte.${new Date().toISOString()}`)
+        .gt("end_date", eligibilityNow.toISOString())
         .order("volume_24hr", { ascending: false })
         .limit(limit * 2); // fetch extra to have room after client-side filters
 
@@ -6091,7 +6089,7 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
       // slimmed NON_FINANCIAL_RE backstop that only this LLM-free path needs.
       const filtered = (data ?? [])
         .filter((m) => !NON_FINANCIAL_RE.test(m.question ?? ""))
-        .filter((m) => isEligibleMarket(m))
+        .filter((m) => isEligibleMarket(m, eligibilityNow))
         .slice(0, limit);
 
       return json(filtered, 200);

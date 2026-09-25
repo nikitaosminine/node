@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const { requirePortfolioAccess } = vi.hoisted(() => ({
   requirePortfolioAccess: vi.fn(),
@@ -22,6 +22,8 @@ const env = {
   SUPABASE_SERVICE_KEY: "service-key",
   SUPABASE_ANON_KEY: "anon-key",
 } as never;
+
+const reviewNow = new Date("2026-08-16T00:00:00Z");
 
 function marketRow(overrides: Record<string, unknown> = {}) {
   return {
@@ -54,10 +56,20 @@ function fakeDb(rows: unknown[]) {
   return {
     from(table: string) {
       const builder: Record<string, (...args: unknown[]) => unknown> = {};
+      let filteredRows = rows;
       for (const method of ["select", "eq", "or", "order"]) {
         builder[method] = () => builder;
       }
-      builder.limit = () => Promise.resolve({ data: rows, error: null });
+      builder.gt = (_column, value) => {
+        filteredRows = rows.filter((row) => {
+          const endDate = (row as { polymarket_markets?: { end_date?: unknown } })
+            .polymarket_markets?.end_date;
+          return typeof endDate === "string" && endDate > String(value);
+        });
+        return builder;
+      };
+      builder.limit = (count) =>
+        Promise.resolve({ data: filteredRows.slice(0, Number(count)), error: null });
       if (table !== "portfolio_polymarket_matches") {
         throw new Error(`Unexpected table: ${table}`);
       }
@@ -69,10 +81,25 @@ function fakeDb(rows: unknown[]) {
 describe("GET /api/feed/polymarket", () => {
   beforeEach(() => {
     requirePortfolioAccess.mockReset();
+    vi.useFakeTimers();
+    vi.setSystemTime(reviewNow);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   it("does not deliver an ineligible cached match", async () => {
     const rows = [
+      ...Array.from({ length: 60 }, (_, index) =>
+        marketRow({
+          polymarket_markets: {
+            ...marketRow().polymarket_markets,
+            condition_id: `missing-end-${index}`,
+            end_date: null,
+          },
+        }),
+      ),
       marketRow({
         polymarket_markets: {
           ...marketRow().polymarket_markets,

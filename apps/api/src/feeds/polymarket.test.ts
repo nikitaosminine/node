@@ -30,6 +30,8 @@ const env = {
   POLYMARKET_GAMMA_BASE_URL: "https://gamma.example",
 };
 
+const reviewNow = new Date("2026-08-16T00:00:00Z");
+
 function gammaEvent(conditionId = "0xmarket", eventId = "event-1", eventSlug = "fed-rates-2026") {
   return {
     id: eventId,
@@ -68,12 +70,15 @@ async function holdingsHash(holding: {
 
 beforeEach(() => {
   dbFrom.mockReset();
+  vi.useFakeTimers();
+  vi.setSystemTime(reviewNow);
   vi.spyOn(console, "error").mockImplementation(() => undefined);
   vi.spyOn(console, "log").mockImplementation(() => undefined);
   vi.spyOn(console, "warn").mockImplementation(() => undefined);
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });

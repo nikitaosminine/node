@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const { dbFrom } = vi.hoisted(() => ({ dbFrom: vi.fn() }));
 
@@ -24,8 +24,16 @@ function chainResult(data: unknown) {
 }
 
 describe("recap Polymarket watch filter", () => {
+  const reviewNow = new Date("2026-08-16T00:00:00Z");
+
   beforeEach(() => {
     dbFrom.mockReset();
+    vi.useFakeTimers();
+    vi.setSystemTime(reviewNow);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   it("excludes cached matches that fail the shared eligibility gate", async () => {
@@ -39,6 +47,7 @@ describe("recap Polymarket watch filter", () => {
       active: true,
     };
 
+    let watchEndDateFilter: unknown[] | undefined;
     dbFrom.mockImplementation((table: string) => {
       if (table === "portfolios")
         return chainResult({ primary_exchange: "UNKNOWN", cash_value: 0 });
@@ -74,7 +83,12 @@ describe("recap Polymarket watch filter", () => {
       }
       if (table === "saved_benchmarks") return chainResult([]);
       if (table === "portfolio_polymarket_matches") {
-        return chainResult([
+        const builder = chainResult([
+          ...Array.from({ length: 20 }, (_, index) => ({
+            is_pinned: false,
+            score: 1 - index / 100,
+            polymarket_markets: { ...eligibleMarket, end_date: null },
+          })),
           {
             is_pinned: false,
             score: 0.95,
@@ -82,6 +96,11 @@ describe("recap Polymarket watch filter", () => {
           },
           { is_pinned: false, score: 0.9, polymarket_markets: eligibleMarket },
         ]);
+        builder.gt = (...args) => {
+          watchEndDateFilter = args;
+          return builder;
+        };
+        return builder;
       }
       if (table === "holding_geography_allocations") {
         const builder = chainResult([]);
@@ -106,6 +125,10 @@ describe("recap Polymarket watch filter", () => {
         url: "https://polymarket.com/event/fed-rates-2027",
         topProbability: 0.6,
       },
+    ]);
+    expect(watchEndDateFilter).toEqual([
+      "polymarket_markets.end_date",
+      reviewNow.toISOString(),
     ]);
   });
 });

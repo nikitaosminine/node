@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // Exercise the real Worker fetch handler for GET /api/polymarket/category with
 // a stubbed auth context and Supabase query builder, so the test proves the
@@ -12,6 +12,7 @@ vi.mock("@supabase/supabase-js", () => ({
 
 const fromCalls: Array<{ table: string; args: Record<string, unknown[]> }> = [];
 let seededRows: unknown[] = [];
+const reviewNow = new Date("2026-08-16T00:00:00Z");
 
 function makeFakeDb() {
   return {
@@ -19,15 +20,24 @@ function makeFakeDb() {
       const call = { table, args: {} as Record<string, unknown[]> };
       fromCalls.push(call);
       const builder: Record<string, unknown> = {};
+      let filteredRows = seededRows;
       for (const method of ["select", "contains", "eq", "or", "order"]) {
         builder[method] = (...args: unknown[]) => {
           call.args[method] = args;
           return builder;
         };
       }
+      builder.gt = (...args: unknown[]) => {
+        call.args.gt = args;
+        filteredRows = filteredRows.filter((row) => {
+          const endDate = (row as { end_date?: unknown }).end_date;
+          return typeof endDate === "string" && endDate > String(args[1]);
+        });
+        return builder;
+      };
       builder.limit = (...args: unknown[]) => {
         call.args.limit = args;
-        return Promise.resolve({ data: seededRows, error: null });
+        return Promise.resolve({ data: filteredRows.slice(0, Number(args[0])), error: null });
       };
       return builder;
     },
@@ -76,8 +86,22 @@ function marketRow(overrides: Record<string, unknown>) {
 }
 
 describe("GET /api/polymarket/category", () => {
+  beforeEach(() => {
+    fromCalls.length = 0;
+    seededRows = [];
+    vi.useFakeTimers();
+    vi.setSystemTime(reviewNow);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it("excludes short-duration, near-certain, and non-financial markets from the response", async () => {
     seededRows = [
+      ...Array.from({ length: 60 }, (_, index) =>
+        marketRow({ condition_id: `missing-end-${index}`, end_date: null }),
+      ),
       marketRow({
         condition_id: "short-term",
         question: "Will MSFT close $440-$450 this week?",
@@ -119,6 +143,7 @@ describe("GET /api/polymarket/category", () => {
     const query = fromCalls.find((c) => c.table === "polymarket_markets");
     expect(query).toBeDefined();
     expect(String(query?.args.select?.[0])).toContain("start_date");
+    expect(query?.args.gt).toEqual(["end_date", reviewNow.toISOString()]);
   });
 
   it("keeps normal markets when nothing matches the filters", async () => {
