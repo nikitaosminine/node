@@ -28,8 +28,15 @@ export function extractBearerToken(request: Request): string | null {
 }
 
 /** Service role — bypasses RLS. Use only in crons, queues, and admin routes. */
-export function adminDb(env: AuthEnv): SupabaseClient {
-  return createClient(env.SUPABASE_URL, env.SUPABASE_SERVICE_KEY);
+export function adminDb(
+  env: AuthEnv,
+  options: { fetch?: typeof globalThis.fetch } = {},
+): SupabaseClient {
+  return createClient(
+    env.SUPABASE_URL,
+    env.SUPABASE_SERVICE_KEY,
+    options.fetch ? { global: { fetch: options.fetch } } : undefined,
+  );
 }
 
 /** User-scoped client — RLS enforced via the caller's JWT. */

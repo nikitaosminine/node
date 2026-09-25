@@ -34,12 +34,13 @@ npm run dev      # → localhost:8787
 npm run deploy   # manual deploy to Cloudflare
 npx wrangler secret put NAME   # add/update a secret
 npm run cf-typegen             # regenerate Cloudflare bindings types
+npm run eval:curation          # Polymarket curation quality eval — docs: apps/api/evals/curation/README.md
 ```
 
 No monorepo-level build or test command exists; lint/build/test per-app.
 
 CI (`.github/workflows/ci.yml`) runs on every PR to `main`: `check-web` does lint + `tsc --noEmit`
-+ `npm test` in `apps/web`; `check-api` does `npm run typecheck` in `apps/api` only.
++ `npm test` in `apps/web`; `check-api` does `npm run typecheck` + `npm test` (vitest) in `apps/api`.
 
 ## Deployment rules
 
@@ -59,7 +60,7 @@ Single Cloudflare Worker file (~6000 lines) handling all routing, business logic
 **Queue consumers (async tasks):**
 - `agent-runs` — thesis AI analysis
 - `snapshot-rebuild-queue` — portfolio performance snapshots
-- `geography-queue` — ETF geographic allocation enrichment via LLM
+- `geography-queue` — ETF geographic allocation + constituents enrichment via LLM
 - `recap-queue` — weekly/daily brief generation
 
 **Scheduled crons:** 5 triggers daily for market-hours fanout, news, polymarket, and recaps.
@@ -92,7 +93,7 @@ Page-wrapper padding and the `@container` containment rule live in `apps/web/DES
 
 Supabase PostgreSQL. RLS is enabled on all tables — queries from the frontend use the anon key and are row-restricted by policy. The Worker uses the service key to perform cross-user operations (snapshots, fanout).
 
-Key tables: `profiles`, `portfolios`, `holdings`, `theses`, `agent_runs`, `transactions`, `holdings_geography`, `news_feed`, `polymarket_feed`, `recaps`, `allowed_emails`, `news_clusters` (per-story `sentiments` jsonb), `company_sentiment` (rolling per-company EWMA, recomputed at the end of every news fanout — see `apps/api/src/feeds/sentiment.ts`).
+Key tables: `profiles`, `portfolios`, `holdings`, `theses`, `agent_runs`, `transactions`, `holding_geography_allocations`, `news_clusters` (per-cluster `sentiments` jsonb)/`portfolio_news_matches`, `polymarket_markets`/`portfolio_polymarket_matches`, `company_sentiment` (rolling per-company EWMA, recomputed at the end of every news fanout — see `apps/api/src/feeds/sentiment.ts`), `recaps`, `allowed_emails`.
 
 Migration files: `supabase/migrations/` — timestamped SQL, applied in order.
 
@@ -102,7 +103,7 @@ Migration files: `supabase/migrations/` — timestamped SQL, applied in order.
 
 **Backend:** Cloudflare Workers, Supabase (PostgreSQL + Auth), Cloudflare Queues.
 
-**AI models (xAI Grok):** `grok-4.20-0309-reasoning` for thesis agent and benchmarks; `grok-4-1-fast-non-reasoning` for sub-agent, broker-CSV normalization, and news sentiment scoring (`SENTIMENT_GROK_MODEL`); `grok-4.3` for expense-CSV normalization (`GROK_NORMALIZATION_MODEL`; `reasoning_effort` via `GROK_NORMALIZATION_EFFORT`, default `none` — reasoning over a whole CSV in one call exceeds the 90s timeout); `grok-4.6` with medium reasoning for Polymarket curation (`POLYMARKET_GROK_MODEL`, `POLYMARKET_GROK_REASONING_EFFORT`); Gemini for recaps.
+**AI models (xAI Grok):** `grok-4.20-0309-reasoning` for thesis agent and benchmarks; `grok-4-1-fast-non-reasoning` for sub-agent and broker-CSV normalization; `grok-4.3` for expense-CSV normalization (`GROK_NORMALIZATION_MODEL`; `reasoning_effort` via `GROK_NORMALIZATION_EFFORT`, default `none` — reasoning over a whole CSV in one call exceeds the 90s timeout); `grok-4.6` with medium reasoning for Polymarket curation (`POLYMARKET_GROK_MODEL`, `POLYMARKET_GROK_REASONING_EFFORT`); Gemini for recaps. News sentiment uses the configurable `SENTIMENT_GROK_MODEL`; see the README model table for its default.
 
 **Market data:** Yahoo Finance (quotes/search), FRED (economic indicators), Exa Search (web), Polymarket Gamma (prediction markets).
 

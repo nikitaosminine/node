@@ -1,0 +1,105 @@
+{
+  "label": "fixture",
+  "created_at": "2026-08-01T06:00:00.000Z",
+  "source": "fixture",
+  "project": "node-polymarket",
+  "_comment": "Hand-built dataset mirroring the snapshot format (see scripts/eval-curation-lib.mjs header). Four runs: run-a = healthy, run-b = every failure mode the metrics catch (event-cap break, sports leak, below-threshold score, missing reason, invalid condition_id), run-c = zero-result fallback, run-d = errored trace. fixture-judgments.json carries pre-recorded judge verdicts for every pick so `npm run eval:curation` is fully offline. Regenerate judgment keys with scripts/generate-curation-fixture-judgments.mjs after editing picks.",
+  "runs": [
+    {
+      "run_id": "00000000-0000-4000-8000-00000000000a",
+      "start_time": "2026-08-01T05:00:00.000Z",
+      "portfolio_id": "fixture-portfolio-a",
+      "user_id": "fixture-user-1",
+      "model": "grok-4.6",
+      "reasoning_effort": "medium",
+      "candidate_count": 12,
+      "profile_summary": "Direct holdings: NVDA, MSFT, ASML. ETF exposure: PUST.PA (Amundi NASDAQ-100: NVDA, AAPL, MSFT, AMZN, META). Sectors: Information Technology, Semiconductors. Countries: United States, Netherlands, France",
+      "candidates": [
+        { "condition_id": "0xfed0", "question": "Will the Fed make 0 rate cuts in 2026?", "event_id": "evt-fed-cuts", "event_title": "How many Fed rate cuts in 2026?" },
+        { "condition_id": "0xfed2", "question": "Will the Fed make 2 rate cuts in 2026?", "event_id": "evt-fed-cuts", "event_title": "How many Fed rate cuts in 2026?" },
+        { "condition_id": "0xrec1", "question": "Will the US enter a recession by end of 2026?", "event_id": "evt-recession", "event_title": "US recession by end of 2026" },
+        { "condition_id": "0xtar1", "question": "Will the US impose new semiconductor tariffs on China in 2026?", "event_id": "evt-chip-tariffs", "event_title": "US semiconductor tariffs 2026" },
+        { "condition_id": "0xbtc1", "question": "Will Bitcoin hit $200k before 2027?", "event_id": "evt-btc-price", "event_title": "Bitcoin price before 2027" },
+        { "condition_id": "0xucl1", "question": "Will Real Madrid win the Champions League?", "event_id": "evt-champions-league", "event_title": "Champions League winner" },
+        { "condition_id": "0xair1", "question": "Will the EU pass binding AI regulation with fines in 2026?", "event_id": "evt-ai-regulation", "event_title": "EU AI regulation 2026" },
+        { "condition_id": "0xoil1", "question": "Will Brent crude close above $110 in 2026?", "event_id": "evt-oil-price", "event_title": "Brent crude 2026" },
+        { "condition_id": "0xtsm1", "question": "Will TSMC beat Q3 2026 earnings estimates?", "event_id": "evt-tsmc-earnings", "event_title": "TSMC Q3 2026 earnings" },
+        { "condition_id": "0xexp1", "question": "Will the US expand chip export controls to cover ASML EUV servicing in 2026?", "event_id": "evt-export-controls", "event_title": "Chip export controls 2026" },
+        { "condition_id": "0xgdp1", "question": "Will US GDP growth exceed 3% in 2026?", "event_id": "evt-gdp-growth", "event_title": "US GDP growth 2026" },
+        { "condition_id": "0xeut1", "question": "Will the EU adopt a digital services tax on US tech in 2026?", "event_id": "evt-eu-digital-tax", "event_title": "EU digital tax 2026" }
+      ],
+      "picks": [
+        { "condition_id": "0xfed0", "score": 0.9, "reason": "Rate path directly reprices the NASDAQ-100 growth stocks held via PUST.PA (NVDA, MSFT, AAPL)." },
+        { "condition_id": "0xtar1", "score": 0.85, "reason": "New China chip tariffs would hit NVDA revenue and the semiconductor sector held directly." },
+        { "condition_id": "0xexp1", "score": 0.8, "reason": "Export-control expansion to EUV servicing directly affects ASML, a direct holding." },
+        { "condition_id": "0xtsm1", "score": 0.7, "reason": "TSMC results move NVDA and the semiconductor supply chain the portfolio holds." },
+        { "condition_id": "0xair1", "score": 0.6, "reason": "Binding EU AI fines would hit MSFT and NASDAQ-100 AI names in PUST.PA." },
+        { "condition_id": "0xrec1", "score": 0.55, "reason": "A US recession would compress earnings across the NASDAQ-100 exposure in PUST.PA." },
+        { "condition_id": "0xgdp1", "score": 0.45, "reason": "Above-trend US growth supports earnings for the US tech holdings (NVDA, MSFT)." },
+        { "condition_id": "0xoil1", "score": 0.4, "reason": "Sustained $110 Brent raises input costs and pressures consumer demand broadly." }
+      ],
+      "error": null
+    },
+    {
+      "run_id": "00000000-0000-4000-8000-00000000000b",
+      "start_time": "2026-08-01T05:05:00.000Z",
+      "portfolio_id": "fixture-portfolio-b",
+      "user_id": "fixture-user-2",
+      "model": "grok-4.6",
+      "reasoning_effort": "medium",
+      "candidate_count": 10,
+      "profile_summary": "ETF exposure: PTPXH.PA (Amundi Japan Topix: Toyota (7203.T), Sony (6758.T), Keyence (6861.T), NTT (9432.T), SoftBank (9984.T)) | PAASI.PA (Amundi EM Asia: TSM, Samsung (005930.KS), Tencent (700.HK), Alibaba (BABA), ASML). Sectors: Industrials, Consumer Discretionary. Countries: Japan, Taiwan, South Korea, Spain",
+      "candidates": [
+        { "condition_id": "0xfed0", "question": "Will the Fed make 0 rate cuts in 2026?", "event_id": "evt-fed-cuts", "event_title": "How many Fed rate cuts in 2026?" },
+        { "condition_id": "0xfed2", "question": "Will the Fed make 2 rate cuts in 2026?", "event_id": "evt-fed-cuts", "event_title": "How many Fed rate cuts in 2026?" },
+        { "condition_id": "0xfed4", "question": "Will the Fed make 4 or more rate cuts in 2026?", "event_id": "evt-fed-cuts", "event_title": "How many Fed rate cuts in 2026?" },
+        { "condition_id": "0xucl1", "question": "Will Real Madrid win the Champions League?", "event_id": "evt-champions-league", "event_title": "Champions League winner" },
+        { "condition_id": "0xrec1", "question": "Will the US enter a recession by end of 2026?", "event_id": "evt-recession", "event_title": "US recession by end of 2026" },
+        { "condition_id": "0xoil1", "question": "Will Brent crude close above $110 in 2026?", "event_id": "evt-oil-price", "event_title": "Brent crude 2026" },
+        { "condition_id": "0xboj1", "question": "Will the Bank of Japan raise rates above 1.5% in 2026?", "event_id": "evt-boj-rates", "event_title": "BoJ rate path 2026" },
+        { "condition_id": "0xyen1", "question": "Will USD/JPY trade below 130 in 2026?", "event_id": "evt-usdjpy", "event_title": "USD/JPY 2026" },
+        { "condition_id": "0xtar1", "question": "Will the US impose new semiconductor tariffs on China in 2026?", "event_id": "evt-chip-tariffs", "event_title": "US semiconductor tariffs 2026" },
+        { "condition_id": "0xbtc1", "question": "Will Bitcoin hit $200k before 2027?", "event_id": "evt-btc-price", "event_title": "Bitcoin price before 2027" }
+      ],
+      "picks": [
+        { "condition_id": "0xfed0", "score": 0.8, "reason": "US rate path moves global risk appetite and the yen carry trade affecting PTPXH.PA exporters." },
+        { "condition_id": "0xfed2", "score": 0.75, "reason": "Two cuts would weaken USD/JPY and pressure Toyota (7203.T) and Sony (6758.T) export earnings." },
+        { "condition_id": "0xfed4", "score": 0.7, "reason": "Aggressive cuts would sharply weaken the dollar against the yen, hitting Japan Topix exporters." },
+        { "condition_id": "0xucl1", "score": 0.5, "reason": "Portfolio has Spain country exposure and Real Madrid is a Spanish club." },
+        { "condition_id": "0xoil1", "score": 0.6, "reason": "" },
+        { "condition_id": "0xrec1", "score": 0.2, "reason": "General macro uncertainty." },
+        { "condition_id": "0xdeadbeef", "score": 0.65, "reason": "Hallucinated market that was never in the candidate list." }
+      ],
+      "error": null
+    },
+    {
+      "run_id": "00000000-0000-4000-8000-00000000000c",
+      "start_time": "2026-08-01T05:10:00.000Z",
+      "portfolio_id": "fixture-portfolio-c",
+      "user_id": "fixture-user-3",
+      "model": "grok-4.6",
+      "reasoning_effort": "medium",
+      "candidate_count": 12,
+      "profile_summary": "Direct holdings: AAPL, GOOG. Sectors: Information Technology. Countries: United States",
+      "candidates": [
+        { "condition_id": "0xfed0", "question": "Will the Fed make 0 rate cuts in 2026?", "event_id": "evt-fed-cuts", "event_title": "How many Fed rate cuts in 2026?" },
+        { "condition_id": "0xrec1", "question": "Will the US enter a recession by end of 2026?", "event_id": "evt-recession", "event_title": "US recession by end of 2026" }
+      ],
+      "picks": [],
+      "error": null
+    },
+    {
+      "run_id": "00000000-0000-4000-8000-00000000000d",
+      "start_time": "2026-08-01T05:15:00.000Z",
+      "portfolio_id": "fixture-portfolio-d",
+      "user_id": "fixture-user-4",
+      "model": "grok-4.6",
+      "reasoning_effort": "medium",
+      "candidate_count": 12,
+      "profile_summary": "Direct holdings: TSLA. Sectors: Consumer Discretionary. Countries: United States",
+      "candidates": [],
+      "picks": [],
+      "error": "Grok API error (429): rate limited"
+    }
+  ]
+}

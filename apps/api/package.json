@@ -9,6 +9,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "eval:agent": "node ./scripts/eval-agent-runs.mjs",
+    "eval:curation": "node ./scripts/eval-curation.mjs",
     "check:fetch-auth": "bash ./scripts/check-fetch-auth.sh"
   },
   "dependencies": {

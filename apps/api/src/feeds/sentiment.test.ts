@@ -5,7 +5,6 @@ import {
   buildSentimentPrompt,
   computeEwma,
   invokeSentimentGrok,
-  MAX_SCORED_CLUSTER_IDS,
   mergeEvidenceClusterIds,
   mergeScoredClusterIds,
   parseSentimentResponse,
@@ -14,6 +13,7 @@ import {
 } from "./sentiment";
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.unstubAllGlobals();
 });
 
@@ -112,6 +112,23 @@ describe("parseSentimentResponse (strict JSON)", () => {
     expect(parseSentimentResponse(raw, pairIndex)).toEqual([]);
   });
 
+  it("rejects non-number sentiment values instead of coercing them to neutral", () => {
+    const { pairIndex } = buildSentimentPrompt([target]);
+    for (const sentiment of [null, false, "", "0"]) {
+      const raw = JSON.stringify({ scores: [{ i: 1, sentiment, rationale: "valid reason" }] });
+      expect(parseSentimentResponse(raw, pairIndex)).toEqual([]);
+    }
+  });
+
+  it("rejects missing, empty, and multiline rationales", () => {
+    const { pairIndex } = buildSentimentPrompt([target]);
+    for (const rationale of [undefined, null, false, "", "   ", "first line\nsecond line"]) {
+      const item: Record<string, unknown> = { i: 1, sentiment: 0.2 };
+      if (rationale !== undefined) item.rationale = rationale;
+      expect(parseSentimentResponse(JSON.stringify({ scores: [item] }), pairIndex)).toEqual([]);
+    }
+  });
+
   it("keeps only the first entry when the same pair index repeats", () => {
     const { pairIndex } = buildSentimentPrompt([target]);
     const raw = JSON.stringify({
@@ -150,6 +167,45 @@ describe("invokeSentimentGrok", () => {
     await expect(invokeSentimentGrok({}, "system", "user")).rejects.toThrow(
       "No Grok API key available",
     );
+  });
+
+  it("aborts a hanging request at the scoring timeout", async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.fn(
+      (_input: RequestInfo | URL, init?: RequestInit) =>
+        new Promise<Response>((_, reject) => {
+          init?.signal?.addEventListener("abort", () => reject(new Error("aborted")));
+        }),
+    );
+
+    const resultPromise = scoreClusterSentiments(env, [target], fetchMock);
+    await vi.advanceTimersByTimeAsync(15_000);
+
+    await expect(resultPromise).resolves.toMatchObject({
+      sentiments: [],
+      error: "Grok sentiment scoring timed out",
+    });
+  });
+
+  it("aborts when Grok headers arrive but the response body hangs", async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.fn((_input: RequestInfo | URL, init?: RequestInit) =>
+      Promise.resolve({
+        ok: true,
+        json: () =>
+          new Promise<unknown>((_, reject) => {
+            init?.signal?.addEventListener("abort", () => reject(new Error("body aborted")));
+          }),
+      } as Response),
+    );
+
+    const resultPromise = scoreClusterSentiments(env, [target], fetchMock);
+    await vi.advanceTimersByTimeAsync(15_000);
+
+    await expect(resultPromise).resolves.toMatchObject({
+      sentiments: [],
+      error: "Grok sentiment scoring timed out",
+    });
   });
 });
 
@@ -300,14 +356,15 @@ describe("mergeScoredClusterIds", () => {
     expect(merged.map((r) => r.id)).toEqual(["new-1", "still-valid"]);
   });
 
-  it("keeps a defensive cap even when every entry is within the TTL window", () => {
-    const existing = Array.from({ length: MAX_SCORED_CLUSTER_IDS }, (_, i) => ({
+  it("retains every in-window entry instead of evicting valid dedupe ids", () => {
+    const existing = Array.from({ length: 2001 }, (_, i) => ({
       id: `old-${i}`,
       scoredAt: new Date(now - 1000).toISOString(),
     }));
     const merged = mergeScoredClusterIds(existing, ["new-1"], now, ttlMs);
-    expect(merged).toHaveLength(MAX_SCORED_CLUSTER_IDS);
+    expect(merged).toHaveLength(2002);
     expect(merged[0].id).toBe("new-1");
+    expect(merged.at(-1)?.id).toBe("old-2000");
   });
 
   it("retains dedupe coverage for clusters evicted from the 10-id display list, regardless of volume", () => {

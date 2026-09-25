@@ -38,11 +38,7 @@ create table if not exists public.company_sentiment (
   scored_cluster_ids    jsonb not null default '[]'::jsonb,
   -- full re-observation dedupe set: array of {id, scoredAt} for every
   -- news_clusters.id already folded into this company's EWMA. Pruned by age
-  -- rather than count (see MAX_SCORED_CLUSTER_IDS in feeds/sentiment.ts) — a
-  -- cluster older than the news TTL window can never resurface as an Exa
-  -- result again, so it's safe to drop from the dedupe set once it ages out.
-  -- Kept separate from evidence_cluster_ids so the small display cap can't
-  -- evict ids the EWMA still needs to recognize as already observed.
+  -- using the news TTL window.
   updated_at            timestamptz not null default now()
 );
 
@@ -53,10 +49,6 @@ alter table public.company_sentiment enable row level security;
 
 drop policy if exists "Authenticated users can read company sentiment"
   on public.company_sentiment;
-create policy "Authenticated users can read company sentiment"
-  on public.company_sentiment for select
-  to authenticated
-  using (true);
 
 drop policy if exists "Service role can manage company sentiment"
   on public.company_sentiment;
@@ -99,6 +91,72 @@ create policy "Service role can manage company sentiment lock"
   using (true)
   with check (true);
 
+create table if not exists public.company_sentiment_pending (
+  company_key  text not null,
+  cluster_id   text not null,
+  company_name text not null,
+  ticker       text,
+  isin         text,
+  score        numeric(5, 4) not null check (score >= -1 and score <= 1),
+  rationale    text not null default '',
+  observed_at timestamptz not null default now(),
+  primary key (company_key, cluster_id)
+);
+
+alter table public.company_sentiment_pending enable row level security;
+
+drop policy if exists "Service role can manage pending company sentiment"
+  on public.company_sentiment_pending;
+create policy "Service role can manage pending company sentiment"
+  on public.company_sentiment_pending for all
+  to service_role
+  using (true)
+  with check (true);
+
+create or replace function public.enqueue_company_sentiment_pending(
+  p_rows jsonb
+) returns boolean
+language plpgsql
+set search_path = ''
+as $$
+begin
+  insert into public.company_sentiment_pending (
+    company_key, cluster_id, company_name, ticker, isin, score, rationale, observed_at
+  )
+  select
+    r.company_key, r.cluster_id, r.company_name, r.ticker, r.isin,
+    r.score, r.rationale, r.observed_at
+  from (
+    select distinct on (raw.company_key, raw.cluster_id)
+      raw.company_key, raw.cluster_id, raw.company_name, raw.ticker,
+      raw.isin, raw.score, raw.rationale, raw.observed_at
+    from jsonb_to_recordset(p_rows) as raw(
+      company_key text,
+      cluster_id text,
+      company_name text,
+      ticker text,
+      isin text,
+      score numeric,
+      rationale text,
+      observed_at timestamptz
+    )
+    order by raw.company_key, raw.cluster_id, raw.observed_at desc nulls last
+  ) as r
+  on conflict (company_key, cluster_id) do update
+    set company_name = excluded.company_name,
+        ticker = excluded.ticker,
+        isin = excluded.isin,
+        score = excluded.score,
+        rationale = excluded.rationale,
+        observed_at = excluded.observed_at;
+
+  return true;
+end;
+$$;
+
+revoke all on function public.enqueue_company_sentiment_pending(jsonb) from public;
+grant execute on function public.enqueue_company_sentiment_pending(jsonb) to service_role;
+
 -- Atomically takes the singleton lock row if it is unheld or its holder's
 -- lease has expired; returns false if another holder currently owns it. The
 -- WHERE clause on the DO UPDATE branch is what makes this a true
@@ -114,11 +172,11 @@ declare
   v_acquired int;
 begin
   insert into public.company_sentiment_lock (id, holder, expires_at)
-  values ('singleton', p_holder, now() + make_interval(secs => p_ttl_seconds))
+  values ('singleton', p_holder, clock_timestamp() + make_interval(secs => p_ttl_seconds))
   on conflict (id) do update
     set holder = excluded.holder,
         expires_at = excluded.expires_at
-    where public.company_sentiment_lock.expires_at < now();
+    where public.company_sentiment_lock.expires_at < clock_timestamp();
   get diagnostics v_acquired = row_count;
   return v_acquired > 0;
 end;
@@ -155,7 +213,7 @@ begin
     where id = 'singleton'
     for update;
 
-  if v_holder is distinct from p_holder or v_expires_at is null or v_expires_at <= now() then
+  if v_holder is distinct from p_holder or v_expires_at is null or v_expires_at <= clock_timestamp() then
     return false;
   end if;
 
@@ -186,6 +244,16 @@ begin
         evidence_cluster_ids = excluded.evidence_cluster_ids,
         scored_cluster_ids = excluded.scored_cluster_ids,
         updated_at = excluded.updated_at;
+
+  delete from public.company_sentiment_pending p
+  where p.observed_at < clock_timestamp() - interval '7 days'
+     or exists (
+       select 1
+       from public.company_sentiment cs
+       cross join lateral jsonb_array_elements(coalesce(cs.scored_cluster_ids, '[]'::jsonb)) as ids(value)
+       where cs.company_key = p.company_key
+         and ids.value->>'id' = p.cluster_id
+     );
 
   return true;
 end;

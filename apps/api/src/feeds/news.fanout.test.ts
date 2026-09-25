@@ -52,8 +52,22 @@ interface CapturedRequest {
 function stubFanoutHttp(options: {
   grokStatus: number;
   grokScores?: Array<{ i: number; sentiment: number; rationale: string }>;
+  multiCompany?: boolean;
+  clusterPreReadStatus?: number;
 }) {
   const captured: CapturedRequest[] = [];
+  let nextClusterId = 1;
+  const results = options.multiCompany
+    ? [
+        {
+          id: "exa-shared",
+          url: "https://www.cnbc.com/acme-beta-joint-expansion",
+          title: "Acme Corp and Beta Corp announce a joint expansion",
+          publishedDate: publishedAt,
+          score: 0.9,
+        },
+      ]
+    : exaResults;
 
   const jsonResponse = (body: unknown, status = 200, headers: Record<string, string> = {}) =>
     new Response(body === null ? null : JSON.stringify(body), {
@@ -69,16 +83,16 @@ function stubFanoutHttp(options: {
     captured.push({ method, pathname: url.pathname, body });
 
     // --- Exa ---------------------------------------------------------------
-    if (url.hostname === "api.exa.ai" && url.pathname === "/search") {
+      if (url.hostname === "api.exa.ai" && url.pathname === "/search") {
       const isPrimary = (body as { includeDomains: string[] }).includeDomains.includes("ft.com");
-      return jsonResponse({ results: isPrimary ? exaResults : [] });
+      return jsonResponse({ results: isPrimary ? results : [] });
     }
     if (url.hostname === "api.exa.ai" && url.pathname === "/contents") {
       return jsonResponse({
-        results: [
-          { url: exaResults[0].url, summary: "Acme Corp beat expectations on strong revenue." },
-          { url: exaResults[1].url, summary: "Acme Corp will build a new factory in France." },
-        ],
+        results: results.map((result) => ({
+          url: result.url,
+          summary: result.title,
+        })),
       });
     }
 
@@ -97,21 +111,48 @@ function stubFanoutHttp(options: {
 
     // --- Supabase PostgREST --------------------------------------------------
     if (url.pathname === "/rest/v1/holdings") {
-      return jsonResponse([
-        {
-          ticker: "ACME",
-          isin: null,
-          asset_type: "stock",
-          name: "Acme Corp",
-          quantity: 10,
-          portfolio_id: "p-1",
-        },
-      ]);
+      return jsonResponse(
+        options.multiCompany
+          ? [
+              {
+                ticker: "ACME",
+                isin: null,
+                asset_type: "stock",
+                name: "Acme Corp",
+                quantity: 10,
+                portfolio_id: "p-1",
+              },
+              {
+                ticker: "BETA",
+                isin: null,
+                asset_type: "stock",
+                name: "Beta Corp",
+                quantity: 10,
+                portfolio_id: "p-1",
+              },
+            ]
+          : [
+              {
+                ticker: "ACME",
+                isin: null,
+                asset_type: "stock",
+                name: "Acme Corp",
+                quantity: 10,
+                portfolio_id: "p-1",
+              },
+            ],
+      );
+    }
+    if (url.pathname === "/rest/v1/news_clusters" && method === "GET") {
+      if (options.clusterPreReadStatus && options.clusterPreReadStatus !== 200) {
+        return jsonResponse({ message: "cluster pre-read failed" }, options.clusterPreReadStatus);
+      }
+      return jsonResponse([]);
     }
     if (url.pathname === "/rest/v1/news_clusters" && method === "POST") {
       return jsonResponse(
-        (body as Array<{ cluster_key: string }>).map((row, idx) => ({
-          id: `db-${idx + 1}`,
+        (body as Array<{ cluster_key: string }>).map((row) => ({
+          id: `db-${nextClusterId++}`,
           cluster_key: row.cluster_key,
         })),
         201,
@@ -132,10 +173,16 @@ function stubFanoutHttp(options: {
         },
       ]);
     }
+    if (url.pathname === "/rest/v1/company_sentiment_pending" && method === "GET") {
+      return jsonResponse([]);
+    }
     if (url.pathname === "/rest/v1/portfolio_news_matches" && method === "POST") {
       return jsonResponse(null, 201);
     }
     if (url.pathname === "/rest/v1/rpc/try_acquire_company_sentiment_lock" && method === "POST") {
+      return jsonResponse(true, 200);
+    }
+    if (url.pathname === "/rest/v1/rpc/enqueue_company_sentiment_pending" && method === "POST") {
       return jsonResponse(true, 200);
     }
     if (url.pathname === "/rest/v1/rpc/apply_company_sentiment_batch" && method === "POST") {
@@ -153,9 +200,11 @@ function stubFanoutHttp(options: {
 }
 
 function clusterUpsertRows(captured: CapturedRequest[]): Array<Record<string, unknown>> {
-  const req = captured.find((r) => r.pathname === "/rest/v1/news_clusters" && r.method === "POST");
-  expect(req).toBeDefined();
-  return req!.body as Array<Record<string, unknown>>;
+  const requests = captured.filter(
+    (r) => r.pathname === "/rest/v1/news_clusters" && r.method === "POST",
+  );
+  expect(requests.length).toBeGreaterThan(0);
+  return requests.flatMap((request) => request.body as Array<Record<string, unknown>>);
 }
 
 describe("runNewsFanout sentiment pipeline (end-to-end over stubbed HTTP)", () => {
@@ -170,8 +219,26 @@ describe("runNewsFanout sentiment pipeline (end-to-end over stubbed HTTP)", () =
     expect(result.clustersScored).toBe(2);
     expect(result.companiesRescored).toBe(1);
 
+    // All newly-upserted cluster/company pairs share exactly one cheap Grok
+    // request for this fanout, keeping the Worker within its subrequest budget.
+    const grokRequests = captured.filter(
+      (r) => r.pathname === "/v1/chat/completions" && r.method === "POST",
+    );
+    expect(grokRequests).toHaveLength(1);
+    expect(grokRequests[0].body).toMatchObject({
+      model: "grok-4-1-fast-non-reasoning",
+      response_format: { type: "json_object" },
+    });
+
     // Per-cluster sentiments are folded into the single batch cluster upsert.
     const rows = clusterUpsertRows(captured);
+    const clusterRequests = captured.filter(
+      (r) => r.pathname === "/rest/v1/news_clusters" && r.method === "POST",
+    );
+    expect(clusterRequests.every((request) => {
+      const rows = request.body as Array<Record<string, unknown>>;
+      return new Set(rows.map((row) => Object.prototype.hasOwnProperty.call(row, "sentiments"))).size === 1;
+    })).toBe(true);
     expect(rows.map((r) => r.cluster_key)).toEqual(["exa-1", "exa-2"]);
     expect(rows[0].sentiments).toEqual([
       {
@@ -236,6 +303,14 @@ describe("runNewsFanout sentiment pipeline (end-to-end over stubbed HTTP)", () =
     const result = await runNewsFanout(env);
 
     const rows = clusterUpsertRows(captured);
+    const clusterRequests = captured.filter(
+      (r) => r.pathname === "/rest/v1/news_clusters" && r.method === "POST",
+    );
+    expect(clusterRequests).toHaveLength(2);
+    expect(clusterRequests.every((request) => {
+      const rows = request.body as Array<Record<string, unknown>>;
+      return new Set(rows.map((row) => Object.prototype.hasOwnProperty.call(row, "sentiments"))).size === 1;
+    })).toBe(true);
     expect(rows.map((r) => r.cluster_key)).toEqual(["exa-1", "exa-2"]);
     expect((rows[0].sentiments as Array<Record<string, unknown>>).map((s) => s.score)).toEqual([
       0.7,
@@ -280,7 +355,50 @@ describe("runNewsFanout sentiment pipeline (end-to-end over stubbed HTTP)", () =
       expect(row).not.toHaveProperty("sentiments");
     }
 
-    // The rolling-score step is skipped entirely (no reads, no writes).
-    expect(captured.some((r) => r.pathname === "/rest/v1/company_sentiment")).toBe(false);
+    expect(
+      captured.some(
+        (r) => r.pathname === "/rest/v1/rpc/apply_company_sentiment_batch" && r.method === "POST",
+      ),
+    ).toBe(false);
+  });
+
+  it("does not fold the answered member of a partially answered cluster into EWMA", async () => {
+    const { captured } = stubFanoutHttp({
+      grokStatus: 200,
+      multiCompany: true,
+      grokScores: [{ i: 1, sentiment: 0.7, rationale: "Earnings beat." }],
+    });
+
+    const result = await runNewsFanout(env);
+
+    expect(result.clustersUpserted).toBe(1);
+    expect(result.clustersScored).toBe(0);
+    expect(result.companiesRescored).toBe(0);
+    expect(clusterUpsertRows(captured)[0]).not.toHaveProperty("sentiments");
+    expect(
+      captured.some(
+        (r) => r.pathname === "/rest/v1/rpc/apply_company_sentiment_batch" && r.method === "POST",
+      ),
+    ).toBe(false);
+  });
+
+  it("preserves stored sentiments when the cluster pre-read fails", async () => {
+    const { captured } = stubFanoutHttp({ grokStatus: 200, clusterPreReadStatus: 500 });
+
+    const result = await runNewsFanout(env);
+
+    expect(result.clustersUpserted).toBe(2);
+    expect(result.matchesUpserted).toBe(2);
+    expect(result.errors).toContain("cluster entities pre-read: cluster pre-read failed");
+    expect(result.clustersScored).toBe(0);
+    expect(result.companiesRescored).toBe(0);
+    for (const row of clusterUpsertRows(captured)) {
+      expect(row).not.toHaveProperty("sentiments");
+    }
+    expect(
+      captured.some(
+        (r) => r.pathname === "/rest/v1/rpc/apply_company_sentiment_batch" && r.method === "POST",
+      ),
+    ).toBe(false);
   });
 });

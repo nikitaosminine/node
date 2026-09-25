@@ -1,4 +1,6 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
+import { deriveMarketTopics, mentionsTopic, type MarketTopic } from "./market-topics";
+import { isFundLike } from "./portfolio-profile";
 import {
   aggregateObservationsByCompany,
   computeEwma,
@@ -30,6 +32,7 @@ interface Env {
 }
 
 interface HoldingRow {
+  id: string;
   ticker: string;
   isin: string | null;
   asset_type: string | null;
@@ -74,9 +77,28 @@ const NEWS_WINDOW_MS = CLUSTER_TTL_HOURS * 3_600_000;
 const RESULTS_PER_COMPANY = 25;
 // Bounded concurrency for the Exa fetch phase.
 const FETCH_CONCURRENCY = 4;
-// Distinct-company window per run (rotating-cursor insurance for growth).
-// At current scale (~4 distinct companies) this covers everything every run.
-const FANOUT_WINDOW = 200;
+// Hard cap on ETF-derived market-topic searches per run (subrequest-budget guard).
+const MAX_MARKET_TOPICS = 12;
+const NEWS_SUBREQUEST_BUDGET = 50;
+const MAX_COMPANY_SENTIMENT_ATTEMPTS = 3;
+const MAX_COMPANY_SENTIMENT_SUBREQUESTS = 1 + MAX_COMPANY_SENTIMENT_ATTEMPTS * 5;
+const MAX_FIXED_FANOUT_SUBREQUESTS = 11;
+const MAX_POST_SEARCH_SUBREQUESTS = 28;
+export const MAX_COMPANY_SEARCHES_PER_RUN = Math.max(
+  1,
+  Math.floor(
+    (NEWS_SUBREQUEST_BUDGET -
+      MAX_MARKET_TOPICS -
+      MAX_FIXED_FANOUT_SUBREQUESTS -
+      MAX_COMPANY_SENTIMENT_SUBREQUESTS) /
+      2,
+  ),
+);
+const FANOUT_WINDOW = MAX_COMPANY_SEARCHES_PER_RUN;
+const FANOUT_ROTATION_INTERVAL_MS = 3_600_000;
+// Per-topic keep cap (best Exa score first) so broad market queries don't
+// drown per-company coverage in the feed.
+const MARKET_RESULTS_KEPT = 12;
 
 // Source-quality allowlist: curated premium financial/news outlets. An allowlist
 // (not blocklist) decisively cuts the long tail of quote pages / SEO junk.
@@ -228,10 +250,65 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-// Is an asset fund-like (ETF/mutual fund)? Mirrors geography.ts without a cross-import.
-function isFundLike(assetType: string | null | undefined, name = ""): boolean {
-  const value = `${assetType ?? ""} ${name}`.toLowerCase();
-  return /\betf\b|exchange traded fund|mutual\s*fund|\bfund\b|\bucits\b/.test(value);
+class NewsSubrequestBudgetExceededError extends Error {
+  constructor() {
+    super("news fanout subrequest budget exhausted");
+    this.name = "NewsSubrequestBudgetExceededError";
+  }
+}
+
+type NewsFetch = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+
+class NewsSubrequestBudget {
+  private used = 0;
+  private reserved = 0;
+  private activeReservation: number | null = null;
+
+  constructor(
+    private readonly limit: number = NEWS_SUBREQUEST_BUDGET,
+    private readonly fetchImpl: NewsFetch = globalThis.fetch,
+  ) {}
+
+  reserve(count: number): void {
+    if (this.used + this.reserved + count > this.limit) {
+      throw new NewsSubrequestBudgetExceededError();
+    }
+    this.reserved += count;
+  }
+
+  activateReservation(count: number): void {
+    if (this.reserved < count) throw new NewsSubrequestBudgetExceededError();
+    this.reserved -= count;
+    this.activeReservation = count;
+  }
+
+  availableSearchSubrequests(): number {
+    return Math.max(0, this.limit - this.used - this.reserved);
+  }
+
+  async fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+    if (
+      this.used >= this.limit ||
+      (this.activeReservation !== null && this.activeReservation <= 0) ||
+      (this.activeReservation === null && this.used + this.reserved >= this.limit)
+    ) {
+      throw new NewsSubrequestBudgetExceededError();
+    }
+    if (this.activeReservation !== null) this.activeReservation--;
+    this.used++;
+    return this.fetchImpl(input, init);
+  }
+}
+
+export function selectRotatingWindow<T>(
+  entries: readonly T[],
+  limit: number,
+  now: number = Date.now(),
+): T[] {
+  if (entries.length === 0 || limit <= 0) return [];
+  if (entries.length <= limit) return [...entries];
+  const start = Math.floor(now / FANOUT_ROTATION_INTERVAL_MS) % entries.length;
+  return Array.from({ length: limit }, (_, offset) => entries[(start + offset) % entries.length]);
 }
 
 function normalizeName(name: string): string {
@@ -337,10 +414,12 @@ interface CompanyEntry {
   holders: Map<string, CompanyHolder>; // portfolioId → that portfolio's identifiers
 }
 
-async function buildGlobalWorkList(client: AnySupabaseClient): Promise<Map<string, CompanyEntry>> {
+async function buildGlobalWorkList(
+  client: AnySupabaseClient,
+): Promise<{ workList: Map<string, CompanyEntry>; fundHoldings: HoldingRow[] }> {
   const { data, error } = await client
     .from("holdings")
-    .select("ticker,isin,asset_type,name,quantity,portfolio_id")
+    .select("id,ticker,isin,asset_type,name,quantity,portfolio_id")
     .gt("quantity", 0);
 
   if (error) {
@@ -349,10 +428,16 @@ async function buildGlobalWorkList(client: AnySupabaseClient): Promise<Map<strin
 
   const holdings = (data as HoldingRow[] | null) ?? [];
   const workList = new Map<string, CompanyEntry>();
+  const fundHoldings: HoldingRow[] = [];
 
   for (const h of holdings) {
-    if (isFundLike(h.asset_type, h.name)) continue;
     if (!h.name && !h.ticker && !h.isin) continue;
+    if (isFundLike(h.asset_type, h.name)) {
+      // Fund-like holdings don't get per-company queries — they map to 1-2
+      // market topics each via buildMarketWorkList instead.
+      fundHoldings.push(h);
+      continue;
+    }
 
     const key = canonicalKey(h);
     let entry = workList.get(key);
@@ -370,7 +455,185 @@ async function buildGlobalWorkList(client: AnySupabaseClient): Promise<Map<strin
     if (h.isin) holder.isins.add(h.isin.toUpperCase());
   }
 
-  return workList;
+  return { workList, fundHoldings };
+}
+
+// ---------------------------------------------------------------------------
+// Market work-list: one entry per distinct market topic derived from the held
+// ETFs. Taxonomy data (etf_constituents + holding_geography_allocations) is
+// best-effort — read failures or empty tables degrade to the static
+// name/ticker override table in market-topics.ts.
+// ---------------------------------------------------------------------------
+
+interface MarketHolder {
+  etfTickers: Set<string>;
+}
+
+interface MarketEntry {
+  canonicalKey: string; // `topic:${topicKey}`
+  topic: MarketTopic;
+  holders: Map<string, MarketHolder>; // portfolioId → the ETFs that map here
+}
+
+interface EtfConstituentRow {
+  etf_isin: string;
+  constituents: Array<{ ticker?: string; name?: string }> | null;
+  top_sectors: Array<{ sector: string; weight_pct: number }> | null;
+}
+
+interface GeographyRow {
+  holding_id: string;
+  country_code: string;
+  country_name: string;
+  weight_pct: number;
+}
+
+async function buildMarketWorkList(
+  client: AnySupabaseClient,
+  fundHoldings: HoldingRow[],
+): Promise<Map<string, MarketEntry>> {
+  const marketList = new Map<string, MarketEntry>();
+  if (fundHoldings.length === 0) return marketList;
+
+  // Collapse multi-lot / multi-portfolio rows of the same ETF (same canonical
+  // key logic as companies) so each distinct ETF is mapped once.
+  interface DistinctEtf {
+    ticker: string;
+    isin: string | null;
+    name: string;
+    holdingIds: string[];
+    holders: Map<string, MarketHolder>;
+  }
+  const etfs = new Map<string, DistinctEtf>();
+  for (const h of fundHoldings) {
+    const key = canonicalKey(h);
+    let etf = etfs.get(key);
+    if (!etf) {
+      etf = {
+        ticker: (h.ticker ?? "").toUpperCase(),
+        isin: h.isin ? h.isin.toUpperCase() : null,
+        name: h.name ?? "",
+        holdingIds: [],
+        holders: new Map(),
+      };
+      etfs.set(key, etf);
+    }
+    etf.holdingIds.push(h.id);
+    let holder = etf.holders.get(h.portfolio_id);
+    if (!holder) {
+      holder = { etfTickers: new Set() };
+      etf.holders.set(h.portfolio_id, holder);
+    }
+    if (h.ticker) holder.etfTickers.add(h.ticker.toUpperCase());
+  }
+
+  // Best-effort taxonomy seeds — 2 batched reads, each individually guarded so
+  // a failed read (a resolved Supabase {error} or a genuine rejection) degrades
+  // that seed only: static name/ticker overrides in deriveMarketTopics must
+  // always run.
+  const isins = [...new Set([...etfs.values()].map((e) => e.isin).filter(Boolean))] as string[];
+  const holdingIds = fundHoldings.map((h) => h.id);
+
+  const constituentsByIsin = new Map<string, EtfConstituentRow>();
+  if (isins.length > 0) {
+    try {
+      const { data, error } = await client
+        .from("etf_constituents")
+        .select("etf_isin,constituents,top_sectors")
+        .in("etf_isin", isins);
+      if (error) {
+        console.warn(
+          "[news] etf_constituents read failed (static overrides still apply):",
+          error.message,
+        );
+      }
+      for (const row of (data as EtfConstituentRow[] | null) ?? []) {
+        constituentsByIsin.set(row.etf_isin, row);
+      }
+    } catch (err) {
+      console.warn("[news] etf_constituents read failed (static overrides still apply):", err);
+    }
+  }
+
+  const countryWeightsByHolding = new Map<string, GeographyRow[]>();
+  try {
+    const { data, error } = await client
+      .from("holding_geography_allocations")
+      .select("holding_id,country_code,country_name,weight_pct")
+      .in("holding_id", holdingIds);
+    if (error) {
+      console.warn(
+        "[news] geography allocations read failed (static overrides still apply):",
+        error.message,
+      );
+    }
+    for (const row of (data as GeographyRow[] | null) ?? []) {
+      const list = countryWeightsByHolding.get(row.holding_id) ?? [];
+      list.push(row);
+      countryWeightsByHolding.set(row.holding_id, list);
+    }
+  } catch (err) {
+    console.warn("[news] geography allocations read failed (static overrides still apply):", err);
+  }
+
+  for (const etf of etfs.values()) {
+    // Merge country weights across this ETF's holding rows — same ETF means
+    // the same research result, so keep the max weight per country.
+    const mergedCountries = new Map<string, GeographyRow>();
+    for (const id of etf.holdingIds) {
+      for (const cw of countryWeightsByHolding.get(id) ?? []) {
+        const prev = mergedCountries.get(cw.country_code);
+        if (!prev || Number(cw.weight_pct) > Number(prev.weight_pct)) {
+          mergedCountries.set(cw.country_code, cw);
+        }
+      }
+    }
+
+    const constituentRow = etf.isin ? constituentsByIsin.get(etf.isin) : undefined;
+    const topConstituents = (constituentRow?.constituents ?? [])
+      .slice(0, 10)
+      .map((c) => c.name || c.ticker || "")
+      .filter(Boolean);
+
+    const topics = deriveMarketTopics(
+      { ticker: etf.ticker, isin: etf.isin, name: etf.name },
+      {
+        topSectors: constituentRow?.top_sectors ?? null,
+        countryWeights: [...mergedCountries.values()].map((cw) => ({
+          country_code: cw.country_code,
+          country_name: cw.country_name,
+          weight_pct: Number(cw.weight_pct),
+        })),
+        topConstituents,
+      },
+    );
+
+    for (const topic of topics) {
+      const key = `topic:${topic.topicKey}`;
+      let entry = marketList.get(key);
+      if (!entry) {
+        entry = { canonicalKey: key, topic, holders: new Map() };
+        marketList.set(key, entry);
+      } else {
+        // Same topic derived from another ETF: union the relevance terms so a
+        // headline mentioning only the later ETF's top constituents still
+        // passes mentionsTopic for every holder of this topic.
+        entry.topic.relevanceTerms = [
+          ...new Set([...entry.topic.relevanceTerms, ...topic.relevanceTerms]),
+        ];
+      }
+      for (const [portfolioId, holder] of etf.holders) {
+        let merged = entry.holders.get(portfolioId);
+        if (!merged) {
+          merged = { etfTickers: new Set() };
+          entry.holders.set(portfolioId, merged);
+        }
+        holder.etfTickers.forEach((t) => merged!.etfTickers.add(t));
+      }
+    }
+  }
+
+  return marketList;
 }
 
 // ---------------------------------------------------------------------------
@@ -383,11 +646,12 @@ async function exaSearchNews(
   startPublishedDate: string,
   userLocation: string,
   includeDomains: string[],
+  fetchImpl: NewsFetch = fetch,
   attempt = 1,
 ): Promise<ExaSearchResponse> {
   let res: Response;
   try {
-    res = await fetch(`${EXA_BASE}/search`, {
+    res = await fetchImpl(`${EXA_BASE}/search`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -406,6 +670,7 @@ async function exaSearchNews(
       }),
     });
   } catch (err) {
+    if (err instanceof NewsSubrequestBudgetExceededError) throw err;
     if (attempt >= MAX_RETRIES) throw err;
     await sleep(RETRY_BASE_MS * 2 ** (attempt - 1));
     return exaSearchNews(
@@ -414,6 +679,7 @@ async function exaSearchNews(
       startPublishedDate,
       userLocation,
       includeDomains,
+      fetchImpl,
       attempt + 1,
     );
   }
@@ -431,6 +697,7 @@ async function exaSearchNews(
       startPublishedDate,
       userLocation,
       includeDomains,
+      fetchImpl,
       attempt + 1,
     );
   }
@@ -458,6 +725,7 @@ async function exaFetchSummaries(
   apiKey: string,
   urls: string[],
   summaryQuery: string,
+  fetchImpl: NewsFetch = fetch,
   attempt = 1,
 ): Promise<Map<string, string>> {
   const out = new Map<string, string>();
@@ -465,7 +733,7 @@ async function exaFetchSummaries(
 
   let res: Response;
   try {
-    res = await fetch(`${EXA_BASE}/contents`, {
+    res = await fetchImpl(`${EXA_BASE}/contents`, {
       method: "POST",
       headers: { "Content-Type": "application/json", "x-api-key": apiKey },
       // Prefer Exa's cached/indexed content (what search-summary used) over a fresh
@@ -473,9 +741,10 @@ async function exaFetchSummaries(
       body: JSON.stringify({ urls, summary: { query: summaryQuery }, maxAgeHours: 720 }),
     });
   } catch (err) {
+    if (err instanceof NewsSubrequestBudgetExceededError) throw err;
     if (attempt >= MAX_RETRIES) throw err;
     await sleep(RETRY_BASE_MS * 2 ** (attempt - 1));
-    return exaFetchSummaries(apiKey, urls, summaryQuery, attempt + 1);
+    return exaFetchSummaries(apiKey, urls, summaryQuery, fetchImpl, attempt + 1);
   }
 
   if (res.status === 429 || res.status >= 500) {
@@ -484,7 +753,7 @@ async function exaFetchSummaries(
       throw new Error(`Exa contents ${res.status} after ${MAX_RETRIES} attempts: ${body}`);
     }
     await sleep(RETRY_BASE_MS * 2 ** (attempt - 1));
-    return exaFetchSummaries(apiKey, urls, summaryQuery, attempt + 1);
+    return exaFetchSummaries(apiKey, urls, summaryQuery, fetchImpl, attempt + 1);
   }
   if (!res.ok) {
     const body = await res.text().catch(() => "");
@@ -515,12 +784,20 @@ async function exaFetchSummaries(
 // ---------------------------------------------------------------------------
 
 export function resolveSentimentsForRow(
-  expectedCompanyCount: number,
+  expectedCompanyKeys: string[],
   scored: ClusterSentiment[],
   sentimentError: string | null,
 ): ClusterSentiment[] | null {
   if (sentimentError) return null;
-  if (scored.length < expectedCompanyCount) return null;
+  const expected = new Set(expectedCompanyKeys);
+  const answered = new Set(scored.map((s) => s.companyKey));
+  if (
+    scored.length !== expected.size ||
+    answered.size !== expected.size ||
+    [...expected].some((companyKey) => !answered.has(companyKey))
+  ) {
+    return null;
+  }
   return scored;
 }
 
@@ -538,8 +815,33 @@ export function buildClusterRow(
   summary: string,
   sentiments: ClusterSentiment[] | null,
   companiesByKey: Map<string, SentimentCompanyRef>,
+  countries: string[] = [],
+  sectors: string[] = [],
+  priorSentiments: unknown[] = [],
 ) {
   const url = result.url!;
+  const currentSentiments =
+    sentiments?.map((s) => {
+      const ref = companiesByKey.get(s.companyKey);
+      return {
+        company_key: s.companyKey,
+        company_name: ref?.name ?? null,
+        tickers: ref?.tickers ?? [],
+        isins: ref?.isins ?? [],
+        score: s.score,
+        rationale: s.rationale,
+      };
+    }) ?? null;
+  const currentCompanyKeys = new Set(
+    (currentSentiments ?? []).map((sentiment) => sentiment.company_key),
+  );
+  const preservedSentiments = priorSentiments.filter(
+    (sentiment): sentiment is Record<string, unknown> => {
+      if (!sentiment || typeof sentiment !== "object") return false;
+      const companyKey = (sentiment as Record<string, unknown>).company_key;
+      return typeof companyKey === "string" && !currentCompanyKeys.has(companyKey);
+    },
+  );
   return {
     cluster_key: result.id ?? url,
     primary_article: {
@@ -553,7 +855,7 @@ export function buildClusterRow(
       exa_score: typeof result.score === "number" ? result.score : null,
     },
     see_also: [] as unknown[],
-    entities: { isins, tickers, countries: [] as string[], sectors: [] as string[] },
+    entities: { isins, tickers, countries, sectors },
     // Per-(cluster, company) sentiment from the batched Grok scoring call —
     // reintroduces the field V1 deliberately dropped (see migration
     // 20260520195025 comment). null = scoring failed this run: the key is
@@ -564,17 +866,7 @@ export function buildClusterRow(
     ...(sentiments === null
       ? {}
       : {
-          sentiments: sentiments.map((s) => {
-            const ref = companiesByKey.get(s.companyKey);
-            return {
-              company_key: s.companyKey,
-              company_name: ref?.name ?? null,
-              tickers: ref?.tickers ?? [],
-              isins: ref?.isins ?? [],
-              score: s.score,
-              rationale: s.rationale,
-            };
-          }),
+          sentiments: [...(currentSentiments ?? []), ...preservedSentiments],
         }),
     published_at: result.publishedDate!,
     fetched_at: new Date().toISOString(),
@@ -600,6 +892,7 @@ export function buildClusterRow(
 // ---------------------------------------------------------------------------
 
 const COMPANY_SENTIMENT_LOCK_TTL_SECONDS = 60;
+const COMPANY_SENTIMENT_RETRY_DELAY_MS = 10;
 
 async function acquireCompanySentimentLock(
   client: AnySupabaseClient,
@@ -629,15 +922,8 @@ async function releaseCompanySentimentLock(
 }
 
 // ---------------------------------------------------------------------------
-// Rolling per-company sentiment (EWMA) — up to 4 subrequests (lock acquire,
-// prior-score lookup, batch write RPC, lock release), 0 when there is
-// nothing to update. A cluster already present in the company's stored scored_cluster_ids
-// is the same article re-surfacing across fanout runs within the 7-day window
-// and must not move the EWMA again; scored_cluster_ids (pruned by age, not
-// count — see MAX_SCORED_CLUSTER_IDS in feeds/sentiment.ts) is the dedupe
-// source of truth, while evidence_cluster_ids stays a 10-id display list.
-// Companies with nothing new this run are skipped and their rows left
-// untouched. Never throws.
+// Rolling per-company sentiment (EWMA) — lock contention and lease loss get
+// bounded retries, each re-reading the current rows before merging.
 // ---------------------------------------------------------------------------
 
 export async function updateRollingCompanySentiment(
@@ -645,105 +931,245 @@ export async function updateRollingCompanySentiment(
   idBackedSentiments: ClusterSentiment[],
   companiesByKey: Map<string, SentimentCompanyRef>,
 ): Promise<{ companiesRescored: number; error: string | null }> {
-  if (idBackedSentiments.length === 0) return { companiesRescored: 0, error: null };
+  const companyKeys = [
+    ...new Set([...idBackedSentiments.map((s) => s.companyKey), ...companiesByKey.keys()]),
+  ];
+  let lastError = "company sentiment update skipped: another fanout run holds the lock";
 
-  const holder = crypto.randomUUID();
-  if (!(await acquireCompanySentimentLock(client, holder))) {
-    return {
-      companiesRescored: 0,
-      error: "company sentiment update skipped: another fanout run holds the lock",
-    };
+  if (idBackedSentiments.length > 0) {
+    const pendingRows = idBackedSentiments.map((sentiment) => {
+      const ref = companiesByKey.get(sentiment.companyKey);
+      return {
+        company_key: sentiment.companyKey,
+        company_name: ref?.name ?? sentiment.companyKey,
+        ticker: ref?.tickers[0] ?? null,
+        isin: ref?.isins[0] ?? null,
+        cluster_id: sentiment.clusterKey,
+        score: sentiment.score,
+        rationale: sentiment.rationale,
+        observed_at: new Date().toISOString(),
+      };
+    });
+    const { error: enqueueError } = await client.rpc("enqueue_company_sentiment_pending", {
+      p_rows: pendingRows,
+    });
+    if (enqueueError) {
+      const msg = enqueueError.message;
+      console.error("[news] company sentiment enqueue failed:", msg);
+      return { companiesRescored: 0, error: msg };
+    }
   }
 
-  try {
-    const companyKeys = [...new Set(idBackedSentiments.map((s) => s.companyKey))];
-    const { data: priorRows, error: priorError } = await client
-      .from("company_sentiment")
-      .select("company_key, score, evidence_cluster_ids, scored_cluster_ids")
-      .in("company_key", companyKeys);
+  for (let attempt = 1; attempt <= MAX_COMPANY_SENTIMENT_ATTEMPTS; attempt++) {
+    const holder = crypto.randomUUID();
+    if (!(await acquireCompanySentimentLock(client, holder))) {
+      if (attempt < MAX_COMPANY_SENTIMENT_ATTEMPTS) {
+        await sleep(COMPANY_SENTIMENT_RETRY_DELAY_MS * attempt);
+      }
+      continue;
+    }
 
-    if (priorError) throw new Error(priorError.message);
+    let retryLeaseLoss = false;
+    try {
+      const { data: pendingRows, error: pendingError } = await client
+        .from("company_sentiment_pending")
+        .select(
+          "company_key, cluster_id, company_name, ticker, isin, score, rationale, observed_at",
+        );
 
-    const priorByKey = new Map<
-      string,
-      { score: number; evidence_cluster_ids: string[]; scored_cluster_ids: ScoredClusterRecord[] }
-    >(
-      (priorRows ?? []).map(
+      if (pendingError) throw new Error(pendingError.message);
+
+      if (
+        idBackedSentiments.length === 0 &&
+        companiesByKey.size === 0 &&
+        (pendingRows ?? []).length === 0
+      ) {
+        return { companiesRescored: 0, error: null };
+      }
+
+      const readCompanyKeys = [
+        ...new Set([
+          ...companyKeys,
+          ...(pendingRows ?? []).map((row: { company_key: string }) => row.company_key),
+        ]),
+      ];
+      let priorRows: Array<{
+        company_key: string;
+        company_name?: string | null;
+        ticker?: string | null;
+        isin?: string | null;
+        score: number;
+        trend?: "up" | "down" | "flat" | null;
+        evidence_cluster_ids: string[] | null;
+        scored_cluster_ids: ScoredClusterRecord[] | null;
+      }> = [];
+      if (readCompanyKeys.length > 0) {
+        const { data, error: priorError } = await client
+          .from("company_sentiment")
+          .select(
+            "company_key, company_name, ticker, isin, score, trend, evidence_cluster_ids, scored_cluster_ids",
+          )
+          .in("company_key", readCompanyKeys);
+
+        if (priorError) throw new Error(priorError.message);
+        priorRows = data ?? [];
+      }
+
+      const now = Date.now();
+      const activePendingRows = (pendingRows ?? []).filter(
+        (row: { observed_at?: string | null }) =>
+          !row.observed_at || now - Date.parse(row.observed_at) <= NEWS_WINDOW_MS,
+      );
+      const queuedSentiments: ClusterSentiment[] = activePendingRows.map(
         (r: {
           company_key: string;
+          cluster_id: string;
+          company_name: string;
+          ticker: string | null;
+          isin: string | null;
           score: number;
-          evidence_cluster_ids: string[] | null;
-          scored_cluster_ids: ScoredClusterRecord[] | null;
-        }) => [
+          rationale: string;
+        }) => {
+          if (!companiesByKey.has(r.company_key)) {
+            companiesByKey.set(r.company_key, {
+              canonicalKey: r.company_key,
+              name: r.company_name,
+              tickers: r.ticker ? [r.ticker] : [],
+              isins: r.isin ? [r.isin] : [],
+            });
+          }
+          return {
+            clusterKey: r.cluster_id,
+            companyKey: r.company_key,
+            score: r.score,
+            rationale: r.rationale,
+          };
+        },
+      );
+      const seenObservationKeys = new Set<string>();
+      const observations = [...queuedSentiments, ...idBackedSentiments].filter((sentiment) => {
+        const key = `${sentiment.companyKey}\u0000${sentiment.clusterKey}`;
+        if (seenObservationKeys.has(key)) return false;
+        seenObservationKeys.add(key);
+        return true;
+      });
+
+      const priorByKey = new Map<
+        string,
+        {
+          company_name: string | null;
+          ticker: string | null;
+          isin: string | null;
+          score: number;
+          trend: "up" | "down" | "flat";
+          evidence_cluster_ids: string[];
+          scored_cluster_ids: ScoredClusterRecord[];
+        }
+      >(
+        priorRows.map((r) => [
           r.company_key,
           {
+            company_name: r.company_name ?? null,
+            ticker: r.ticker ?? null,
+            isin: r.isin ?? null,
             score: r.score,
+            trend: r.trend ?? "flat",
             evidence_cluster_ids: r.evidence_cluster_ids ?? [],
             scored_cluster_ids: r.scored_cluster_ids ?? [],
           },
-        ],
-      ),
-    );
+        ]),
+      );
 
-    const priorScoredByCompany = new Map<string, Set<string>>(
-      [...priorByKey].map(([companyKey, prior]) => [
-        companyKey,
-        new Set(prior.scored_cluster_ids.map((r) => r.id)),
-      ]),
-    );
-    const observationsByCompany = aggregateObservationsByCompany(
-      idBackedSentiments,
-      priorScoredByCompany,
-    );
+      const expiredScoredCompanies = new Set<string>();
+      const priorScoredByCompany = new Map<string, Set<string>>(
+        [...priorByKey].map(([companyKey, prior]) => {
+          const validScored = prior.scored_cluster_ids.filter(
+            (record) => now - new Date(record.scoredAt).getTime() <= NEWS_WINDOW_MS,
+          );
+          if (validScored.length !== prior.scored_cluster_ids.length) {
+            expiredScoredCompanies.add(companyKey);
+            prior.scored_cluster_ids = validScored;
+          }
+          return [companyKey, new Set(validScored.map((record) => record.id))];
+        }),
+      );
+      const observationsByCompany = aggregateObservationsByCompany(
+        observations,
+        priorScoredByCompany,
+      );
 
-    const now = Date.now();
-    const companySentimentRows = [...observationsByCompany].map(([companyKey, obs]) => {
-      const prior = priorByKey.get(companyKey) ?? null;
-      const { score, trend } = computeEwma(prior?.score ?? null, obs.observedScore);
-      const ref = companiesByKey.get(companyKey);
-      return {
-        company_key: companyKey,
-        company_name: ref?.name ?? companyKey,
-        ticker: ref?.tickers[0] ?? null,
-        isin: ref?.isins[0] ?? null,
-        score,
-        trend,
-        evidence_cluster_ids: mergeEvidenceClusterIds(
-          prior?.evidence_cluster_ids ?? [],
-          obs.clusterKeys,
-        ),
-        scored_cluster_ids: mergeScoredClusterIds(
-          prior?.scored_cluster_ids ?? [],
-          obs.clusterKeys,
-          now,
-          NEWS_WINDOW_MS,
-        ),
-        updated_at: new Date(now).toISOString(),
-      };
-    });
+      const companySentimentRows = [...observationsByCompany].map(([companyKey, obs]) => {
+        const prior = priorByKey.get(companyKey) ?? null;
+        const { score, trend } = computeEwma(prior?.score ?? null, obs.observedScore);
+        const ref = companiesByKey.get(companyKey);
+        return {
+          company_key: companyKey,
+          company_name: ref?.name ?? companyKey,
+          ticker: ref?.tickers[0] ?? null,
+          isin: ref?.isins[0] ?? null,
+          score,
+          trend,
+          evidence_cluster_ids: mergeEvidenceClusterIds(
+            prior?.evidence_cluster_ids ?? [],
+            obs.clusterKeys,
+          ),
+          scored_cluster_ids: mergeScoredClusterIds(
+            prior?.scored_cluster_ids ?? [],
+            obs.clusterKeys,
+            now,
+            NEWS_WINDOW_MS,
+          ),
+          updated_at: new Date(now).toISOString(),
+        };
+      });
 
-    if (companySentimentRows.length === 0) return { companiesRescored: 0, error: null };
+      for (const companyKey of expiredScoredCompanies) {
+        if (observationsByCompany.has(companyKey)) continue;
+        const prior = priorByKey.get(companyKey);
+        if (!prior) continue;
+        const ref = companiesByKey.get(companyKey);
+        companySentimentRows.push({
+          company_key: companyKey,
+          company_name: ref?.name ?? prior.company_name ?? companyKey,
+          ticker: ref?.tickers[0] ?? prior.ticker,
+          isin: ref?.isins[0] ?? prior.isin,
+          score: prior.score,
+          trend: prior.trend,
+          evidence_cluster_ids: prior.evidence_cluster_ids,
+          scored_cluster_ids: prior.scored_cluster_ids,
+          updated_at: new Date(now).toISOString(),
+        });
+      }
 
-    const { data: applied, error: applyError } = await client.rpc("apply_company_sentiment_batch", {
-      p_holder: holder,
-      p_rows: companySentimentRows,
-    });
+      const { data: applied, error: applyError } = await client.rpc(
+        "apply_company_sentiment_batch",
+        {
+          p_holder: holder,
+          p_rows: companySentimentRows,
+        },
+      );
 
-    if (applyError) throw new Error(applyError.message);
-    if (applied !== true) {
-      return {
-        companiesRescored: 0,
-        error: "company sentiment update skipped: lease was lost before the write completed",
-      };
+      if (applyError) throw new Error(applyError.message);
+      if (applied !== true) {
+        lastError = "company sentiment update skipped: lease was lost before the write completed";
+        retryLeaseLoss = true;
+      } else {
+        return { companiesRescored: companySentimentRows.length, error: null };
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error("[news] rolling company sentiment update failed:", msg);
+      return { companiesRescored: 0, error: msg };
+    } finally {
+      await releaseCompanySentimentLock(client, holder);
     }
-    return { companiesRescored: companySentimentRows.length, error: null };
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.error("[news] rolling company sentiment update failed:", msg);
-    return { companiesRescored: 0, error: msg };
-  } finally {
-    await releaseCompanySentimentLock(client, holder);
+
+    if (retryLeaseLoss && attempt < MAX_COMPANY_SENTIMENT_ATTEMPTS) {
+      await sleep(COMPANY_SENTIMENT_RETRY_DELAY_MS * attempt);
+    }
   }
+
+  return { companiesRescored: 0, error: lastError };
 }
 
 // ---------------------------------------------------------------------------
@@ -809,17 +1235,18 @@ function titleSignature(title: string, companyNames: string[]): Set<string> {
 }
 
 // Collapse near-identical stories from different sources. Keeps the best source
-// tier (tiebreak exaScore, then recency); merges companyKeys so attribution
-// survives. Conservative: requires ≥3 shared distinctive tokens AND ≥0.6 containment.
+// tier (tiebreak exaScore, then recency); merges companyKeys and entity sets so
+// attribution survives. Conservative: requires ≥3 shared distinctive tokens AND
+// ≥0.6 containment.
 function dedupeByStory(
   pending: Map<string, PendingCluster>,
-  workList: Map<string, CompanyEntry>,
+  queryByKey: Map<string, string>,
 ): number {
   const keys = [...pending.keys()];
   const sig = new Map<string, Set<string>>();
   for (const key of keys) {
     const pc = pending.get(key)!;
-    const names = [...pc.companyKeys].map((ck) => workList.get(ck)?.query ?? "").filter(Boolean);
+    const names = [...pc.companyKeys].map((ck) => queryByKey.get(ck) ?? "").filter(Boolean);
     sig.set(key, titleSignature(pc.result.title ?? "", names));
   }
 
@@ -851,7 +1278,13 @@ function dedupeByStory(
         dropKey = da >= db ? keyB : keyA;
       }
       const keepKey = dropKey === keyA ? keyB : keyA;
-      pending.get(dropKey)!.companyKeys.forEach((ck) => pending.get(keepKey)!.companyKeys.add(ck));
+      const keep = pending.get(keepKey)!;
+      const drop = pending.get(dropKey)!;
+      drop.companyKeys.forEach((ck) => keep.companyKeys.add(ck));
+      drop.tickers.forEach((t) => keep.tickers.add(t));
+      drop.isins.forEach((n) => keep.isins.add(n));
+      drop.countries.forEach((c) => keep.countries.add(c));
+      drop.sectors.forEach((s) => keep.sectors.add(s));
       pending.delete(dropKey);
       dropped++;
       if (dropKey === keyA) break; // A removed — stop comparing it
@@ -864,26 +1297,32 @@ function dedupeByStory(
 // Main: runNewsFanout (two-phase, globally deduped, batched DB writes)
 //
 // Subrequest budget (free plan cap = 50):
-//   1  holdings query
-//   N  Exa calls (one per distinct company, N=4 today)
-//   1  batch cluster upsert (sentiments jsonb folded into this row — 0 extra)
-//   1  batch match upsert
-//   1  sweep
-//   1  Grok sentiment scoring call (skipped if no survivors)
-//   1  company sentiment lock acquire (skipped if nothing scored)
-//   1  company_sentiment prior-score lookup (skipped if nothing scored)
-//   1  company_sentiment batch write RPC, lock-checked (skipped if nothing scored)
-//   1  company sentiment lock release (skipped if nothing scored)
+//   1    holdings query
+//   0-2  ETF taxonomy reads (etf_constituents + geography; only when ETFs are held)
+//   N    company Exa searches (one per distinct company, N=4 today)
+//   ≤N   secondary company searches (only when premium results are thin)
+//   M    market-topic Exa searches (one per distinct ETF-derived topic,
+//        M ≤ MAX_MARKET_TOPICS=12, M≈4 today; no secondary tier for topics)
+//   ≤2   Exa contents calls (batched summaries, one per language FR/EN)
+//   1    cluster entities pre-read (batched .in() on cluster_key, so a
+//        re-upsert never erases entity attribution from a previous run)
+//   ≤2   batch cluster upserts (sentiment-bearing and sentiment-preserving rows)
+//   1    batch match upsert
+//   1    sweep
+//   1    Grok sentiment scoring call (skipped if no survivors)
+//   ≤16  company sentiment enqueue/lock/read/write/release requests
 //   ─────────────────
-//   N+9  total worst case (13 today, well under 50)
+//   worst case physical fetches stay within the 50-subrequest cap.
 // ---------------------------------------------------------------------------
 
 interface PendingCluster {
   result: ExaSearchResult; // raw search result — summary fetched later via Contents API
   exaScore: number;
-  companyKeys: Set<string>;
+  companyKeys: Set<string>; // company canonical keys AND `topic:*` market keys
   tickers: Set<string>;
   isins: Set<string>;
+  countries: Set<string>; // from market topics; empty for company-only clusters
+  sectors: Set<string>;
 }
 
 interface ClusterAccum {
@@ -892,13 +1331,18 @@ interface ClusterAccum {
   companyKeys: Set<string>;
 }
 
-export async function runNewsFanout(env: Env): Promise<{
+export async function runNewsFanout(
+  env: Env,
+  options: { availableSubrequests?: number; fetch?: NewsFetch } = {},
+): Promise<{
   distinctCompaniesQueried: number;
+  marketTopicsQueried: number;
   clustersUpserted: number;
   matchesUpserted: number;
   undatedDropped: number;
   lowValueDropped: number;
   offTargetDropped: number;
+  offTopicDropped: number;
   secondarySearches: number;
   dedupedAway: number;
   expiredSwept: number;
@@ -912,11 +1356,13 @@ export async function runNewsFanout(env: Env): Promise<{
     console.warn("[news] EXA_SEARCH not set — skipping news fanout");
     return {
       distinctCompaniesQueried: 0,
+      marketTopicsQueried: 0,
       clustersUpserted: 0,
       matchesUpserted: 0,
       undatedDropped: 0,
       lowValueDropped: 0,
       offTargetDropped: 0,
+      offTopicDropped: 0,
       secondarySearches: 0,
       dedupedAway: 0,
       expiredSwept: 0,
@@ -927,25 +1373,65 @@ export async function runNewsFanout(env: Env): Promise<{
   }
 
   const apiKey = env.EXA_SEARCH;
-  const client: AnySupabaseClient = createClient(env.SUPABASE_URL, env.SUPABASE_SERVICE_KEY);
+  const availableSubrequests = Math.max(
+    0,
+    Math.min(NEWS_SUBREQUEST_BUDGET, options.availableSubrequests ?? NEWS_SUBREQUEST_BUDGET),
+  );
+  const budget = new NewsSubrequestBudget(availableSubrequests, options.fetch);
+  const budgetFetch = budget.fetch.bind(budget);
+  const client: AnySupabaseClient = createClient(env.SUPABASE_URL, env.SUPABASE_SERVICE_KEY, {
+    global: { fetch: budgetFetch },
+  });
 
   // --- Build global work-list (1 subrequest) ---------------------------------
-  const workList = await buildGlobalWorkList(client);
+  const { workList, fundHoldings } = await buildGlobalWorkList(client);
+
+  // --- Market work-list from held ETFs (0-2 subrequests) ---------------------
+  let marketList = new Map<string, MarketEntry>();
+  try {
+    marketList = await buildMarketWorkList(client, fundHoldings);
+  } catch (err) {
+    // Market coverage is additive — never let it break the company fanout.
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error("[news] market work-list failed:", msg);
+    errors.push(`market work-list: ${msg}`);
+  }
+  const rotationNow = Date.now();
+  const marketCandidates = [...marketList.values()].sort((a, b) =>
+    a.canonicalKey < b.canonicalKey ? -1 : a.canonicalKey > b.canonicalKey ? 1 : 0,
+  );
+  let marketEntries: MarketEntry[] = [];
 
   const allCompanies = [...workList.values()].sort((a, b) =>
     a.canonicalKey < b.canonicalKey ? -1 : a.canonicalKey > b.canonicalKey ? 1 : 0,
   );
-  const cursor = 0;
-  const companies = allCompanies.slice(cursor, cursor + FANOUT_WINDOW);
+  const companySearchLimit = Math.min(
+    FANOUT_WINDOW,
+    Math.max(
+      1,
+      Math.floor(
+        (availableSubrequests -
+          MAX_MARKET_TOPICS -
+          MAX_FIXED_FANOUT_SUBREQUESTS -
+          MAX_COMPANY_SENTIMENT_SUBREQUESTS) /
+          2,
+      ),
+    ),
+  );
+  const companies = selectRotatingWindow(allCompanies, companySearchLimit, rotationNow);
 
   const startPublishedDate = new Date(Date.now() - NEWS_WINDOW_MS).toISOString();
   const userLocation = deriveUserLocation(workList);
+  budget.reserve(MAX_POST_SEARCH_SUBREQUESTS);
+  const marketSearchReservation = marketCandidates.length > 0 ? MAX_RETRIES : 0;
+  if (marketSearchReservation > 0) budget.reserve(marketSearchReservation);
 
-  // --- Phase 1: FETCH — collect results, no DB writes (N..2N subrequests) ----
+  // --- Phase 1: FETCH — collect results, no DB writes (N..2N+M subrequests) --
   const pendingClusters = new Map<string, PendingCluster>();
   let undatedDropped = 0;
   let lowValueDropped = 0;
   let offTargetDropped = 0;
+  let offTopicDropped = 0;
   let secondarySearches = 0;
 
   // Filter a result list for one company and add survivors to pendingClusters.
@@ -988,10 +1474,58 @@ export async function runNewsFanout(env: Env): Promise<{
           companyKeys: new Set([company.canonicalKey]),
           tickers: new Set(tickerArr),
           isins: new Set(isinArr),
+          countries: new Set(),
+          sectors: new Set(),
         });
       }
     }
     return kept;
+  };
+
+  // Market analog of `ingest`: topic-relevance drift filter instead of the
+  // company-name filter, plus a per-topic keep cap (best Exa score first).
+  const ingestMarket = (results: ExaSearchResult[], entry: MarketEntry): void => {
+    const survivors: Array<{ result: ExaSearchResult; exaScore: number }> = [];
+    for (const result of results) {
+      if (!result.publishedDate || !result.url) {
+        undatedDropped++;
+        continue;
+      }
+      if (isLowValuePage(result.title ?? "", result.url)) {
+        lowValueDropped++;
+        continue;
+      }
+      if (!mentionsTopic(result.title ?? "", entry.topic)) {
+        offTopicDropped++;
+        continue;
+      }
+      survivors.push({
+        result,
+        exaScore: typeof result.score === "number" ? result.score : 0.5,
+      });
+    }
+
+    survivors.sort((a, b) => b.exaScore - a.exaScore);
+    for (const s of survivors.slice(0, MARKET_RESULTS_KEPT)) {
+      const clusterKey = s.result.id ?? s.result.url!;
+      const existing = pendingClusters.get(clusterKey);
+      if (existing) {
+        existing.exaScore = Math.max(existing.exaScore, s.exaScore);
+        existing.companyKeys.add(entry.canonicalKey);
+        entry.topic.countries.forEach((c) => existing.countries.add(c));
+        entry.topic.sectors.forEach((sec) => existing.sectors.add(sec));
+      } else {
+        pendingClusters.set(clusterKey, {
+          result: s.result,
+          exaScore: s.exaScore,
+          companyKeys: new Set([entry.canonicalKey]),
+          tickers: new Set(),
+          isins: new Set(),
+          countries: new Set(entry.topic.countries),
+          sectors: new Set(entry.topic.sectors),
+        });
+      }
+    }
   };
 
   await runWithConcurrency(companies, FETCH_CONCURRENCY, async (company) => {
@@ -1015,6 +1549,7 @@ export async function runNewsFanout(env: Env): Promise<{
         startPublishedDate,
         userLocation,
         NEWS_INCLUDE_DOMAINS,
+        budgetFetch,
       );
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -1039,6 +1574,7 @@ export async function runNewsFanout(env: Env): Promise<{
           startPublishedDate,
           userLocation,
           NEWS_INCLUDE_DOMAINS_SECONDARY,
+          budgetFetch,
         );
         if (!secondary.error) ingest(secondary.results ?? [], company, tickerArr, isinArr);
         else errors.push(`${company.canonicalKey} (secondary): Exa error ${secondary.error}`);
@@ -1050,8 +1586,50 @@ export async function runNewsFanout(env: Env): Promise<{
     }
   });
 
+  const marketSearchLimit = Math.min(
+    MAX_MARKET_TOPICS,
+    Math.floor((budget.availableSearchSubrequests() + marketSearchReservation) / MAX_RETRIES),
+  );
+  marketEntries = selectRotatingWindow(marketCandidates, marketSearchLimit, rotationNow);
+  // Drop capped-away entries so later match/dedup phases can't reference them.
+  marketList = new Map(marketEntries.map((e) => [e.canonicalKey, e]));
+
+  const marketSearchSlots = marketEntries.length * MAX_RETRIES;
+  if (marketSearchSlots > marketSearchReservation) {
+    budget.reserve(marketSearchSlots - marketSearchReservation);
+  }
+  if (marketSearchSlots > 0) budget.activateReservation(marketSearchSlots);
+
+  // Market-topic searches (M subrequests) — premium allowlist only. Macro/market
+  // coverage is dense there, so no secondary tier: keeps the budget deterministic.
+  await runWithConcurrency(marketEntries, FETCH_CONCURRENCY, async (entry) => {
+    try {
+      const response = await exaSearchNews(
+        apiKey,
+        entry.topic.query,
+        startPublishedDate,
+        userLocation,
+        NEWS_INCLUDE_DOMAINS,
+        budgetFetch,
+      );
+      if (response.error) {
+        console.error(`[news] Exa API error for topic "${entry.topic.topicKey}":`, response.error);
+        errors.push(`${entry.canonicalKey}: Exa error ${response.error}`);
+        return;
+      }
+      ingestMarket(response.results ?? [], entry);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`[news] Exa market search failed for "${entry.topic.topicKey}":`, msg);
+      errors.push(`${entry.canonicalKey}: ${msg}`);
+    }
+  });
+  budget.activateReservation(MAX_POST_SEARCH_SUBREQUESTS);
   // Collapse same-story duplicates across sources (keep best source tier).
-  const dedupedAway = dedupeByStory(pendingClusters, workList);
+  const queryByKey = new Map<string, string>();
+  for (const [key, entry] of workList) queryByKey.set(key, entry.query);
+  for (const [key, entry] of marketList) queryByKey.set(key, entry.topic.label);
+  const dedupedAway = dedupeByStory(pendingClusters, queryByKey);
 
   // --- Fetch summaries for survivors only, in the article's language ---------
   const EN_SUMMARY_QUERY =
@@ -1073,7 +1651,7 @@ export async function runNewsFanout(env: Env): Promise<{
   ] as const) {
     if (urls.length === 0) continue;
     try {
-      const m = await exaFetchSummaries(apiKey, urls, q);
+      const m = await exaFetchSummaries(apiKey, urls, q, budgetFetch);
       for (const [u, s] of m) summaryByUrl.set(u, s);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -1082,29 +1660,83 @@ export async function runNewsFanout(env: Env): Promise<{
     }
   }
 
+  // --- Merge prior-run entity attribution (1 subrequest) ---------------------
+  // The upsert below is last-writer-wins on the whole row: without this union a
+  // cluster re-fetched by a different search (company vs market topic) would
+  // erase the entities written by an earlier run.
+  // Read-merge-write is not atomic across CONCURRENT fanouts (scheduled + admin
+  // debug overlapping). That race is accepted: runs are minutes apart on 3 fixed
+  // cron slots, admin runs are rare and manual, a lost union self-heals on the
+  // next run's pre-read, and a DB-side jsonb merge would need a new RPC/trigger
+  // migration that this feature deliberately avoids.
+  const existingSentimentsByClusterKey = new Map<string, unknown[]>();
+  let sentimentPreReadFailed = false;
+  const companiesByKey = new Map<string, SentimentCompanyRef>();
+  for (const [companyKey, entry] of workList) {
+    const holderTickers = new Set<string>();
+    const holderIsins = new Set<string>();
+    for (const holder of entry.holders.values()) {
+      holder.tickers.forEach((ticker) => holderTickers.add(ticker));
+      holder.isins.forEach((isin) => holderIsins.add(isin));
+    }
+    companiesByKey.set(companyKey, {
+      canonicalKey: companyKey,
+      name: entry.query,
+      tickers: [...holderTickers],
+      isins: [...holderIsins],
+    });
+  }
+  if (survivors.length > 0) {
+    const { data: existingRows, error: preReadError } = await client
+      .from("news_clusters")
+      .select("cluster_key,entities,sentiments")
+      .in(
+        "cluster_key",
+        survivors.map((p) => p.result.id ?? p.result.url!),
+      );
+    if (preReadError) {
+      sentimentPreReadFailed = true;
+      errors.push(`cluster entities pre-read: ${preReadError.message}`);
+      console.error("[news] cluster entities pre-read failed:", preReadError.message);
+    }
+    const rows =
+      (existingRows as Array<{
+        cluster_key: string;
+        entities: {
+          isins?: string[];
+          tickers?: string[];
+          countries?: string[];
+          sectors?: string[];
+        } | null;
+        sentiments: unknown[] | null;
+      }> | null) ?? [];
+    for (const row of rows) {
+      const pending = pendingClusters.get(row.cluster_key);
+      if (Array.isArray(row.sentiments)) {
+        existingSentimentsByClusterKey.set(row.cluster_key, row.sentiments);
+      }
+      if (pending && row.entities) {
+        (row.entities.tickers ?? []).forEach((t) => pending.tickers.add(t));
+        (row.entities.isins ?? []).forEach((n) => pending.isins.add(n));
+        (row.entities.countries ?? []).forEach((c) => pending.countries.add(c));
+        (row.entities.sectors ?? []).forEach((s) => pending.sectors.add(s));
+      }
+    }
+  }
+
   // --- Sentiment scoring: one batched Grok call for every survivor's ---------
   // (cluster, company) pairs (1 subrequest). Never throws — a failure here
   // must not block the feed from populating (see scoreClusterSentiments).
-  const companiesByKey = new Map<string, SentimentCompanyRef>();
   const sentimentTargets: SentimentTarget[] = survivors.map((p) => {
     const clusterKey = p.result.id ?? p.result.url!;
-    const companies: SentimentCompanyRef[] = [...p.companyKeys].map((ck) => {
-      const entry = workList.get(ck);
-      const holderTickers = new Set<string>();
-      const holderIsins = new Set<string>();
-      for (const holder of entry?.holders.values() ?? []) {
-        holder.tickers.forEach((t) => holderTickers.add(t));
-        holder.isins.forEach((i) => holderIsins.add(i));
-      }
-      const ref: SentimentCompanyRef = {
-        canonicalKey: ck,
-        name: entry?.query ?? ck,
-        tickers: [...holderTickers],
-        isins: [...holderIsins],
-      };
-      companiesByKey.set(ck, ref);
-      return ref;
-    });
+    const companies: SentimentCompanyRef[] = [...p.companyKeys]
+      .map((ck) => {
+        // Market-topic keys are not companies and must not receive sentiment.
+        const entry = workList.get(ck);
+        if (!entry) return null;
+        return companiesByKey.get(ck) ?? null;
+      })
+      .filter((ref): ref is SentimentCompanyRef => ref !== null);
     return {
       clusterKey,
       title: p.result.title ?? "",
@@ -1116,6 +1748,7 @@ export async function runNewsFanout(env: Env): Promise<{
   const { sentiments: clusterSentiments, error: sentimentError } = await scoreClusterSentiments(
     env,
     sentimentTargets,
+    budgetFetch,
   );
   if (sentimentError) errors.push(`sentiment scoring: ${sentimentError}`);
 
@@ -1125,35 +1758,50 @@ export async function runNewsFanout(env: Env): Promise<{
     if (arr) arr.push(s);
     else sentimentsByClusterKey.set(s.clusterKey, [s]);
   }
-  const expectedCompanyCountByCluster = new Map<string, number>(
-    sentimentTargets.map((t) => [t.clusterKey, t.companies.length]),
+  const expectedCompanyKeysByCluster = new Map<string, string[]>(
+    sentimentTargets.map((t) => [t.clusterKey, t.companies.map((company) => company.canonicalKey)]),
   );
+  const resolvedSentimentsByClusterKey = new Map<string, ClusterSentiment[] | null>();
 
-  // --- Batch cluster upsert (1 subrequest) -----------------------------------
+  // --- Batch cluster upsert ---------------------------------------------------
   const clusterRows = survivors.map((p) => {
     const clusterKey = p.result.id ?? p.result.url!;
+    const resolvedSentiments = sentimentPreReadFailed
+      ? null
+      : resolveSentimentsForRow(
+          expectedCompanyKeysByCluster.get(clusterKey) ?? [],
+          sentimentsByClusterKey.get(clusterKey) ?? [],
+          sentimentError,
+        );
+    resolvedSentimentsByClusterKey.set(clusterKey, resolvedSentiments);
     return buildClusterRow(
       p.result,
       [...p.tickers],
       [...p.isins],
       summaryByUrl.get(p.result.url!) ?? "",
-      resolveSentimentsForRow(
-        expectedCompanyCountByCluster.get(clusterKey) ?? 0,
-        sentimentsByClusterKey.get(clusterKey) ?? [],
-        sentimentError,
-      ),
+      sentimentPreReadFailed ? null : resolvedSentiments,
       companiesByKey,
+      [...p.countries],
+      [...p.sectors],
+      existingSentimentsByClusterKey.get(clusterKey) ?? [],
     );
   });
   let clustersUpserted = 0;
   const clusterMap = new Map<string, ClusterAccum>();
   const clusterKeyToId = new Map<string, string>();
 
-  if (clusterRows.length > 0) {
+  const clusterRowsWithSentiments = clusterRows.filter((row) =>
+    Object.prototype.hasOwnProperty.call(row, "sentiments"),
+  );
+  const clusterRowsWithoutSentiments = clusterRows.filter(
+    (row) => !Object.prototype.hasOwnProperty.call(row, "sentiments"),
+  );
+  for (const rows of [clusterRowsWithSentiments, clusterRowsWithoutSentiments]) {
+    if (rows.length === 0) continue;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const { data: upserted, error: clusterBatchError } = (await (client as any)
       .from("news_clusters")
-      .upsert(clusterRows, { onConflict: "cluster_key" })
+      .upsert(rows, { onConflict: "cluster_key" })
       .select("id, cluster_key")) as {
       data: Array<{ id: string; cluster_key: string }> | null;
       error: { message: string } | null;
@@ -1162,61 +1810,86 @@ export async function runNewsFanout(env: Env): Promise<{
     if (clusterBatchError) {
       errors.push(`batch cluster upsert: ${clusterBatchError.message}`);
       console.error("[news] batch cluster upsert failed:", clusterBatchError.message);
-    } else {
-      for (const row of upserted ?? []) {
-        const pending = pendingClusters.get(row.cluster_key);
-        if (pending) {
-          clusterMap.set(row.id, {
-            publishedAt: pending.result.publishedDate ?? new Date().toISOString(),
-            exaScore: pending.exaScore,
-            companyKeys: pending.companyKeys,
-          });
-          clusterKeyToId.set(row.cluster_key, row.id);
-        }
+      continue;
+    }
+    for (const row of upserted ?? []) {
+      const pending = pendingClusters.get(row.cluster_key);
+      if (pending) {
+        clusterMap.set(row.id, {
+          publishedAt: pending.result.publishedDate ?? new Date().toISOString(),
+          exaScore: pending.exaScore,
+          companyKeys: pending.companyKeys,
+        });
+        clusterKeyToId.set(row.cluster_key, row.id);
       }
-      clustersUpserted = clusterMap.size;
     }
   }
+  clustersUpserted = clusterMap.size;
 
-  // --- Rolling per-company sentiment (EWMA) — up to 2 subrequests ------------
-  // Skipped entirely (0 subrequests) when nothing was scored, e.g. sentiment
-  // scoring failed above; the feed above is already fully populated by now.
+  // --- Rolling per-company sentiment (EWMA) -----------------------------------
   // Swap the survivor-scoped clusterKey for the durable DB cluster id so
   // company_sentiment cluster-id lists reference real, queryable rows.
-  const idBackedSentiments: ClusterSentiment[] = clusterSentiments
-    .map((s) => {
-      const clusterId = clusterKeyToId.get(s.clusterKey);
-      return clusterId ? { ...s, clusterKey: clusterId } : null;
-    })
-    .filter((s): s is ClusterSentiment => s !== null);
+  const idBackedSentiments: ClusterSentiment[] = [...resolvedSentimentsByClusterKey].flatMap(
+    ([clusterKey, sentiments]) => {
+      const clusterId = clusterKeyToId.get(clusterKey);
+      if (!clusterId || !sentiments) return [];
+      return sentiments.map((s) => ({ ...s, clusterKey: clusterId }));
+    },
+  );
 
+  const sentimentCompaniesByKey = new Map<string, SentimentCompanyRef>();
+  for (const sentiment of idBackedSentiments) {
+    const ref = companiesByKey.get(sentiment.companyKey);
+    if (ref) sentimentCompaniesByKey.set(sentiment.companyKey, ref);
+  }
   const { companiesRescored, error: companySentimentError } = await updateRollingCompanySentiment(
     client,
     idBackedSentiments,
-    companiesByKey,
+    sentimentCompaniesByKey,
   );
   if (companySentimentError) errors.push(`company sentiment: ${companySentimentError}`);
 
   // --- Phase 2: SCORE + MATCH — build matchAccum (pure JS, 0 subrequests) ---
-  const matchAccum = new Map<string, Map<string, { keys: Set<string>; tickers: Set<string> }>>();
+  interface MatchAccum {
+    keys: Set<string>;
+    tickers: Set<string>;
+    etfTickers: Set<string>;
+    topicLabels: Set<string>;
+  }
+  const matchAccum = new Map<string, Map<string, MatchAccum>>();
+
+  const accFor = (portfolioId: string, clusterId: string): MatchAccum => {
+    let pMap = matchAccum.get(portfolioId);
+    if (!pMap) {
+      pMap = new Map();
+      matchAccum.set(portfolioId, pMap);
+    }
+    let acc = pMap.get(clusterId);
+    if (!acc) {
+      acc = { keys: new Set(), tickers: new Set(), etfTickers: new Set(), topicLabels: new Set() };
+      pMap.set(clusterId, acc);
+    }
+    return acc;
+  };
 
   for (const [clusterId, cluster] of clusterMap) {
     for (const ck of cluster.companyKeys) {
-      const entry = workList.get(ck);
-      if (!entry) continue;
-      for (const [portfolioId, holder] of entry.holders) {
-        let pMap = matchAccum.get(portfolioId);
-        if (!pMap) {
-          pMap = new Map();
-          matchAccum.set(portfolioId, pMap);
+      const companyEntry = workList.get(ck);
+      if (companyEntry) {
+        for (const [portfolioId, holder] of companyEntry.holders) {
+          const acc = accFor(portfolioId, clusterId);
+          acc.keys.add(ck);
+          holder.tickers.forEach((t) => acc.tickers.add(t));
         }
-        let acc = pMap.get(clusterId);
-        if (!acc) {
-          acc = { keys: new Set(), tickers: new Set() };
-          pMap.set(clusterId, acc);
-        }
+        continue;
+      }
+      const marketEntry = marketList.get(ck);
+      if (!marketEntry) continue;
+      for (const [portfolioId, holder] of marketEntry.holders) {
+        const acc = accFor(portfolioId, clusterId);
         acc.keys.add(ck);
-        holder.tickers.forEach((t) => acc!.tickers.add(t));
+        acc.topicLabels.add(marketEntry.topic.label);
+        holder.etfTickers.forEach((t) => acc.etfTickers.add(t));
       }
     }
   }
@@ -1238,14 +1911,23 @@ export async function runNewsFanout(env: Env): Promise<{
         .map((ck) => workList.get(ck)?.query)
         .filter((n): n is string => Boolean(n));
 
+      // Company fields keep their exact V1 shape; ETF/market fields
+      // (reserved in migration 20260520195025) only appear on market matches.
+      const matchReason: Record<string, unknown> = {};
+      if (companyNames.length > 0) {
+        matchReason.matched_tickers = [...acc.tickers];
+        matchReason.matched_company_names = companyNames;
+      }
+      if (acc.topicLabels.size > 0) {
+        matchReason.matched_etfs = [...acc.etfTickers];
+        matchReason.matched_topics = [...acc.topicLabels];
+      }
+
       matchRows.push({
         portfolio_id: portfolioId,
         cluster_id: clusterId,
         score: computeMatchScore(cluster.exaScore, cluster.publishedAt, acc.keys.size),
-        match_reason: {
-          matched_tickers: [...acc.tickers],
-          matched_company_names: companyNames,
-        },
+        match_reason: matchReason,
       });
     }
   }
@@ -1275,15 +1957,19 @@ export async function runNewsFanout(env: Env): Promise<{
 
   const result = {
     distinctCompaniesQueried: companies.length,
+    marketTopicsQueried: marketEntries.length,
     clustersUpserted,
     matchesUpserted,
     undatedDropped,
     lowValueDropped,
     offTargetDropped,
+    offTopicDropped,
     secondarySearches,
     dedupedAway,
     expiredSwept: expiredSwept ?? 0,
-    clustersScored: sentimentsByClusterKey.size,
+    clustersScored: [...resolvedSentimentsByClusterKey.values()].filter(
+      (sentiments) => sentiments !== null && sentiments.length > 0,
+    ).length,
     companiesRescored,
     errors,
   };

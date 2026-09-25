@@ -2,6 +2,14 @@ import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { RunTree } from "langsmith";
 import { traceable, withRunTree } from "langsmith/traceable";
 import { langsmithClient } from "../llm/langsmith";
+import {
+  buildPortfolioProfile,
+  type EtfConstituentGap,
+  type HoldingRow,
+} from "./portfolio-profile";
+
+// Re-exported so callers/tests of the Polymarket fanout keep a single import site.
+export { buildPortfolioProfile, type EtfConstituentGap } from "./portfolio-profile";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnySupabaseClient = SupabaseClient<any, any, any>;
@@ -10,9 +18,22 @@ type AnySupabaseClient = SupabaseClient<any, any, any>;
 // Types
 // ---------------------------------------------------------------------------
 
+// Queue message for the geography/constituents enrichment consumer in
+// index.ts. Structurally compatible with GeographyQueueMessage so the
+// Worker's Queue<GeographyQueueMessage> binding satisfies Env below.
+interface EtfEnrichmentQueueMessage {
+  type: "geography_research";
+  portfolio_id: string;
+  holding_id: string;
+  reason: "polymarket_constituents";
+}
+
 interface Env {
   SUPABASE_URL: string;
   SUPABASE_SERVICE_KEY: string;
+  // Optional: when bound, ETF constituents coverage gaps found during profile
+  // builds are enqueued for background enrichment (never LLM work inline).
+  GEOGRAPHY_QUEUE?: { send(message: EtfEnrichmentQueueMessage): Promise<unknown> };
   GROK_MAIN_API_KEY?: string;
   GROK_SUB_API_KEY?: string;
   GROK_NORMALIZATION_API_KEY?: string;
@@ -30,20 +51,6 @@ interface Env {
 interface PortfolioRow {
   id: string;
   user_id: string;
-}
-
-interface HoldingRow {
-  ticker: string;
-  isin: string | null;
-  asset_type: string | null;
-  name: string;
-  quantity: number;
-}
-
-interface GeographyAllocationRow {
-  country_code: string;
-  country_name: string;
-  weight_pct: number;
 }
 
 // Gamma API shapes
@@ -120,11 +127,12 @@ interface HoldingsCacheRow {
 
 export interface PolymarketFanoutOptions {
   forceRescore?: boolean;
+  fetch?: typeof globalThis.fetch;
 }
 
 export interface PolymarketFanoutResult {
   marketsUpserted: number;
-  pinnedSlugsFound: number;
+  marketsDeactivated: number;
   portfoliosProcessed: number;
   portfoliosSkipped: number;
   curation: {
@@ -135,19 +143,11 @@ export interface PolymarketFanoutResult {
     cacheHits: number;
     fallbacks: number;
     portfoliosWithoutHoldings: number;
-    pinnedMatchesWritten: number;
     rotatingMatchesWritten: number;
   };
   errors: string[];
 }
 
-interface PortfolioProfile {
-  tickers: string[];
-  /** ETF holdings expanded with underlying stocks, e.g. "PUST.PA (Amundi NASDAQ-100: NVDA, AAPL, MSFT, AMZN, META)" */
-  etfDescriptions: string[];
-  sectors: string[];
-  countries: string[];
-}
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -164,15 +164,6 @@ export const TAG_IDS = {
   stocks: 604,
 } as const;
 
-// Slugs of Polymarket events to always pin (highest volume_24hr market from
-// each event gets is_pinned=true across all portfolios).
-export const PINNED_MARKET_SLUGS: string[] = [
-  "how-many-fed-rate-cuts-in-2026",
-  "us-recession-by-end-of-2026",
-  "which-party-will-win-the-house-in-2026",
-  "what-price-will-bitcoin-hit-before-2027",
-];
-
 const ROTATING_BATCH_SIZE = 60; // max candidate markets sent to Grok per portfolio (event-deduped by highest-Yes bucket)
 const ROTATING_TOP_K = 16; // Grok picks top-K; server-side event-dedup then reduces to ~8 unique events
 const DEFAULT_POLYMARKET_GROK_MODEL = "grok-4.6";
@@ -187,24 +178,6 @@ const POLYMARKET_GROK_REASONING_EFFORTS = new Set<PolymarketGrokReasoningEffort>
 // Cache TTL: skip Grok re-scoring if holdings haven't changed AND last scored < 6h ago.
 // Market prices still refresh on every fanout run — only the per-portfolio LLM call is cached.
 const CACHE_TTL_HOURS = 6;
-
-// ETF → top-5 underlying stocks for Grok context.
-// Used when etf_constituents table is empty (lazy-populated by geography job).
-// Keyed by exchange-qualified ETF ticker.
-const ETF_UNDERLYING_LABELS: Record<string, { label: string; top5: string[] }> = {
-  "PUST.PA": {
-    label: "Amundi NASDAQ-100",
-    top5: ["NVDA", "AAPL", "MSFT", "AMZN", "META"],
-  },
-  "PTPXH.PA": {
-    label: "Amundi Japan Topix",
-    top5: ["Toyota (7203.T)", "Sony (6758.T)", "Keyence (6861.T)", "NTT (9432.T)", "SoftBank (9984.T)"],
-  },
-  "PAASI.PA": {
-    label: "Amundi EM Asia",
-    top5: ["TSM", "Samsung (005930.KS)", "Tencent (700.HK)", "Alibaba (BABA)", "ASML"],
-  },
-};
 
 // ---------------------------------------------------------------------------
 // Non-financial market filter — applied before Grok to prevent LLM from
@@ -240,6 +213,20 @@ export function isShortTermMarket(
 }
 
 // ---------------------------------------------------------------------------
+// Near-certain filter — a market at 100% Yes / 99% No is resolved-in-all-but-
+// name and carries no information. Shared with the category browse endpoint
+// so it applies the same cutoff as the personalized rotating path.
+// ---------------------------------------------------------------------------
+
+export const MAX_CERTAIN_PROB = 0.97;
+
+export function isNearCertainMarket(outcomePrices: number[] | null | undefined): boolean {
+  if (!outcomePrices || outcomePrices.length === 0) return false;
+  const topProb = Math.max(...outcomePrices, 0);
+  return topProb >= MAX_CERTAIN_PROB;
+}
+
+// ---------------------------------------------------------------------------
 // Grok helpers (self-contained — no cross-import from index.ts)
 // ---------------------------------------------------------------------------
 
@@ -268,12 +255,13 @@ export async function invokePolymarketGrok(
   env: Env,
   systemPrompt: string,
   userPrompt: string,
+  fetchImpl: typeof globalThis.fetch = globalThis.fetch,
 ): Promise<string> {
   const apiKey = env.GROK_MAIN_API_KEY ?? env.GROK_SUB_API_KEY ?? env.GROK_NORMALIZATION_API_KEY;
   if (!apiKey) throw new Error("[polymarket] No Grok API key available");
   const { model, reasoningEffort } = getPolymarketGrokConfig(env);
 
-  const res = await fetch(`${getGrokBaseUrl(env)}/chat/completions`, {
+  const res = await fetchImpl(`${getGrokBaseUrl(env)}/chat/completions`, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${apiKey}`,
@@ -360,8 +348,11 @@ function gammaBase(env: Env): string {
   return (env.POLYMARKET_GAMMA_BASE_URL || "https://gamma-api.polymarket.com").replace(/\/$/, "");
 }
 
-async function fetchGammaJson<T>(url: string): Promise<T> {
-  const res = await fetch(url, {
+async function fetchGammaJson<T>(
+  url: string,
+  fetchImpl: typeof globalThis.fetch = globalThis.fetch,
+): Promise<T> {
+  const res = await fetchImpl(url, {
     headers: { Accept: "application/json" },
   });
   if (!res.ok) {
@@ -436,7 +427,10 @@ function flattenEvent(event: GammaEvent): FlatMarket[] {
 // Candidate pool fetch (tag-filtered only — no broad pool)
 // ---------------------------------------------------------------------------
 
-export async function fetchCandidateMarkets(env: Env): Promise<Map<string, FlatMarket>> {
+export async function fetchCandidateMarkets(
+  env: Env,
+  fetchImpl: typeof globalThis.fetch = globalThis.fetch,
+): Promise<Map<string, FlatMarket>> {
   const base = gammaBase(env);
   const marketMap = new Map<string, FlatMarket>();
   const failures: string[] = [];
@@ -446,6 +440,7 @@ export async function fetchCandidateMarkets(env: Env): Promise<Map<string, FlatM
     try {
       const events = await fetchGammaJson<GammaEvent[]>(
         `${base}/events?tag_id=${tagId}&active=true&closed=false&order=volume24hr&ascending=false&limit=30`,
+        fetchImpl,
       );
       successfulTags++;
       let added = 0;
@@ -481,52 +476,6 @@ export async function fetchCandidateMarkets(env: Env): Promise<Map<string, FlatM
 
   console.log(`[polymarket] total candidate pool: ${marketMap.size} markets`);
   return marketMap;
-}
-
-// ---------------------------------------------------------------------------
-// Pinned event fetch
-// ---------------------------------------------------------------------------
-
-async function fetchPinnedMarkets(
-  env: Env,
-  candidateMap: Map<string, FlatMarket>,
-): Promise<Map<string, string>> {
-  const base = gammaBase(env);
-  const pinnedBySlug = new Map<string, string>();
-
-  for (const slug of PINNED_MARKET_SLUGS) {
-    try {
-      const slugMarkets = Array.from(candidateMap.values()).filter(
-        (m) => m.event_slug === slug,
-      );
-
-      let eventMarkets: FlatMarket[] = slugMarkets;
-      if (eventMarkets.length === 0) {
-        const event = await fetchGammaJson<GammaEvent>(`${base}/events/slug/${slug}`);
-        eventMarkets = flattenEvent(event);
-        for (const m of eventMarkets) {
-          if (!candidateMap.has(m.condition_id)) {
-            candidateMap.set(m.condition_id, m);
-          }
-        }
-      }
-
-      const best = eventMarkets
-        .filter((m) => m.condition_id)
-        .sort((a, b) => (b.volume_24hr ?? 0) - (a.volume_24hr ?? 0))[0];
-
-      if (best) {
-        pinnedBySlug.set(slug, best.condition_id);
-        console.log(
-          `[polymarket] pinned slug ${slug} → conditionId ${best.condition_id} (vol24hr=${best.volume_24hr})`,
-        );
-      }
-    } catch (err) {
-      console.error(`[polymarket] pinned slug ${slug} fetch failed:`, err);
-    }
-  }
-
-  return pinnedBySlug;
 }
 
 // ---------------------------------------------------------------------------
@@ -573,11 +522,44 @@ async function upsertMarkets(
   }
 }
 
+// Markets that drop out of the top-30-per-tag Gamma pool are never re-fetched
+// and would otherwise freeze at their last-seen `active`/`outcome_prices`
+// forever. 48h comfortably covers the fanout's normal run cadence (hourly)
+// plus a couple of missed runs, so anything older is treated as abandoned by
+// Gamma rather than merely mid-cycle.
+const STALE_FANOUT_WINDOW_HOURS = 48;
+
+/**
+ * Deactivates rows that have resolved (`end_date` in the past) or have not
+ * been re-fetched by a recent fanout — both are cases where Gamma has
+ * stopped surfacing the market, so `active`/prices are stale and the market
+ * must stop appearing in feeds. Pinned markets are not exempt: a pinned
+ * market that resolves is exactly the case most likely to render stale.
+ */
+async function deactivateStaleMarkets(client: AnySupabaseClient): Promise<number> {
+  const nowIso = new Date().toISOString();
+  const staleCutoffIso = new Date(
+    Date.now() - STALE_FANOUT_WINDOW_HOURS * 3_600_000,
+  ).toISOString();
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const { data, error } = (await (client as any)
+    .from("polymarket_markets")
+    .update({ active: false })
+    .eq("active", true)
+    .or(`end_date.lt.${nowIso},fetched_at.lt.${staleCutoffIso}`)
+    .select("condition_id")) as { data: { condition_id: string }[] | null; error: { message: string } | null };
+
+  if (error) {
+    throw new Error(`[polymarket] failed to deactivate stale markets: ${error.message}`);
+  }
+  return (data ?? []).length;
+}
+
 interface PortfolioMarketSelection {
   condition_id: string;
   score: number | null;
   reason: string | null;
-  is_pinned: boolean;
 }
 
 function postgrestInList(values: string[]): string {
@@ -600,14 +582,10 @@ export async function upsertThenPrunePortfolioMatches(
     );
   }
 
-  const isPinned = selections[0].is_pinned;
-  if (selections.some((selection) => selection.is_pinned !== isPinned)) {
-    throw new Error("[polymarket] replacement selection mixes pinned and rotating rows");
-  }
-
   const rows = selections.map((selection) => ({
     portfolio_id: portfolioId,
     ...selection,
+    is_pinned: false,
   }));
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -618,7 +596,7 @@ export async function upsertThenPrunePortfolioMatches(
   };
   if (upsertError) {
     throw new Error(
-      `[polymarket] ${isPinned ? "pinned" : "rotating"} match upsert failed for portfolio ${portfolioId}: ${upsertError.message}`,
+      `[polymarket] match upsert failed for portfolio ${portfolioId}: ${upsertError.message}`,
     );
   }
 
@@ -630,7 +608,6 @@ export async function upsertThenPrunePortfolioMatches(
     .from("portfolio_polymarket_matches")
     .delete()
     .eq("portfolio_id", portfolioId)
-    .eq("is_pinned", isPinned)
     .not(
       "condition_id",
       "in",
@@ -640,7 +617,7 @@ export async function upsertThenPrunePortfolioMatches(
   };
   if (pruneError) {
     throw new Error(
-      `[polymarket] ${isPinned ? "pinned" : "rotating"} stale-match prune failed for portfolio ${portfolioId}: ${pruneError.message}`,
+      `[polymarket] stale-match prune failed for portfolio ${portfolioId}: ${pruneError.message}`,
     );
   }
 }
@@ -662,122 +639,146 @@ async function computeHoldingsHash(holdings: HoldingRow[]): Promise<string> {
     .join("");
 }
 
+// buildPortfolioProfile (holdings → ETF constituents → sectors → countries)
+// lives in ./portfolio-profile — shared with the news fanout.
+
 // ---------------------------------------------------------------------------
-// Portfolio profile — full context including ETF underlying stocks.
-// Accepts pre-fetched holdings to avoid double DB round-trips.
+// ETF constituents self-healing — when a profile build finds an ETF with no
+// etf_constituents row, enqueue the existing geography/constituents research
+// job for that holding instead of degrading curation silently. The LLM work
+// happens in the geography-queue consumer, never inline in the fanout.
 // ---------------------------------------------------------------------------
 
-function isFundLikePolymarket(assetType: string | null | undefined, name = ""): boolean {
-  return /\betf\b|exchange traded fund|mutual\s*fund|\bfund\b|\bucits\b/i.test(
-    `${assetType ?? ""} ${name}`,
-  );
-}
+// Re-enqueue backoff: an ETF whose research finds no constituents would
+// otherwise re-trigger an LLM web-search job on every 6h cache expiry, forever.
+const CONSTITUENT_ENRICHMENT_BACKOFF_HOURS = 24;
 
-async function buildPortfolioProfile(
+export async function enqueueEtfConstituentsEnrichment(
+  env: Env,
   client: AnySupabaseClient,
   portfolioId: string,
-  preloadedHoldings?: HoldingRow[],
-): Promise<{ profile: PortfolioProfile; profileSummary: string }> {
-  const [holdingsResult, geoResult] = await Promise.all([
-    preloadedHoldings
-      ? Promise.resolve({ data: preloadedHoldings })
-      : client
-          .from("holdings")
-          .select("ticker,isin,asset_type,name,quantity")
-          .eq("portfolio_id", portfolioId)
-          .gt("quantity", 0),
-    client
-      .from("holding_geography_allocations")
-      .select("country_name,weight_pct")
-      .eq("portfolio_id", portfolioId)
-      .order("weight_pct", { ascending: false })
-      .limit(5),
-  ]);
-
-  const holdings: HoldingRow[] = (holdingsResult.data as HoldingRow[] | null) ?? [];
-  const geoRows: GeographyAllocationRow[] =
-    (geoResult.data as GeographyAllocationRow[] | null) ?? [];
-
-  const directTickers: string[] = [];
-  const etfHoldings: Array<{ ticker: string; isin: string | null; name: string }> = [];
-
-  for (const h of holdings) {
-    if (isFundLikePolymarket(h.asset_type, h.name)) {
-      etfHoldings.push({ ticker: h.ticker, isin: h.isin, name: h.name });
-    } else {
-      directTickers.push(h.ticker);
+  gaps: EtfConstituentGap[],
+): Promise<{ enqueued: string[] }> {
+  const eligible = gaps.filter((gap) => {
+    if (!gap.isin || !gap.holdingId) {
+      // etf_constituents is keyed by ISIN — without one the row can never
+      // exist, so enqueueing would loop forever. Log once per profile build.
+      console.warn(
+        `[polymarket] ETF constituents gap for ${gap.ticker} (portfolio ${portfolioId}) not enqueueable: missing ${gap.isin ? "holding id" : "ISIN"}`,
+      );
+      return false;
     }
+    return true;
+  });
+  if (eligible.length === 0) return { enqueued: [] };
+
+  if (!env.GEOGRAPHY_QUEUE) {
+    console.warn(
+      `[polymarket] GEOGRAPHY_QUEUE binding missing; ${eligible.length} ETF constituents enrichment jobs not queued`,
+    );
+    return { enqueued: [] };
   }
 
-  // Build ETF description strings including top-5 underlying stocks.
-  // This is the key context Grok needs to correctly reason about rate sensitivity:
-  // "PUST.PA" alone is opaque; "PUST.PA (Amundi NASDAQ-100: NVDA, AAPL, MSFT, AMZN, META)"
-  // makes DCF repricing obvious.
-  const etfIsins = etfHoldings.map((e) => e.isin).filter(Boolean) as string[];
-  const dbConstituentsByIsin: Record<string, { label: string; top5: string[] }> = {};
-
-  if (etfIsins.length > 0) {
-    const { data: constituentRows } = (await client
-      .from("etf_constituents")
-      .select("etf_isin,constituents")
-      .in("etf_isin", etfIsins)) as {
-      data: Array<{ etf_isin: string; constituents: Array<{ ticker: string; name: string }> }> | null;
-      error: unknown;
+  // Dedupe/backoff via geography_research_jobs, claimed ATOMICALLY per holding
+  // so overlapping fanouts cannot double-enqueue the same LLM job: a
+  // conditional UPDATE claims a stale row (any status — a recent
+  // completed/failed row means research ran and found nothing; retry daily,
+  // not on every fanout), and an INSERT claims a missing one, where a
+  // unique-violation means another fanout holds a recent claim.
+  const nowMs = Date.now();
+  const now = new Date(nowMs).toISOString();
+  const staleCutoff = new Date(
+    nowMs - CONSTITUENT_ENRICHMENT_BACKOFF_HOURS * 3_600_000,
+  ).toISOString();
+  const claimed: EtfConstituentGap[] = [];
+  for (const gap of eligible) {
+    const holdingId = String(gap.holdingId);
+    const jobRow = {
+      holding_id: holdingId,
+      portfolio_id: portfolioId,
+      status: "queued",
+      reason: "polymarket_constituents",
+      last_error: null,
+      started_at: null,
+      finished_at: null,
+      updated_at: now,
     };
-    for (const row of constituentRows ?? []) {
-      const top5 = (row.constituents ?? []).slice(0, 5).map((c) => c.ticker);
-      if (top5.length > 0) {
-        dbConstituentsByIsin[row.etf_isin] = { label: row.etf_isin, top5 };
-      }
+    const { data: updatedRows, error: updateError } = (await client
+      .from("geography_research_jobs")
+      .update(jobRow)
+      .eq("holding_id", holdingId)
+      .or(`updated_at.is.null,updated_at.lt.${staleCutoff}`)
+      .select("holding_id")) as {
+      data: Array<{ holding_id: string }> | null;
+      error: { message: string } | null;
+    };
+    if (updateError) {
+      throw new Error(
+        `[polymarket] constituents enrichment claim failed: ${updateError.message}`,
+      );
+    }
+    if (updatedRows && updatedRows.length > 0) {
+      claimed.push(gap);
+      continue;
+    }
+    const { error: insertError } = (await client
+      .from("geography_research_jobs")
+      .insert(jobRow)) as { error: { message: string; code?: string } | null };
+    if (!insertError) {
+      claimed.push(gap);
+      continue;
+    }
+    // 23505 = unique violation: a row with recent activity already exists
+    // (or a concurrent fanout inserted first) — back off, don't double-enqueue.
+    if (insertError.code === "23505") continue;
+    throw new Error(
+      `[polymarket] constituents enrichment job insert failed: ${insertError.message}`,
+    );
+  }
+  if (claimed.length === 0) return { enqueued: [] };
+
+  // Deliver, and make the claim reflect delivery: if a send rejects, release
+  // the claim so the next fanout retries immediately instead of the ETF
+  // sitting unenriched behind a 24h backoff with no message in flight. The
+  // status guard can't strand a concurrent geography-path message — that
+  // consumer re-upserts the row when it starts (markGeographyJobRunning).
+  const sendResults = await Promise.allSettled(
+    claimed.map((gap) =>
+      env.GEOGRAPHY_QUEUE!.send({
+        type: "geography_research",
+        portfolio_id: portfolioId,
+        holding_id: String(gap.holdingId),
+        reason: "polymarket_constituents",
+      }),
+    ),
+  );
+  const enqueued: string[] = [];
+  for (const [index, result] of sendResults.entries()) {
+    const gap = claimed[index];
+    const holdingId = String(gap.holdingId);
+    if (result.status === "fulfilled") {
+      enqueued.push(holdingId);
+      console.warn(
+        `[polymarket] ETF constituents coverage gap: ${gap.ticker} (${gap.isin}) has no etf_constituents row${gap.hasFallback ? " (hardcoded fallback used this run)" : ""} — enrichment enqueued`,
+      );
+      continue;
+    }
+    console.error(
+      `[polymarket] constituents enrichment send failed for ${gap.ticker} (holding ${holdingId}) — releasing claim:`,
+      result.reason,
+    );
+    const { error: releaseError } = (await client
+      .from("geography_research_jobs")
+      .delete()
+      .eq("holding_id", holdingId)
+      .eq("status", "queued")) as { error: { message: string } | null };
+    if (releaseError) {
+      console.error(
+        `[polymarket] constituents enrichment claim release failed for holding ${holdingId}: ${releaseError.message}`,
+      );
     }
   }
-
-  const etfDescriptions: string[] = [];
-  for (const etf of etfHoldings) {
-    const fromDb = etf.isin ? dbConstituentsByIsin[etf.isin] : undefined;
-    const fromFallback = ETF_UNDERLYING_LABELS[etf.ticker];
-    const info = fromDb ?? fromFallback;
-    if (info) {
-      etfDescriptions.push(`${etf.ticker} (${info.label}: ${info.top5.join(", ")})`);
-    } else {
-      etfDescriptions.push(etf.ticker);
-    }
-  }
-
-  // Sectors from etf_constituents (best-effort — table may be empty)
-  const sectorSet = new Set<string>();
-  if (etfIsins.length > 0) {
-    const { data: sectorRows } = (await client
-      .from("etf_constituents")
-      .select("top_sectors")
-      .in("etf_isin", etfIsins)) as { data: Array<{ top_sectors: unknown }> | null; error: unknown };
-    for (const row of sectorRows ?? []) {
-      const ts = (row.top_sectors as Array<{ sector: string }> | null) ?? [];
-      for (const s of ts.slice(0, 3)) sectorSet.add(s.sector);
-    }
-  }
-
-  const countries = geoRows.map((g) => g.country_name).filter(Boolean).slice(0, 5);
-
-  const profile: PortfolioProfile = {
-    tickers: directTickers.slice(0, 10),
-    etfDescriptions,
-    sectors: Array.from(sectorSet),
-    countries,
-  };
-
-  const profileSummary = [
-    profile.tickers.length > 0 ? `Direct holdings: ${profile.tickers.join(", ")}` : null,
-    profile.etfDescriptions.length > 0
-      ? `ETF exposure: ${profile.etfDescriptions.join(" | ")}`
-      : null,
-    profile.sectors.length > 0 ? `Sectors: ${profile.sectors.join(", ")}` : null,
-    profile.countries.length > 0 ? `Countries: ${profile.countries.join(", ")}` : null,
-  ]
-    .filter(Boolean)
-    .join(". ");
-
-  return { profile, profileSummary };
+  return { enqueued };
 }
 
 // ---------------------------------------------------------------------------
@@ -788,6 +789,7 @@ async function scoreRotatingCandidates(
   env: Env,
   profileSummary: string,
   candidates: FlatMarket[],
+  fetchImpl: typeof globalThis.fetch = globalThis.fetch,
 ): Promise<GrokScoringResult> {
   if (candidates.length === 0) return { scores: [], grokInvoked: false };
 
@@ -825,7 +827,7 @@ Return JSON array only. No sports, no entertainment, no individual political can
   const validIds = new Set(candidates.slice(0, ROTATING_BATCH_SIZE).map((m) => m.condition_id));
 
   try {
-    const raw = await invokeGrok(env, systemPrompt, userPrompt);
+    const raw = await invokeGrok(env, systemPrompt, userPrompt, fetchImpl);
     const items = extractJsonArray(raw);
     return {
       scores: items
@@ -914,7 +916,10 @@ export async function runPolymarketFanout(
   env: Env,
   options: PolymarketFanoutOptions = {},
 ): Promise<PolymarketFanoutResult> {
-  const client: AnySupabaseClient = createClient(env.SUPABASE_URL, env.SUPABASE_SERVICE_KEY);
+  const fetchImpl = options.fetch ?? globalThis.fetch;
+  const client: AnySupabaseClient = createClient(env.SUPABASE_URL, env.SUPABASE_SERVICE_KEY, {
+    global: { fetch: fetchImpl },
+  });
   const forceRescore = options.forceRescore === true;
   const { model, reasoningEffort } = getPolymarketGrokConfig(env);
 
@@ -929,34 +934,25 @@ export async function runPolymarketFanout(
     cacheHits: 0,
     fallbacks: 0,
     portfoliosWithoutHoldings: 0,
-    pinnedMatchesWritten: 0,
     rotatingMatchesWritten: 0,
   };
 
   // 1. Fetch and flatten candidate markets. A completely empty candidate pool
   // is fatal: continuing would eventually replace every portfolio feed with
   // an empty set. Let the scheduled/debug caller surface the failure instead.
-  const candidateMap = await fetchCandidateMarkets(env);
+  const candidateMap = await fetchCandidateMarkets(env, fetchImpl);
 
-  // 2. Fetch pinned events
-  let pinnedBySlug: Map<string, string>;
-  try {
-    pinnedBySlug = await fetchPinnedMarkets(env, candidateMap);
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    errors.push(`pinned fetch: ${msg}`);
-    pinnedBySlug = new Map();
-  }
-
-  // 3. Upsert all markets (prices + probabilities refresh every run)
+  // 2. Upsert all markets (prices + probabilities refresh every run)
   const allMarkets = Array.from(candidateMap.values());
   await upsertMarkets(client, allMarkets);
   console.log(`[polymarket] upserted ${allMarkets.length} markets`);
 
-  // 4. Collect pinned condition_ids
-  const pinnedConditionIds = new Set(pinnedBySlug.values());
+  // 2b. Deactivate resolved/stale markets so they stop rendering in feeds,
+  // regardless of whether they're still pinned or matched to a portfolio.
+  const marketsDeactivated = await deactivateStaleMarkets(client);
+  console.log(`[polymarket] deactivated ${marketsDeactivated} resolved/stale markets`);
 
-  // 5. Fetch all portfolios
+  // 3. Fetch all portfolios
   const { data: portfoliosData, error: portfoliosError } = await client
     .from("portfolios")
     .select("id,user_id");
@@ -965,7 +961,7 @@ export async function runPolymarketFanout(
     errors.push(`portfolios fetch: ${portfoliosError?.message ?? "no data"}`);
     return {
       marketsUpserted: allMarkets.length,
-      pinnedSlugsFound: pinnedBySlug.size,
+      marketsDeactivated,
       portfoliosProcessed,
       portfoliosSkipped,
       curation,
@@ -975,23 +971,18 @@ export async function runPolymarketFanout(
 
   const portfolios = portfoliosData as PortfolioRow[];
 
-  // Rotating candidates = all markets NOT pinned.
   // Collapse multi-bucket events (e.g. "How many Fed cuts?") to a SINGLE
   // representative market — the highest-Yes bucket (consensus answer) — BEFORE
   // Grok scoring. Otherwise Grok sees all 13 buckets of one event and may pick
   // a lopsided near-zero bucket ("Will 7 cuts happen?" at 100% No) instead of
   // the meaningful one ("Will 0 cuts happen?" at 67% Yes).
-  // Drop near-certain markets (≥97% on the leading side) — a market at 100%
-  // Yes / 99% No is resolved-in-all-but-name and carries no information. This
-  // strips noise like "Will MSFT hit $435 in May? 100% Yes" before it reaches Grok.
-  const MAX_CERTAIN_PROB = 0.97;
+  // Drop near-certain markets (see isNearCertainMarket) so noise like
+  // "Will MSFT hit $435 in May? 100% Yes" never reaches Grok.
   const consensusByEvent = new Map<string, FlatMarket>();
   for (const m of allMarkets) {
-    if (pinnedConditionIds.has(m.condition_id)) continue;
     // Drop weekly/daily price-target gambling markets (short duration)
     if (isShortTermMarket(m.start_date, m.end_date)) continue;
-    const topProb = Math.max(...m.outcome_prices, 0);
-    if (topProb >= MAX_CERTAIN_PROB) continue;
+    if (isNearCertainMarket(m.outcome_prices)) continue;
     const key = m.event_id || m.condition_id;
     const existing = consensusByEvent.get(key);
     if (!existing || getYesProb(m) > getYesProb(existing)) {
@@ -1013,36 +1004,33 @@ export async function runPolymarketFanout(
     env.GROK_NORMALIZATION_API_KEY
   );
 
-  // 6. Per-portfolio scoring
+  // 4. Per-portfolio scoring
   for (const portfolio of portfolios) {
     const portfolioId = portfolio.id;
 
     try {
-      // 6a. Upsert pinned matches
-      if (pinnedConditionIds.size > 0) {
-        const pinnedRows: PortfolioMarketSelection[] = Array.from(pinnedConditionIds).map(
-          (conditionId) => ({
-            condition_id: conditionId,
-            score: null,
-            reason: null,
-            is_pinned: true,
-          }),
-        );
-        await upsertThenPrunePortfolioMatches(client, portfolioId, pinnedRows);
-        curation.pinnedMatchesWritten += pinnedRows.length;
-      }
-
-      // 6b. Holdings-hash cache check — skip Grok if holdings unchanged AND cache is fresh
+      // 4a. Holdings-hash cache check — skip Grok if holdings unchanged AND cache is fresh
       const { data: holdingsData } = await client
         .from("holdings")
-        .select("ticker,isin,asset_type,name,quantity")
+        .select("id,ticker,isin,asset_type,name,quantity")
         .eq("portfolio_id", portfolioId)
         .gt("quantity", 0);
 
       const holdings: HoldingRow[] = (holdingsData as HoldingRow[] | null) ?? [];
 
       if (holdings.length === 0) {
-        // Portfolio has no holdings — skip scoring entirely
+        // Portfolio has no holdings — sweep legacy pinned rows, skip scoring
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const { error: legacySweepError } = (await (client as any)
+          .from("portfolio_polymarket_matches")
+          .delete()
+          .eq("portfolio_id", portfolioId)
+          .eq("is_pinned", true)) as { error: { message: string } | null };
+        if (legacySweepError) {
+          throw new Error(
+            `[polymarket] legacy pinned-match sweep failed for portfolio ${portfolioId}: ${legacySweepError.message}`,
+          );
+        }
         curation.portfoliosWithoutHoldings++;
         portfoliosProcessed++;
         continue;
@@ -1078,7 +1066,7 @@ export async function runPolymarketFanout(
         continue;
       }
 
-      // 6c. Cache miss or stale — run full profile build + Grok scoring
+      // 4b. Cache miss or stale — run full profile build + Grok scoring
       console.log(
         `[polymarket] ${forceRescore ? "forced rescore" : "cache miss"} for portfolio ${portfolioId} (hashChanged=${cacheRow?.holdings_hash !== currentHash}, age=${cacheAgeHours.toFixed(1)}h) — scoring`,
       );
@@ -1095,8 +1083,25 @@ export async function runPolymarketFanout(
           reason: null,
         }));
       } else {
-        const { profileSummary } = await buildPortfolioProfile(client, portfolioId, holdings);
+        const { profileSummary, constituentGaps } = await buildPortfolioProfile(
+          client,
+          portfolioId,
+          holdings,
+        );
         profileSummaryForCache = profileSummary;
+
+        // Self-heal ETF constituents coverage in the background. Best-effort:
+        // an enqueue failure must never break this portfolio's curation.
+        if (constituentGaps.length > 0) {
+          try {
+            await enqueueEtfConstituentsEnrichment(env, client, portfolioId, constituentGaps);
+          } catch (err) {
+            console.error(
+              `[polymarket] constituents enrichment enqueue failed for portfolio ${portfolioId}:`,
+              err,
+            );
+          }
+        }
 
         // --- LangSmith tracing (additive, attributed to this portfolio/user) ---
         // One run per portfolio per fanout. portfolio_id + user_id in the inputs
@@ -1132,9 +1137,9 @@ export async function runPolymarketFanout(
         try {
           scoringResult = curationRun
             ? await withRunTree(curationRun, () =>
-                scoreRotatingCandidates(env, profileSummary, rotatingCandidates),
+                scoreRotatingCandidates(env, profileSummary, rotatingCandidates, fetchImpl),
               )
-            : await scoreRotatingCandidates(env, profileSummary, rotatingCandidates);
+            : await scoreRotatingCandidates(env, profileSummary, rotatingCandidates, fetchImpl);
         } catch (err) {
           if (curationRun && lsClient) {
             try {
@@ -1183,7 +1188,7 @@ export async function runPolymarketFanout(
         }
       }
 
-      // 6d. Upsert the replacement first, then prune stale rows. Never advance
+      // 4c. Upsert the replacement first, then prune stale rows. Never advance
       // the cache until this succeeds, otherwise a failed write would suppress
       // retries for six hours.
       if (scored.length === 0) {
@@ -1196,7 +1201,6 @@ export async function runPolymarketFanout(
         condition_id: item.condition_id,
         score: item.score,
         reason: item.reason || null,
-        is_pinned: false,
       }));
       await upsertThenPrunePortfolioMatches(client, portfolioId, rotatingRows);
       curation.rotatingMatchesWritten += rotatingRows.length;
@@ -1234,7 +1238,7 @@ export async function runPolymarketFanout(
 
   const result = {
     marketsUpserted: allMarkets.length,
-    pinnedSlugsFound: pinnedBySlug.size,
+    marketsDeactivated,
     portfoliosProcessed,
     portfoliosSkipped,
     curation,
