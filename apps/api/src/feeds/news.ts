@@ -69,22 +69,19 @@ const PENDING_PAGE_SIZE = 200;
 const MAX_PENDING_PAGES_PER_RUN = 2;
 const PRIOR_COMPANY_CHUNK_SIZE = 125;
 const MAX_PRIOR_COMPANY_CHUNKS = 4;
-const MAX_COMPANY_SENTIMENT_SUBREQUESTS =
-  1 + MAX_COMPANY_SENTIMENT_ATTEMPTS * (MAX_PENDING_PAGES_PER_RUN + MAX_PRIOR_COMPANY_CHUNKS + 3);
-const MAX_FIXED_FANOUT_SUBREQUESTS = 11;
 const MAX_POST_SEARCH_SUBREQUESTS = 31;
+const MAX_COMPANY_SEARCH_REQUESTS = MAX_RETRIES * 2;
 export const MAX_COMPANY_SEARCHES_PER_RUN = Math.max(
   1,
   Math.floor(
     (NEWS_SUBREQUEST_BUDGET -
-      MAX_MARKET_TOPICS -
-      MAX_FIXED_FANOUT_SUBREQUESTS -
-      MAX_COMPANY_SENTIMENT_SUBREQUESTS) /
-      2,
+      MAX_POST_SEARCH_SUBREQUESTS -
+      MAX_RETRIES) /
+      MAX_COMPANY_SEARCH_REQUESTS,
   ),
 );
 const FANOUT_WINDOW = MAX_COMPANY_SEARCHES_PER_RUN;
-export const NEWS_CRON_SLOTS = ["30 6 * * 2-6", "30 16 * * 1-5", "0 21 * * 1-5"] as const;
+export const NEWS_CRON_SLOTS = ["30 6 * * 2-6", "30 16 * * 2-6", "0 21 * * 2-6"] as const;
 const WEEK_MS = 7 * 24 * 3_600_000;
 const MONDAY_EPOCH_MS = Date.UTC(1970, 0, 5);
 const NEWS_RUN_MINUTES_OF_WEEK = NEWS_CRON_SLOTS.flatMap((cron) => {
@@ -1213,7 +1210,7 @@ interface ClusterAccum {
 
 export async function runNewsFanout(
   env: Env,
-  options: { availableSubrequests?: number; fetch?: NewsFetch } = {},
+  options: { availableSubrequests?: number; fetch?: NewsFetch; scheduledTime?: number } = {},
 ): Promise<{
   distinctCompaniesQueried: number;
   marketTopicsQueried: number;
@@ -1280,7 +1277,7 @@ export async function runNewsFanout(
     console.error("[news] market work-list failed:", msg);
     errors.push(`market work-list: ${msg}`);
   }
-  const rotationNow = Date.now();
+  const rotationNow = options.scheduledTime ?? Date.now();
   const marketCandidates = [...marketList.values()].sort((a, b) =>
     a.canonicalKey < b.canonicalKey ? -1 : a.canonicalKey > b.canonicalKey ? 1 : 0,
   );
@@ -1289,25 +1286,15 @@ export async function runNewsFanout(
   const allCompanies = [...workList.values()].sort((a, b) =>
     a.canonicalKey < b.canonicalKey ? -1 : a.canonicalKey > b.canonicalKey ? 1 : 0,
   );
-  const companySearchLimit = Math.min(
-    FANOUT_WINDOW,
-    Math.max(
-      1,
-      Math.floor(
-        (availableSubrequests -
-          MAX_MARKET_TOPICS -
-          MAX_FIXED_FANOUT_SUBREQUESTS -
-          MAX_COMPANY_SENTIMENT_SUBREQUESTS) /
-          2,
-      ),
-    ),
-  );
-  const companies = selectRotatingWindow(allCompanies, companySearchLimit, rotationNow);
-
   const userLocation = deriveUserLocation(workList);
   budget.reserve(MAX_POST_SEARCH_SUBREQUESTS);
   const marketSearchReservation = marketCandidates.length > 0 ? MAX_RETRIES : 0;
   if (marketSearchReservation > 0) budget.reserve(marketSearchReservation);
+  const companySearchLimit = Math.min(
+    FANOUT_WINDOW,
+    Math.floor(budget.availableSearchSubrequests() / MAX_COMPANY_SEARCH_REQUESTS),
+  );
+  const companies = selectRotatingWindow(allCompanies, companySearchLimit, rotationNow);
 
   // --- Phase 1: FETCH — collect results, no DB writes (N..2N+M subrequests) --
   const pendingClusters = new Map<string, PendingCluster>();

@@ -76,8 +76,9 @@ max_retries = 2
 [triggers]
 # Hourly cron for scheduled fanout. Actual per-portfolio run times are selected
 # in code based on user timezone + effective runs/day setting.
-# News + Polymarket fanouts piggyback on these same crons (no separate entry
-# needed — they fire on every scheduled() invocation). Free plan cap: 5 crons.
+# News enqueues a tagged message on three of these slots; Polymarket and the
+# scheduled portfolio fanout still piggyback on scheduled() invocations.
+# Free plan cap: 5 crons.
 crons = [
   "5 * * * *",
   "30 6 * * 2-6",

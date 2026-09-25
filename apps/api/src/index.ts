@@ -33,7 +33,11 @@ import {
 } from "./feeds/polymarket";
 import { generateRecap } from "./feeds/recaps";
 import { langsmithClient } from "./llm/langsmith";
-import type { RecapQueueMessage, RecapType } from "./feeds/recap-types";
+import type {
+  NewsFanoutQueueMessage,
+  RecapQueueMessage,
+  RecapType,
+} from "./feeds/recap-types";
 
 export interface Env {
   SUPABASE_URL: string;
@@ -2096,8 +2100,14 @@ function isGeographyQueueMessage(message: WorkerQueueMessage): message is Geogra
   return "type" in message && message.type === "geography_research";
 }
 
-function isRecapQueueMessage(message: WorkerQueueMessage): message is RecapQueueMessage {
+function isRecapQueueMessage(
+  message: WorkerQueueMessage,
+): message is Extract<RecapQueueMessage, { recapId: string }> {
   return "recapId" in message;
+}
+
+function isNewsFanoutQueueMessage(message: WorkerQueueMessage): message is NewsFanoutQueueMessage {
+  return "type" in message && message.type === "news_fanout";
 }
 
 async function fetchHistoricalPrices(
@@ -5888,6 +5898,19 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
   },
   async scheduled(controller: ScheduledController, env: Env, _ctx: ExecutionContext): Promise<void> {
     return withInvocationSubrequestBudget(async (invocationBudget) => {
+      if (NEWS_CRON_SLOTS.some((slot) => slot === controller.cron)) {
+        try {
+          if (!env.RECAP_QUEUE) {
+            throw new Error("Server misconfiguration: RECAP_QUEUE binding is missing");
+          }
+          await env.RECAP_QUEUE.send({
+            type: "news_fanout",
+            scheduledTime: controller.scheduledTime,
+          });
+        } catch (error) {
+          console.error("news fanout enqueue failed", error);
+        }
+      }
       try {
         await runScheduledFanout(env, {
           now: new Date(controller.scheduledTime),
@@ -5905,19 +5928,6 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
         );
       } catch (error) {
         console.error("daily snapshot fanout failed", error);
-      }
-      // News fanout — decoupled from the hourly cron to a few times/day to limit
-      // Firecrawl credits. Runs only on these cron slots (not "5 * * * *"): weekday
-      // morning, afternoon, and evening. Manual runs go via /api/_debug/run-news-fanout.
-      if (NEWS_CRON_SLOTS.some((slot) => slot === controller.cron)) {
-        try {
-          await runNewsFanout(env, {
-            availableSubrequests: invocationBudget.remaining(),
-            fetch: invocationBudget.fetch,
-          });
-        } catch (error) {
-          console.error("news fanout failed", error);
-        }
       }
       try {
         await runPolymarketFanout(env, { fetch: invocationBudget.fetch });
@@ -6010,6 +6020,17 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
         } catch (error) {
           await markGeographyJobsFailed(env, message.body.portfolio_id, holdingIds, error);
           console.error(`geography queue failed for portfolio ${message.body.portfolio_id}`, error);
+          message.retry();
+        }
+        continue;
+      }
+
+      if (isNewsFanoutQueueMessage(message.body)) {
+        try {
+          await runNewsFanout(env, { scheduledTime: message.body.scheduledTime });
+          message.ack();
+        } catch (error) {
+          console.error("news fanout queue failed", error);
           message.retry();
         }
         continue;

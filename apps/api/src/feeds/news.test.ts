@@ -571,6 +571,38 @@ describe("runNewsFanout — ETF-derived market coverage", () => {
     expect(state.subrequestCount).toBeLessThanOrEqual(40);
   });
 
+  it("uses the queued scheduled time when a news consumer is delayed", async () => {
+    state.holdings = Array.from({ length: 100 }, (_, i) => ({
+      id: `h-company-${i}`,
+      ticker: `C${i}`,
+      isin: null,
+      asset_type: "EQUITY",
+      name: `Company ${i}`,
+      quantity: 1,
+      portfolio_id: `portfolio-${i}`,
+    }));
+    const scheduledTime = Date.UTC(2026, 8, 21, 16, 30);
+    const delayedUntil = Date.UTC(2026, 8, 21, 21, 0);
+    vi.useFakeTimers();
+    vi.setSystemTime(delayedUntil);
+    try {
+      await runNewsFanout(env, { scheduledTime });
+    } finally {
+      vi.useRealTimers();
+    }
+
+    const expected = selectRotatingWindow(
+      [...state.holdings]
+        .sort((a, b) => a.ticker.localeCompare(b.ticker))
+        .map((holding) => holding.name),
+      MAX_COMPANY_SEARCHES_PER_RUN,
+      scheduledTime,
+    );
+    expect(expected.every((company) => state.searchQueries.some((query) => query.includes(company)))).toBe(
+      true,
+    );
+  });
+
   it("counts physical Firecrawl retries and degrades before the hard budget", async () => {
     vi.useFakeTimers();
     state.holdings = Array.from({ length: 100 }, (_, i) => ({
@@ -802,8 +834,8 @@ describe("resolveSentimentsForRow", () => {
 
 describe("selectRotatingWindow", () => {
   it("reaches all 12 companies across the actual weekday news cron slots", () => {
-    expect(NEWS_CRON_SLOTS).toEqual(["30 6 * * 2-6", "30 16 * * 1-5", "0 21 * * 1-5"]);
-    expect(MAX_COMPANY_SEARCHES_PER_RUN).toBe(4);
+    expect(NEWS_CRON_SLOTS).toEqual(["30 6 * * 2-6", "30 16 * * 2-6", "0 21 * * 2-6"]);
+    expect(MAX_COMPANY_SEARCHES_PER_RUN).toBe(2);
     const entries = Array.from({ length: 12 }, (_, i) => `company-${i}`);
     const monday = Date.UTC(2026, 8, 21);
     const slots: Array<[number, number, number]> = [

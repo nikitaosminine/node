@@ -6,7 +6,11 @@ vi.mock("@supabase/supabase-js", () => ({
   createClient: vi.fn(() => ({ from: dbFrom })),
 }));
 
-import { researchPortfolioEtfGeography, type Env, withInvocationSubrequestBudget } from "./index";
+import worker, {
+  researchPortfolioEtfGeography,
+  type Env,
+  withInvocationSubrequestBudget,
+} from "./index";
 
 const env = {
   SUPABASE_URL: "https://supabase.example",
@@ -216,5 +220,48 @@ describe("withInvocationSubrequestBudget", () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(51);
     expect(globalThis.fetch).toBe(fetchMock);
+  });
+});
+
+describe("scheduled news queue handoff", () => {
+  it("enqueues news before the shared scheduled work can consume its budget", async () => {
+    const sent: unknown[] = [];
+    const queueEnv = {
+      ...env,
+      RECAP_QUEUE: { send: vi.fn(async (message: unknown) => sent.push(message)) },
+    } as unknown as Env;
+
+    await worker.scheduled(
+      {
+        cron: "30 16 * * 2-6",
+        scheduledTime: Date.UTC(2026, 8, 21, 16, 30),
+      } as ScheduledController,
+      queueEnv,
+      {} as ExecutionContext,
+    );
+
+    expect(sent).toEqual([
+      { type: "news_fanout", scheduledTime: Date.UTC(2026, 8, 21, 16, 30) },
+    ]);
+  });
+
+  it("acks a news queue delivery safely when the configured provider is absent", async () => {
+    const ack = vi.fn();
+    const retry = vi.fn();
+    await worker.queue(
+      {
+        messages: [
+          {
+            body: { type: "news_fanout", scheduledTime: Date.UTC(2026, 8, 21, 16, 30) },
+            ack,
+            retry,
+          },
+        ],
+      } as unknown as Parameters<typeof worker.queue>[0],
+      env,
+    );
+
+    expect(ack).toHaveBeenCalledOnce();
+    expect(retry).not.toHaveBeenCalled();
   });
 });
