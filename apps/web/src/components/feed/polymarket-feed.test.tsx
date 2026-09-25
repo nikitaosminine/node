@@ -62,6 +62,19 @@ function mockFeedResponse(rotating: unknown[]) {
   );
 }
 
+function getListItem(text: string) {
+  return screen.getByText(text, { exact: true }).closest("li") as HTMLElement;
+}
+
+function expectDomOrder(...elements: HTMLElement[]) {
+  for (let index = 0; index < elements.length - 1; index += 1) {
+    expect(
+      elements[index].compareDocumentPosition(elements[index + 1]) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  }
+}
+
 describe("PolymarketFeed", () => {
   beforeEach(() => {
     vi.spyOn(Date, "now").mockReturnValue(TEST_NOW);
@@ -73,7 +86,7 @@ describe("PolymarketFeed", () => {
     vi.restoreAllMocks();
   });
 
-  it("shows honest mixed fallback treatment and never renders the retired resolved label", async () => {
+  it("renders curated rows before the fallback heading and fallback rows", async () => {
     const fallback = market({
       condition_id: "fallback",
       question: "Fallback market",
@@ -94,14 +107,86 @@ describe("PolymarketFeed", () => {
       await screen.findByText("Trending on Polymarket — personalization is catching up"),
     ).toBeInTheDocument();
 
-    const fallbackRow = screen.getByText("Fallback market").closest("a");
+    const fallbackRow = getListItem("Fallback market");
     expect(fallbackRow).not.toBeNull();
-    expect(fallbackRow).toHaveClass("opacity-70");
+    expect(fallbackRow.querySelector("a")).toHaveClass("opacity-70");
 
-    const curatedRow = screen.getByText("Curated market").closest("a");
+    const curatedRow = getListItem("Curated market");
     expect(curatedRow).not.toBeNull();
-    expect(within(curatedRow as HTMLElement).getByText("Relevant to your holdings")).toBeVisible();
+    expect(within(curatedRow).getByText("Relevant to your holdings")).toBeVisible();
+    expectDomOrder(
+      curatedRow,
+      getListItem("Trending on Polymarket — personalization is catching up"),
+      fallbackRow,
+    );
     expect(screen.queryByText("Resolved")).toBeNull();
+  });
+
+  it("shows the fallback heading for fallback-only personalized results", async () => {
+    const fallback = market({
+      condition_id: "fallback-only",
+      question: "Fallback-only market",
+      fetched_at: "2026-08-16T11:55:00.000Z",
+      end_date: "2026-08-17T12:00:00.000Z",
+    });
+    mockFeedResponse([match(fallback, 0, null)]);
+
+    render(<PolymarketFeed portfolioId="portfolio-1" />);
+
+    const heading = await screen.findByText(
+      "Trending on Polymarket — personalization is catching up",
+    );
+    expect(heading).toBeInTheDocument();
+    expect(getListItem("Fallback-only market").querySelector("a")).toHaveClass("opacity-70");
+  });
+
+  it("omits the fallback heading for curated-only personalized results", async () => {
+    const curated = market({
+      condition_id: "curated-only",
+      question: "Curated-only market",
+      fetched_at: "2026-08-16T11:55:00.000Z",
+      end_date: "2026-08-17T12:00:00.000Z",
+    });
+    mockFeedResponse([match(curated, 0.8, "Relevant to your holdings")]);
+
+    render(<PolymarketFeed portfolioId="portfolio-1" />);
+
+    expect(await screen.findByText("Curated-only market")).toBeInTheDocument();
+    expect(screen.queryByText("Trending on Polymarket — personalization is catching up")).toBeNull();
+  });
+
+  it("updates fallback heading visibility when search filters rotating rows", async () => {
+    const fallback = market({
+      condition_id: "search-fallback",
+      question: "Fallback search market",
+      fetched_at: "2026-08-16T11:55:00.000Z",
+      end_date: "2026-08-17T12:00:00.000Z",
+    });
+    const curated = market({
+      condition_id: "search-curated",
+      question: "Curated search market",
+      fetched_at: "2026-08-16T11:55:00.000Z",
+      end_date: "2026-08-17T12:00:00.000Z",
+    });
+    mockFeedResponse([match(fallback, 0, null), match(curated, 0.8, "Relevant to your holdings")]);
+
+    render(<PolymarketFeed portfolioId="portfolio-1" />);
+    await screen.findByText("Fallback search market");
+
+    fireEvent.click(screen.getByRole("button", { name: "Search" }));
+    const searchInput = screen.getByPlaceholderText("Search markets…");
+
+    fireEvent.change(searchInput, { target: { value: "Curated search" } });
+    expect(screen.getByText("Curated search market")).toBeInTheDocument();
+    expect(screen.queryByText("Fallback search market")).toBeNull();
+    expect(screen.queryByText("Trending on Polymarket — personalization is catching up")).toBeNull();
+
+    fireEvent.change(searchInput, { target: { value: "Fallback search" } });
+    expect(screen.getByText("Fallback search market")).toBeInTheDocument();
+    expect(screen.queryByText("Curated search market")).toBeNull();
+    expect(
+      screen.getByText("Trending on Polymarket — personalization is catching up"),
+    ).toBeInTheDocument();
   });
 
   it("suppresses a non-null reason when the real fallback predicate marks the row", () => {

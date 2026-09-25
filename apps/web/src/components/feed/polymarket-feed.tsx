@@ -451,7 +451,8 @@ export function PolymarketFeed({ portfolioId }: PolymarketFeedProps) {
   } else if (isPersonalized) {
     // Curation failed for this batch: the fanout fell back to top-by-volume rows.
     // Detected read-side (score=0 + reason=null) until the `source` column ships.
-    const rotatingHasFallback = rotatingFiltered.some(isFallbackMatch);
+    const rotatingCurated = rotatingFiltered.filter((match) => !isFallbackMatch(match));
+    const rotatingFallback = rotatingFiltered.filter(isFallbackMatch);
     body = (
       <>
         {pinnedFiltered.map((match) => (
@@ -462,18 +463,26 @@ export function PolymarketFeed({ portfolioId }: PolymarketFeedProps) {
             reason={match.reason}
           />
         ))}
-        {rotatingHasFallback && (
-          <li className="px-5 py-2 text-[10px] font-semibold uppercase tracking-[0.12em] text-foreground-muted/60">
-            Trending on Polymarket — personalization is catching up
-          </li>
-        )}
-        {rotatingFiltered.map((match) => (
+        {rotatingCurated.map((match) => (
           <MarketRow
             key={match.polymarket_markets.condition_id}
             market={match.polymarket_markets}
             isPinned={false}
-            reason={isFallbackMatch(match) ? null : match.reason}
-            muted={isFallbackMatch(match)}
+            reason={match.reason}
+          />
+        ))}
+        {rotatingFallback.length > 0 && (
+          <li className="px-5 py-2 text-[10px] font-semibold uppercase tracking-[0.12em] text-foreground-muted/60">
+            Trending on Polymarket — personalization is catching up
+          </li>
+        )}
+        {rotatingFallback.map((match) => (
+          <MarketRow
+            key={match.polymarket_markets.condition_id}
+            market={match.polymarket_markets}
+            isPinned={false}
+            reason={null}
+            muted
           />
         ))}
         {pinnedFiltered.length === 0 && rotatingFiltered.length === 0 && (
