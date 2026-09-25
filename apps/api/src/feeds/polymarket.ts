@@ -132,6 +132,8 @@ export interface PolymarketFanoutOptions {
 export interface PolymarketFanoutResult {
   marketsUpserted: number;
   marketsDeactivated: number;
+  priceSnapshotsWritten: number;
+  priceHistorySwept: number;
   portfoliosProcessed: number;
   portfoliosSkipped: number;
   curation: {
@@ -146,7 +148,6 @@ export interface PolymarketFanoutResult {
   };
   errors: string[];
 }
-
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -177,6 +178,11 @@ const POLYMARKET_GROK_REASONING_EFFORTS = new Set<PolymarketGrokReasoningEffort>
 // Cache TTL: skip Grok re-scoring if holdings haven't changed AND last scored < 6h ago.
 // Market prices still refresh on every fanout run — only the per-portfolio LLM call is cached.
 const CACHE_TTL_HOURS = 6;
+
+// Retention window for polymarket_price_history. A fixed TTL sweep (mirroring
+// news_clusters, see news.ts) bounds table growth without downsampling; 90
+// days comfortably covers weekly/monthly movement comparisons.
+export const PRICE_HISTORY_RETENTION_DAYS = 90;
 
 // ---------------------------------------------------------------------------
 // Non-financial market filter — applied before Grok to prevent LLM from
@@ -473,10 +479,7 @@ export async function fetchCandidateMarkets(env: Env): Promise<Map<string, FlatM
 // Upsert markets into polymarket_markets
 // ---------------------------------------------------------------------------
 
-async function upsertMarkets(
-  client: AnySupabaseClient,
-  markets: FlatMarket[],
-): Promise<void> {
+async function upsertMarkets(client: AnySupabaseClient, markets: FlatMarket[]): Promise<void> {
   if (markets.length === 0) return;
 
   const rows = markets.map((m) => ({
@@ -529,9 +532,7 @@ const STALE_FANOUT_WINDOW_HOURS = 48;
  */
 async function deactivateStaleMarkets(client: AnySupabaseClient): Promise<number> {
   const nowIso = new Date().toISOString();
-  const staleCutoffIso = new Date(
-    Date.now() - STALE_FANOUT_WINDOW_HOURS * 3_600_000,
-  ).toISOString();
+  const staleCutoffIso = new Date(Date.now() - STALE_FANOUT_WINDOW_HOURS * 3_600_000).toISOString();
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const { data, error } = (await (client as any)
@@ -539,12 +540,64 @@ async function deactivateStaleMarkets(client: AnySupabaseClient): Promise<number
     .update({ active: false })
     .eq("active", true)
     .or(`end_date.lt.${nowIso},fetched_at.lt.${staleCutoffIso}`)
-    .select("condition_id")) as { data: { condition_id: string }[] | null; error: { message: string } | null };
+    .select("condition_id")) as {
+    data: { condition_id: string }[] | null;
+    error: { message: string } | null;
+  };
 
   if (error) {
     throw new Error(`[polymarket] failed to deactivate stale markets: ${error.message}`);
   }
   return (data ?? []).length;
+}
+
+// ---------------------------------------------------------------------------
+// Price history — append-only snapshots of outcome_prices for movement
+// tracking. One row per active market per fanout run, batched into a single
+// insert call (mind the Cloudflare Workers subrequest budget).
+// ---------------------------------------------------------------------------
+
+export async function insertPriceSnapshots(
+  client: AnySupabaseClient,
+  markets: FlatMarket[],
+): Promise<number> {
+  const activeMarkets = markets.filter((m) => m.active);
+  if (activeMarkets.length === 0) return 0;
+
+  const rows = activeMarkets.map((m) => ({
+    condition_id: m.condition_id,
+    outcome_prices: m.outcome_prices,
+    volume_24hr: m.volume_24hr,
+  }));
+
+  const CHUNK = 500;
+  for (let i = 0; i < rows.length; i += CHUNK) {
+    const chunk = rows.slice(i, i + CHUNK);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { error } = (await (client as any).from("polymarket_price_history").insert(chunk)) as {
+      error: { message: string } | null;
+    };
+    if (error) {
+      throw new Error(
+        `[polymarket] price history insert batch failed (${i}–${i + chunk.length}): ${error.message}`,
+      );
+    }
+  }
+
+  return rows.length;
+}
+
+export async function sweepExpiredPriceHistory(client: AnySupabaseClient): Promise<number> {
+  const cutoff = new Date(Date.now() - PRICE_HISTORY_RETENTION_DAYS * 86_400_000).toISOString();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const { count, error } = (await (client as any)
+    .from("polymarket_price_history")
+    .delete({ count: "exact" })
+    .lt("snapshotted_at", cutoff)) as { count: number | null; error: { message: string } | null };
+  if (error) {
+    throw new Error(`[polymarket] price history sweep failed: ${error.message}`);
+  }
+  return count ?? 0;
 }
 
 interface PortfolioMarketSelection {
@@ -704,9 +757,7 @@ export async function enqueueEtfConstituentsEnrichment(
       error: { message: string } | null;
     };
     if (updateError) {
-      throw new Error(
-        `[polymarket] constituents enrichment claim failed: ${updateError.message}`,
-      );
+      throw new Error(`[polymarket] constituents enrichment claim failed: ${updateError.message}`);
     }
     if (updatedRows && updatedRows.length > 0) {
       claimed.push(gap);
@@ -924,6 +975,17 @@ export async function runPolymarketFanout(
     rotatingMatchesWritten: 0,
   };
 
+  let priceSnapshotsWritten = 0;
+  let priceHistorySwept = 0;
+  try {
+    priceHistorySwept = await sweepExpiredPriceHistory(client);
+    console.log(`[polymarket] swept ${priceHistorySwept} expired price history rows`);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    errors.push(`price history sweep: ${msg}`);
+    console.error("[polymarket] price history sweep failed:", msg);
+  }
+
   // 1. Fetch and flatten candidate markets. A completely empty candidate pool
   // is fatal: continuing would eventually replace every portfolio feed with
   // an empty set. Let the scheduled/debug caller surface the failure instead.
@@ -939,7 +1001,17 @@ export async function runPolymarketFanout(
   const marketsDeactivated = await deactivateStaleMarkets(client);
   console.log(`[polymarket] deactivated ${marketsDeactivated} resolved/stale markets`);
 
-  // 3. Fetch all portfolios
+  // 3. Snapshot prices for history. The write is independently non-fatal so
+  // a history-write failure cannot block market matching.
+  try {
+    priceSnapshotsWritten = await insertPriceSnapshots(client, allMarkets);
+    console.log(`[polymarket] wrote ${priceSnapshotsWritten} price snapshots`);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    errors.push(`price history insert: ${msg}`);
+    console.error("[polymarket] price history insert failed:", msg);
+  }
+  // 4. Fetch all portfolios
   const { data: portfoliosData, error: portfoliosError } = await client
     .from("portfolios")
     .select("id,user_id");
@@ -949,6 +1021,8 @@ export async function runPolymarketFanout(
     return {
       marketsUpserted: allMarkets.length,
       marketsDeactivated,
+      priceSnapshotsWritten,
+      priceHistorySwept,
       portfoliosProcessed,
       portfoliosSkipped,
       curation,
@@ -1226,6 +1300,8 @@ export async function runPolymarketFanout(
   const result = {
     marketsUpserted: allMarkets.length,
     marketsDeactivated,
+    priceSnapshotsWritten,
+    priceHistorySwept,
     portfoliosProcessed,
     portfoliosSkipped,
     curation,
