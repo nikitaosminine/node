@@ -257,7 +257,10 @@ describe("non-LLM Polymarket delivery filter", () => {
     );
     expect(isNonLlmDeliveryExcluded("Will Trump be the nominee for president?")).toBe(true);
     expect(isNonLlmDeliveryExcluded("Will Trump win the nomination?", [{ id: 2 }])).toBe(true);
-    expect(isNonLlmDeliveryExcluded("Will Trump become the nominee?")).toBe(true);
+    expect(isNonLlmDeliveryExcluded("Will Trump become the nominee?")).toBe(false);
+    expect(isNonLlmDeliveryExcluded("Will Trump become the nominee?", [{ id: 2 }])).toBe(true);
+    expect(isNonLlmDeliveryExcluded("Will Acme become the nominee?")).toBe(false);
+    expect(isNonLlmDeliveryExcluded("Will Acme become the nominee?", [{ id: 2 }])).toBe(true);
     expect(isNonLlmDeliveryExcluded("Will Trump win the nomination for president?")).toBe(true);
     expect(isNonLlmDeliveryExcluded("Will Trump be nominated for president?")).toBe(true);
     expect(isNonLlmDeliveryExcluded("Will a candidate be nominated for governor?")).toBe(true);
