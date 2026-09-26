@@ -263,6 +263,7 @@ describe("non-LLM Polymarket delivery filter", () => {
     expect(isNonLlmDeliveryExcluded("Will primary dealers absorb the new bond supply?")).toBe(
       false,
     );
+    expect(isNonLlmDeliveryExcluded("Will the Fed be a primary dealer in 2028?")).toBe(false);
     expect(
       isNonLlmDeliveryExcluded("Will Democratic Republic of Congo primary bond issuance rise?"),
     ).toBe(false);

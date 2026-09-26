@@ -561,6 +561,7 @@ export async function gatherContext(
       .gte("polymarket_markets.liquidity", MIN_LIQUIDITY_USD)
       .order("is_pinned", { ascending: false })
       .order("score", { ascending: false, nullsFirst: false })
+      .order("condition_id", { ascending: true, foreignTable: "polymarket_markets" })
       .range(page * watchPageSize, (page + 1) * watchPageSize - 1);
 
     const pageRowsTyped = (pageRows ?? []) as unknown as PolymarketWatchRow[];

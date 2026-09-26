@@ -5848,6 +5848,7 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
           .gte("polymarket_markets.liquidity", MIN_LIQUIDITY_USD)
           .order("is_pinned", { ascending: false })
           .order("score", { ascending: false, nullsFirst: false })
+          .order("condition_id", { ascending: true, foreignTable: "polymarket_markets" })
           .range(page * feedPageSize, (page + 1) * feedPageSize - 1);
 
         if (error) return json({ error: error.message }, 500);
@@ -6097,6 +6098,7 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
           .gt("end_date", eligibilityNow.toISOString())
           .gte("liquidity", MIN_LIQUIDITY_USD)
           .order("volume_24hr", { ascending: false })
+          .order("condition_id", { ascending: true })
           .range(page * categoryPageSize, (page + 1) * categoryPageSize - 1);
 
         if (error) return json({ error: error.message }, 500);
