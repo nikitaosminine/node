@@ -20,6 +20,11 @@ function chainResult(data: unknown) {
   }
   builder.maybeSingle = () => Promise.resolve({ data, error: null });
   builder.limit = () => Promise.resolve({ data, error: null });
+  builder.range = (from, to) =>
+    Promise.resolve({
+      data: Array.isArray(data) ? data.slice(Number(from), Number(to) + 1) : data,
+      error: null,
+    });
   return builder;
 }
 
@@ -83,11 +88,15 @@ describe("recap Polymarket watch filter", () => {
       }
       if (table === "saved_benchmarks") return chainResult([]);
       if (table === "portfolio_polymarket_matches") {
-        const builder = chainResult([
+        const watchRows = [
           ...Array.from({ length: 20 }, (_, index) => ({
             is_pinned: false,
             score: 1 - index / 100,
-            polymarket_markets: { ...eligibleMarket, end_date: null },
+            polymarket_markets: {
+              ...eligibleMarket,
+              start_date: "2027-12-20T00:00:00Z",
+              end_date: "2027-12-31T00:00:00Z",
+            },
           })),
           {
             is_pinned: false,
@@ -95,10 +104,29 @@ describe("recap Polymarket watch filter", () => {
             polymarket_markets: { ...eligibleMarket, liquidity: 333 },
           },
           { is_pinned: false, score: 0.9, polymarket_markets: eligibleMarket },
-        ]);
+        ];
+        const builder = chainResult(watchRows);
+        let filteredRows = watchRows;
         builder.gt = (...args) => {
           watchEndDateFilter = args;
+          filteredRows = filteredRows.filter(
+            (row) =>
+              typeof row.polymarket_markets.end_date === "string" &&
+              row.polymarket_markets.end_date > String(args[1]),
+          );
           return builder;
+        };
+        builder.gte = (...args) => {
+          filteredRows = filteredRows.filter(
+            (row) => Number(row.polymarket_markets.liquidity) >= Number(args[1]),
+          );
+          return builder;
+        };
+        builder.range = (from, to) => {
+          return Promise.resolve({
+            data: filteredRows.slice(Number(from), Number(to) + 1),
+            error: null,
+          });
         };
         return builder;
       }

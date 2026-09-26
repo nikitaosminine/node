@@ -22,6 +22,7 @@ import { runNewsFanout } from "./feeds/news";
 import {
   runPolymarketFanout,
   isNonLlmDeliveryExcluded,
+  MIN_LIQUIDITY_USD,
   TAG_IDS,
   isEligibleMarket,
 } from "./feeds/polymarket";
@@ -5827,30 +5828,38 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
       if (auth instanceof Response) return auth;
 
       const eligibilityNow = new Date();
-      const { data, error } = await auth.db
-        .from("portfolio_polymarket_matches")
-        .select(
-          `is_pinned, score, reason,
-           polymarket_markets!inner(
-             condition_id, event_id, event_slug, event_title, market_slug,
-             question, tags, outcomes, outcome_prices, liquidity, volume_24hr,
-             start_date, end_date, image, active, fetched_at
-           )`,
-        )
-        .eq("portfolio_id", portfolioId)
-        .eq("polymarket_markets.active", true)
-        .gt("polymarket_markets.end_date", eligibilityNow.toISOString())
-        .order("is_pinned", { ascending: false })
-        .order("score", { ascending: false, nullsFirst: false })
-        .limit(60);
+      const feedPageSize = 60;
+      const feedMaxPages = 5;
+      const rows: any[] = [];
+      for (let page = 0; page < feedMaxPages && rows.length < 30; page++) {
+        const { data, error } = await auth.db
+          .from("portfolio_polymarket_matches")
+          .select(
+            `is_pinned, score, reason,
+             polymarket_markets!inner(
+               condition_id, event_id, event_slug, event_title, market_slug,
+               question, tags, outcomes, outcome_prices, liquidity, volume_24hr,
+               start_date, end_date, image, active, fetched_at
+             )`,
+          )
+          .eq("portfolio_id", portfolioId)
+          .eq("polymarket_markets.active", true)
+          .gt("polymarket_markets.end_date", eligibilityNow.toISOString())
+          .gte("polymarket_markets.liquidity", MIN_LIQUIDITY_USD)
+          .order("is_pinned", { ascending: false })
+          .order("score", { ascending: false, nullsFirst: false })
+          .range(page * feedPageSize, (page + 1) * feedPageSize - 1);
 
-      if (error) return json({ error: error.message }, 500);
+        if (error) return json({ error: error.message }, 500);
 
-      const rows = (data ?? [])
-        .filter((r) =>
+        const pageRows = (data ?? []).filter((r) =>
           isEligibleMarket((r as any).polymarket_markets ?? {}, eligibilityNow),
-        )
-        .slice(0, 30);
+        );
+        rows.push(...pageRows);
+        if ((data ?? []).length < feedPageSize) break;
+      }
+
+      rows.splice(30);
       const pinned = rows.filter((r) => r.is_pinned);
       const rotating = rows.filter((r) => !r.is_pinned);
       return json({ pinned, rotating }, 200);
@@ -6070,27 +6079,37 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
 
       const limit = Math.min(Number(url.searchParams.get("limit") ?? "30"), 60);
       const eligibilityNow = new Date();
+      const categoryPageSize = Math.max(limit * 2, 30);
+      const categoryMaxPages = 5;
+      const filtered: any[] = [];
+      for (
+        let page = 0;
+        page < categoryMaxPages && filtered.length < limit;
+        page++
+      ) {
+        const { data, error } = await auth.db
+          .from("polymarket_markets")
+          .select(
+            "condition_id, event_id, event_slug, event_title, market_slug, question, tags, outcomes, outcome_prices, liquidity, volume_24hr, start_date, end_date, image, active, fetched_at",
+          )
+          .contains("tags", JSON.stringify([{ id: tagId }]))
+          .eq("active", true)
+          .gt("end_date", eligibilityNow.toISOString())
+          .gte("liquidity", MIN_LIQUIDITY_USD)
+          .order("volume_24hr", { ascending: false })
+          .range(page * categoryPageSize, (page + 1) * categoryPageSize - 1);
 
-      const { data, error } = await auth.db
-        .from("polymarket_markets")
-        .select(
-          "condition_id, event_id, event_slug, event_title, market_slug, question, tags, outcomes, outcome_prices, liquidity, volume_24hr, start_date, end_date, image, active, fetched_at",
-        )
-        .contains("tags", JSON.stringify([{ id: tagId }]))
-        .eq("active", true)
-        .gt("end_date", eligibilityNow.toISOString())
-        .order("volume_24hr", { ascending: false })
-        .limit(limit * 2); // fetch extra to have room after client-side filters
+        if (error) return json({ error: error.message }, 500);
 
-      if (error) return json({ error: error.message }, 500);
+        filtered.push(
+          ...(data ?? [])
+            .filter((m) => !isNonLlmDeliveryExcluded(m.question))
+            .filter((m) => isEligibleMarket(m, eligibilityNow)),
+        );
+        if ((data ?? []).length < categoryPageSize) break;
+      }
 
-      // Apply the same eligibility gate as the personalized rotating path
-      // (isEligibleMarket: end_date/duration/near-certain/liquidity), plus the
-      // non-LLM delivery backstop.
-      const filtered = (data ?? [])
-        .filter((m) => !isNonLlmDeliveryExcluded(m.question))
-        .filter((m) => isEligibleMarket(m, eligibilityNow))
-        .slice(0, limit);
+      filtered.splice(limit);
 
       return json(filtered, 200);
     }

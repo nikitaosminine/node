@@ -35,9 +35,19 @@ function makeFakeDb() {
         });
         return builder;
       };
-      builder.limit = (...args: unknown[]) => {
-        call.args.limit = args;
-        return Promise.resolve({ data: filteredRows.slice(0, Number(args[0])), error: null });
+      builder.gte = (...args: unknown[]) => {
+        call.args.gte = args;
+        filteredRows = filteredRows.filter(
+          (row) => Number((row as { liquidity?: unknown }).liquidity) >= Number(args[1]),
+        );
+        return builder;
+      };
+      builder.range = (...args: unknown[]) => {
+        call.args.range = args;
+        return Promise.resolve({
+          data: filteredRows.slice(Number(args[0]), Number(args[1]) + 1),
+          error: null,
+        });
       };
       return builder;
     },
@@ -100,7 +110,11 @@ describe("GET /api/polymarket/category", () => {
   it("excludes short-duration, near-certain, and non-financial markets from the response", async () => {
     seededRows = [
       ...Array.from({ length: 60 }, (_, index) =>
-        marketRow({ condition_id: `missing-end-${index}`, end_date: null }),
+        marketRow({
+          condition_id: `short-leading-${index}`,
+          start_date: "2027-12-20T00:00:00Z",
+          end_date: "2027-12-31T00:00:00Z",
+        }),
       ),
       marketRow({
         condition_id: "short-term",

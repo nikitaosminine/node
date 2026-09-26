@@ -259,6 +259,12 @@ describe("non-LLM Polymarket delivery filter", () => {
     expect(
       isNonLlmDeliveryExcluded("Will the 2028 presidential election be won by Candidate X?"),
     ).toBe(false);
+    expect(isNonLlmDeliveryExcluded("Will primary issuance exceed $10 billion this year?")).toBe(
+      false,
+    );
+    expect(isNonLlmDeliveryExcluded("Will primary dealers absorb the new bond supply?")).toBe(
+      false,
+    );
   });
 });
 

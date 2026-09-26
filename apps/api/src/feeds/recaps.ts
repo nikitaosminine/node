@@ -41,7 +41,7 @@ import type {
   Direction,
 } from "./recap-types";
 import { NEWS_INCLUDE_DOMAINS, NEWS_INCLUDE_DOMAINS_SECONDARY } from "./news";
-import { isEligibleMarket, type MarketEligibilityInput } from "./polymarket";
+import { isEligibleMarket, MIN_LIQUIDITY_USD, type MarketEligibilityInput } from "./polymarket";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnySupabaseClient = SupabaseClient<any, any, any>;
@@ -540,21 +540,41 @@ export async function gatherContext(
   // near-certain < 0.97, liquidity >= $2k. Over-fetch since some rows will
   // be filtered out post-query.
   const watchEligibilityNow = new Date();
-  const { data: watchRowsRaw } = await client
-    .from("portfolio_polymarket_matches")
-    .select(
-      `is_pinned, score,
-       polymarket_markets!inner(question, event_slug, outcome_prices, end_date, start_date, liquidity, active)`,
-    )
-    .eq("portfolio_id", recap.portfolio_id)
-    .eq("polymarket_markets.active", true)
-    .gt("polymarket_markets.end_date", watchEligibilityNow.toISOString())
-    .order("is_pinned", { ascending: false })
-    .order("score", { ascending: false, nullsFirst: false })
-    .limit(20);
+  const watchPageSize = 20;
+  const watchMaxPages = 5;
+  const watchRowsRaw: PolymarketWatchRow[] = [];
+  for (
+    let page = 0;
+    page < watchMaxPages &&
+    filterEligiblePolymarketWatchRows(watchRowsRaw, watchEligibilityNow).length < 5;
+    page++
+  ) {
+    const { data: pageRows } = await client
+      .from("portfolio_polymarket_matches")
+      .select(
+        `is_pinned, score,
+         polymarket_markets!inner(question, event_slug, outcome_prices, end_date, start_date, liquidity, active)`,
+      )
+      .eq("portfolio_id", recap.portfolio_id)
+      .eq("polymarket_markets.active", true)
+      .gt("polymarket_markets.end_date", watchEligibilityNow.toISOString())
+      .gte("polymarket_markets.liquidity", MIN_LIQUIDITY_USD)
+      .order("is_pinned", { ascending: false })
+      .order("score", { ascending: false, nullsFirst: false })
+      .range(page * watchPageSize, (page + 1) * watchPageSize - 1);
+
+    const pageRowsTyped = (pageRows ?? []) as unknown as PolymarketWatchRow[];
+    watchRowsRaw.push(...pageRowsTyped);
+    if (
+      pageRowsTyped.length < watchPageSize ||
+      filterEligiblePolymarketWatchRows(watchRowsRaw, watchEligibilityNow).length >= 5
+    ) {
+      break;
+    }
+  }
 
   const watchRows = filterEligiblePolymarketWatchRows(
-    (watchRowsRaw ?? []) as unknown as PolymarketWatchRow[],
+    watchRowsRaw,
     watchEligibilityNow,
   );
 

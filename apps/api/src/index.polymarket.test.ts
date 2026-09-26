@@ -61,15 +61,23 @@ function fakeDb(rows: unknown[]) {
         builder[method] = () => builder;
       }
       builder.gt = (_column, value) => {
-        filteredRows = rows.filter((row) => {
+        filteredRows = filteredRows.filter((row) => {
           const endDate = (row as { polymarket_markets?: { end_date?: unknown } })
             .polymarket_markets?.end_date;
           return typeof endDate === "string" && endDate > String(value);
         });
         return builder;
       };
-      builder.limit = (count) =>
-        Promise.resolve({ data: filteredRows.slice(0, Number(count)), error: null });
+      builder.gte = (_column, value) => {
+        filteredRows = filteredRows.filter((row) => {
+          const liquidity = (row as { polymarket_markets?: { liquidity?: unknown } })
+            .polymarket_markets?.liquidity;
+          return Number(liquidity) >= Number(value);
+        });
+        return builder;
+      };
+      builder.range = (from, to) =>
+        Promise.resolve({ data: filteredRows.slice(Number(from), Number(to) + 1), error: null });
       if (table !== "portfolio_polymarket_matches") {
         throw new Error(`Unexpected table: ${table}`);
       }
@@ -95,8 +103,9 @@ describe("GET /api/feed/polymarket", () => {
         marketRow({
           polymarket_markets: {
             ...marketRow().polymarket_markets,
-            condition_id: `missing-end-${index}`,
-            end_date: null,
+            condition_id: `short-leading-${index}`,
+            start_date: "2027-12-20T00:00:00Z",
+            end_date: "2027-12-31T00:00:00Z",
           },
         }),
       ),
