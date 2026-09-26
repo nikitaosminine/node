@@ -61,6 +61,8 @@ function stubFanoutHttp(options: {
   pendingRows?: Array<Record<string, unknown>>;
   matchUpsertStatus?: number;
   clusterUpsertConflict?: boolean;
+  companySentimentEnqueueStatus?: number;
+  companySentimentApplyStatus?: number;
 }) {
   const captured: CapturedRequest[] = [];
   let nextClusterId = 1;
@@ -245,9 +247,15 @@ function stubFanoutHttp(options: {
       return jsonResponse(true, 200);
     }
     if (url.pathname === "/rest/v1/rpc/enqueue_company_sentiment_pending" && method === "POST") {
+      if (options.companySentimentEnqueueStatus) {
+        return jsonResponse({ message: "company sentiment enqueue failed" }, options.companySentimentEnqueueStatus);
+      }
       return jsonResponse(true, 200);
     }
     if (url.pathname === "/rest/v1/rpc/apply_company_sentiment_batch" && method === "POST") {
+      if (options.companySentimentApplyStatus) {
+        return jsonResponse({ message: "company sentiment apply failed" }, options.companySentimentApplyStatus);
+      }
       return jsonResponse(true, 200);
     }
     if (url.pathname === "/rest/v1/company_sentiment_lock" && method === "DELETE") {
@@ -298,6 +306,20 @@ describe("runNewsFanout sentiment pipeline (end-to-end over stubbed HTTP)", () =
           request.pathname === "/rest/v1/portfolio_news_matches" && request.method === "POST",
       ),
     ).toBe(false);
+  });
+
+  it.each([
+    ["enqueue", { companySentimentEnqueueStatus: 503 }, "company sentiment enqueue failed"],
+    ["guarded EWMA write", { companySentimentApplyStatus: 503 }, "company sentiment apply failed"],
+  ])("marks a company sentiment %s failure retryable", async (_name, options, message) => {
+    stubFanoutHttp({ grokStatus: 200, ...options });
+
+    const result = await runNewsFanout(env);
+
+    expect(result.clustersUpserted).toBe(2);
+    expect(result.matchesUpserted).toBe(2);
+    expect(result.persistenceFailed).toBe(true);
+    expect(result.errors).toContain(`company sentiment: ${message}`);
   });
 
   it("persists per-cluster sentiments and EWMA-updates the rolling company score", async () => {

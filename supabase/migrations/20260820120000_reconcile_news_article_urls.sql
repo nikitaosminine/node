@@ -184,11 +184,16 @@ begin
                 then jsonb_set(value, '{id}', to_jsonb(keep_row.id::text), true)
                 else value end as value,
               ordinality,
-              case when value->>'id' = keep_row.id::text then 0 else 1 end as preference
+              case when value->>'id' = keep_row.id::text then 0 else 1 end as preference,
+              case when pg_input_is_valid(value->>'scoredAt', 'timestamptz')
+                then (value->>'scoredAt')::timestamptz end as scored_at,
+              case when pg_input_is_valid(value->>'publishedAt', 'timestamptz')
+                then (value->>'publishedAt')::timestamptz end as published_at
             from jsonb_array_elements(sentiment_row.scored_cluster_ids)
               with ordinality as items(value, ordinality)
           ) as rewritten
-          order by rewritten.value->>'id', rewritten.preference, rewritten.ordinality
+          order by rewritten.value->>'id', rewritten.scored_at desc nulls last,
+            rewritten.published_at desc nulls last, rewritten.preference, rewritten.ordinality
         ) as distinct_scored;
 
         if merged_evidence is distinct from sentiment_row.evidence_cluster_ids

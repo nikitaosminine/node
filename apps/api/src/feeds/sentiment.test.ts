@@ -339,6 +339,28 @@ describe("aggregateObservationsByCompany", () => {
     expect(result.get("ticker:ACME")).toEqual({ observedScore: 0.8, clusterKeys: ["c2"] });
   });
 
+  it("deduplicates a replay against the canonical id retained by URL reconciliation", () => {
+    const canonicalId = "11111111-1111-4111-8111-111111111111";
+    const result = aggregateObservationsByCompany(
+      [
+        {
+          clusterKey: canonicalId,
+          companyKey: "ticker:ACME",
+          score: 0.9,
+          rationale: "replayed article",
+        },
+      ],
+      new Map([
+        [
+          "ticker:ACME",
+          new Set([canonicalId]),
+        ],
+      ]),
+    );
+
+    expect(result.has("ticker:ACME")).toBe(false);
+  });
+
   it("omits a company whose clusters were all previously observed", () => {
     const result = aggregateObservationsByCompany(
       [

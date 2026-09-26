@@ -418,6 +418,10 @@ test(
           const portfolioA = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
           const portfolioB = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
           const oldUpdatedAt = "2026-08-01T00:00:00.000Z";
+          const oldScoredAt = "2026-08-01T01:00:00Z";
+          const newScoredAt = "2026-08-02T01:00:00Z";
+          const oldPublishedAt = "2026-08-01T00:30:00Z";
+          const newPublishedAt = "2026-08-02T00:30:00Z";
           await client.query("INSERT INTO public.portfolios (id) VALUES ($1), ($2)", [
             portfolioA,
             portfolioB,
@@ -494,8 +498,8 @@ test(
             [
               JSON.stringify([duplicateId, canonicalId, otherId]),
               JSON.stringify([
-                { id: duplicateId, scoredAt: "2026-08-02T01:00:00Z" },
-                { id: canonicalId, scoredAt: "2026-08-01T01:00:00Z" },
+                { id: duplicateId, scoredAt: newScoredAt, publishedAt: newPublishedAt },
+                { id: canonicalId, scoredAt: oldScoredAt, publishedAt: oldPublishedAt },
               ]),
               oldUpdatedAt,
             ],
@@ -564,6 +568,9 @@ test(
             ledgerRows[0].scored_cluster_ids.map(({ id }) => id),
             [canonicalId],
           );
+          assert.deepEqual(ledgerRows[0].scored_cluster_ids, [
+            { id: canonicalId, scoredAt: newScoredAt, publishedAt: newPublishedAt },
+          ]);
 
           const { rows: pending } = await client.query(
             `SELECT company_key, cluster_id, score FROM public.company_sentiment_pending

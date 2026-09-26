@@ -1766,7 +1766,10 @@ export async function runNewsFanout(
     idBackedSentiments,
     sentimentCompaniesByKey,
   );
-  if (companySentimentError) errors.push(`company sentiment: ${companySentimentError}`);
+  if (companySentimentError) {
+    persistenceFailed = true;
+    errors.push(`company sentiment: ${companySentimentError}`);
+  }
 
   // --- Phase 2: SCORE + MATCH — build matchAccum (pure JS, 0 subrequests) ---
   interface MatchAccum {
