@@ -136,6 +136,10 @@ describe("GET /api/polymarket/category", () => {
         question: "Will Candidate X win the 2028 Democratic nomination?",
       }),
       marketRow({
+        condition_id: "excluded-tag",
+        tags: [{ id: 104152, label: "Finance Up/Down" }],
+      }),
+      marketRow({
         condition_id: "illiquid",
         question: "Will an AI-arena model be the top performer this month?",
         liquidity: 333,

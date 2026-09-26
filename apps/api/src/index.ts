@@ -21,6 +21,7 @@ import {
 import { runNewsFanout } from "./feeds/news";
 import {
   runPolymarketFanout,
+  hasExcludedPolymarketTag,
   isNonLlmDeliveryExcluded,
   MIN_LIQUIDITY_USD,
   TAG_IDS,
@@ -6105,6 +6106,7 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
 
         filtered.push(
           ...(data ?? [])
+            .filter((m) => !hasExcludedPolymarketTag(m.tags))
             .filter((m) => !isNonLlmDeliveryExcluded(m.question))
             .filter((m) => isEligibleMarket(m, eligibilityNow)),
         );

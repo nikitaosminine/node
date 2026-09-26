@@ -208,7 +208,7 @@ export const POLITICAL_NOMINATION_RE =
   /\b(?:democratic|republican|gop|libertarian|green|party)\s+(?:party\s+)?(?:primary|primaries|nominee|nomination)\b|\b(?:presidential|president(?:ial)?|vice[- ]president|governor|senator|senate|congress(?:ional)?|representative|mayor)\b[^\n?]{0,60}\b(?:nominee|nomination)\b|\b(?:which candidate|candidate)\b[^\n?]{0,80}\b(?:win|wins|be|become|be named|secure|capture)\b[^\n?]{0,80}\b(?:nominee|nomination|primary|primaries)\b|\b(?:will|could|can)\b[^\n?]{0,80}\b(?:be|become|be named)\b[^\n?]{0,30}\b(?:the\s+)?(?:nominee|nomination)\b[^\n?]{0,30}\b(?:for|of)\b[^\n?]{0,30}\b(?:president(?:ial)?|vice[- ]president|governor|senator|mayor)\b|\b(?:will|could|can)\b[^\n?]{0,80}\b(?:nominate|nominated)\b[^\n?]{0,30}\b(?:for|as)\b[^\n?]{0,30}\b(?:president(?:ial)?|vice[- ]president|governor|senator|mayor)\b|\b(?:will|could|can)\b[^\n?]{0,80}\b(?:nominate|nominated)\b[^\n?]{0,30}\b(?:by|from)\b[^\n?]{0,30}\b(?:democratic|republican|gop|libertarian|green)\s+party\b/i;
 
 const NAMED_PERSON_NOMINATION_RE =
-  /\b(?:will|could|can)\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*[^\n?]{0,30}\b(?:win|wins)\b[^\n?]{0,30}\b(?:the\s+)?nomination\b/;
+  /\b(?:will|could|can)\s+(?:(?:[A-Z][a-z]+|(?:[A-Z]\.){1,3}))(?:\s+(?:[A-Z][a-z]+|(?:[A-Z]\.){1,3}))*[^\n?]{0,30}\b(?:win|wins)\b[^\n?]{0,30}\b(?:the\s+)?nomination\b/;
 
 export function isNonLlmDeliveryExcluded(question: string | null | undefined): boolean {
   const text = question ?? "";
@@ -217,6 +217,15 @@ export function isNonLlmDeliveryExcluded(question: string | null | undefined): b
     POLITICAL_NOMINATION_RE.test(text) ||
     NAMED_PERSON_NOMINATION_RE.test(text)
   );
+}
+
+export function hasExcludedPolymarketTag(tags: unknown): boolean {
+  if (!Array.isArray(tags)) return false;
+  const excludedIds = new Set(Object.values(EXCLUDE_TAG_IDS));
+  return tags.some((tag) => {
+    if (!tag || typeof tag !== "object") return false;
+    return excludedIds.has(Number((tag as { id?: unknown }).id));
+  });
 }
 
 // ---------------------------------------------------------------------------

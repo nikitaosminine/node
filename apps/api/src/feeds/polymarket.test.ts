@@ -14,6 +14,7 @@ import {
   invokePolymarketGrok,
   isBelowLiquidityFloor,
   isEligibleMarket,
+  hasExcludedPolymarketTag,
   isNearCertainMarket,
   isNonLlmDeliveryExcluded,
   isShortTermMarket,
@@ -261,6 +262,7 @@ describe("non-LLM Polymarket delivery filter", () => {
     expect(isNonLlmDeliveryExcluded("Will Trump be nominated by the Republican Party?")).toBe(
       true,
     );
+    expect(isNonLlmDeliveryExcluded("Will J.D. Vance win the nomination?")).toBe(true);
     expect(isNonLlmDeliveryExcluded("Will the film be nominated for an award?")).toBe(false);
     expect(isNonLlmDeliveryExcluded("Will Acme Corp be nominated for an innovation award?")).toBe(
       false,
@@ -280,6 +282,13 @@ describe("non-LLM Polymarket delivery filter", () => {
     expect(
       isNonLlmDeliveryExcluded("Will Democratic Republic of Congo primary bond issuance rise?"),
     ).toBe(false);
+  });
+});
+
+describe("persisted Polymarket tag filtering", () => {
+  it("recognizes excluded Gamma tags without excluding ordinary tags", () => {
+    expect(hasExcludedPolymarketTag([{ id: 104152, label: "Finance Up/Down" }])).toBe(true);
+    expect(hasExcludedPolymarketTag([{ id: 120, label: "Finance" }])).toBe(false);
   });
 });
 
