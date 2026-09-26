@@ -76,7 +76,25 @@ async function installActualMigration(client) {
     -- The migration must revoke anon/authenticated explicitly, not only PUBLIC.
     ALTER DEFAULT PRIVILEGES IN SCHEMA public
       GRANT EXECUTE ON FUNCTIONS TO anon, authenticated, service_role;
-    CREATE TABLE IF NOT EXISTS public.news_clusters (id text PRIMARY KEY);
+    CREATE TABLE IF NOT EXISTS public.portfolios (id uuid PRIMARY KEY);
+    CREATE TABLE IF NOT EXISTS public.news_clusters (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      cluster_key text NOT NULL UNIQUE,
+      primary_article jsonb NOT NULL DEFAULT '{}'::jsonb,
+      see_also jsonb NOT NULL DEFAULT '[]'::jsonb,
+      entities jsonb NOT NULL DEFAULT '{}'::jsonb,
+      published_at timestamptz NOT NULL,
+      fetched_at timestamptz NOT NULL DEFAULT now(),
+      expires_at timestamptz NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS public.portfolio_news_matches (
+      portfolio_id uuid NOT NULL REFERENCES public.portfolios(id) ON DELETE CASCADE,
+      cluster_id uuid NOT NULL REFERENCES public.news_clusters(id) ON DELETE CASCADE,
+      score numeric(6, 4) NOT NULL DEFAULT 0,
+      match_reason jsonb NOT NULL DEFAULT '{}'::jsonb,
+      created_at timestamptz NOT NULL DEFAULT now(),
+      PRIMARY KEY (portfolio_id, cluster_id)
+    );
     CREATE OR REPLACE FUNCTION public.update_updated_at_column()
     RETURNS trigger LANGUAGE plpgsql AS $$
     BEGIN
@@ -87,12 +105,23 @@ async function installActualMigration(client) {
   await client.query(await readFile(join(migrationsDir, files[0]), "utf8"));
 }
 
+async function installNewsUrlMigration(client) {
+  const migrationsDir = fileURLToPath(new URL("../../../supabase/migrations/", import.meta.url));
+  const files = (await readdir(migrationsDir)).filter((name) =>
+    /^\d+_reconcile_news_article_urls\.sql$/.test(name),
+  );
+  assert.equal(files.length, 1, "expected exactly one versioned news URL migration");
+  await client.query(await readFile(join(migrationsDir, files[0]), "utf8"));
+}
+
 async function reset(client) {
   await client.query(`
     TRUNCATE public.company_sentiment_pending,
              public.company_sentiment_lock,
              public.company_sentiment,
-             public.news_clusters;
+             public.portfolio_news_matches,
+             public.news_clusters,
+             public.portfolios;
   `);
 }
 
@@ -189,7 +218,7 @@ test(
         async () => {
           await reset(client);
           const { rows: clusterRows } = await client.query(
-            "INSERT INTO public.news_clusters (id) VALUES ('bootstrap') RETURNING sentiments",
+            "INSERT INTO public.news_clusters (cluster_key, published_at, expires_at) VALUES ('bootstrap', now(), now() + interval '2 days') RETURNING sentiments",
           );
           assert.deepEqual(clusterRows[0].sentiments, []);
           const { rows: grantRows } = await client.query(`
@@ -374,6 +403,234 @@ test(
           }
         },
       );
+
+      await t.test(
+        "merges stored URL duplicates without losing links or sentiment history",
+        async () => {
+          await reset(client);
+          await client.query("DROP INDEX IF EXISTS public.news_clusters_article_url_unique");
+          await client.query("ALTER TABLE public.news_clusters DROP COLUMN IF EXISTS article_url");
+
+          const url = "https://example.com/articles/earnings";
+          const canonicalId = "11111111-1111-4111-8111-111111111111";
+          const duplicateId = "22222222-2222-4222-8222-222222222222";
+          const otherId = "33333333-3333-4333-8333-333333333333";
+          const portfolioA = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+          const portfolioB = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+          const oldUpdatedAt = "2026-08-01T00:00:00.000Z";
+          await client.query("INSERT INTO public.portfolios (id) VALUES ($1), ($2)", [
+            portfolioA,
+            portfolioB,
+          ]);
+
+          const insertCluster = async (
+            id,
+            key,
+            article,
+            seeAlso,
+            entities,
+            sentiments,
+            fetchedAt,
+          ) => {
+            await client.query(
+              `INSERT INTO public.news_clusters
+              (id, cluster_key, primary_article, see_also, entities, sentiments,
+               published_at, fetched_at, expires_at)
+             VALUES ($1, $2, $3::jsonb, $4::jsonb, $5::jsonb, $6::jsonb,
+                     '2026-08-01T00:00:00Z', $7, $7::timestamptz + interval '3 days')`,
+              [
+                id,
+                key,
+                JSON.stringify(article),
+                JSON.stringify(seeAlso),
+                JSON.stringify(entities),
+                JSON.stringify(sentiments),
+                fetchedAt,
+              ],
+            );
+          };
+          await insertCluster(
+            canonicalId,
+            "exa-document-42",
+            {
+              url,
+              title: "Canonical headline",
+              snippet: "",
+              source: "example.com",
+              legacy_provider_id: "42",
+            },
+            [{ title: "Related A", url: "https://example.com/a" }],
+            { tickers: ["AAPL"], isins: [], countries: [], sectors: [] },
+            [{ company_key: "ticker:AAPL", score: 0.2, rationale: "Canonical score" }],
+            "2026-08-01T01:00:00Z",
+          );
+          await insertCluster(
+            duplicateId,
+            url,
+            { url, title: "Provider headline", source: "example.com", snippet: "Fresh summary" },
+            [{ title: "Related B", url: "https://example.com/b" }],
+            { tickers: ["MSFT"], isins: [], countries: ["US"], sectors: ["Technology"] },
+            [
+              { company_key: "ticker:AAPL", score: -0.6, rationale: "Duplicate score" },
+              { company_key: "ticker:MSFT", score: 0.7, rationale: "Second company" },
+            ],
+            "2026-08-02T01:00:00Z",
+          );
+
+          await client.query(
+            `INSERT INTO public.portfolio_news_matches
+             (portfolio_id, cluster_id, score, match_reason, created_at)
+           VALUES
+             ($1, $3, 0.5, '{"matched_tickers":["AAPL"]}', '2026-08-01T01:00:00Z'),
+             ($1, $4, 0.8, '{"matched_topics":["tech"]}', '2026-08-02T01:00:00Z'),
+             ($2, $4, 0.6, '{"matched_tickers":["MSFT"]}', '2026-08-02T01:00:00Z')`,
+            [portfolioA, portfolioB, canonicalId, duplicateId],
+          );
+          await client.query(
+            `INSERT INTO public.company_sentiment
+             (company_key, company_name, score, trend, evidence_cluster_ids,
+              scored_cluster_ids, updated_at)
+           VALUES ('ticker:AAPL', 'Apple', 0.37, 'up', $1::jsonb, $2::jsonb, $3)`,
+            [
+              JSON.stringify([duplicateId, canonicalId, otherId]),
+              JSON.stringify([
+                { id: duplicateId, scoredAt: "2026-08-02T01:00:00Z" },
+                { id: canonicalId, scoredAt: "2026-08-01T01:00:00Z" },
+              ]),
+              oldUpdatedAt,
+            ],
+          );
+          await client.query(
+            `INSERT INTO public.company_sentiment_pending
+             (company_key, cluster_id, company_name, score, rationale, published_at, observed_at)
+           VALUES
+             ('ticker:AAPL', $1, 'Apple', 0.4, 'old duplicate', now(), now() - interval '2 hours'),
+             ('ticker:AAPL', $2, 'Apple', 0.8, 'new canonical', now(), now() - interval '1 hour'),
+             ('ticker:MSFT', $1, 'Microsoft', 0.3, 'distinct company', now(), now())`,
+            [duplicateId, canonicalId],
+          );
+
+          await installNewsUrlMigration(client);
+          const { rows: clusters } = await client.query(
+            `SELECT id::text, cluster_key, article_url, primary_article, see_also,
+                  entities, sentiments
+             FROM public.news_clusters WHERE article_url = $1`,
+            [url],
+          );
+          assert.equal(clusters.length, 1);
+          assert.equal(clusters[0].id, canonicalId);
+          assert.equal(clusters[0].cluster_key, "exa-document-42");
+          assert.equal(clusters[0].primary_article.title, "Canonical headline");
+          assert.equal(clusters[0].primary_article.legacy_provider_id, "42");
+          assert.equal(clusters[0].primary_article.snippet, "Fresh summary");
+          assert.deepEqual(clusters[0].see_also.map(({ url: relatedUrl }) => relatedUrl).sort(), [
+            "https://example.com/a",
+            "https://example.com/b",
+          ]);
+          assert.deepEqual(clusters[0].entities.tickers, ["AAPL", "MSFT"]);
+          assert.deepEqual(clusters[0].entities.sectors, ["Technology"]);
+          assert.deepEqual(clusters[0].sentiments.map(({ company_key: key }) => key).sort(), [
+            "ticker:AAPL",
+            "ticker:MSFT",
+          ]);
+          assert.equal(
+            clusters[0].sentiments.find(({ company_key: key }) => key === "ticker:AAPL").score,
+            0.2,
+          );
+
+          const { rows: links } = await client.query(
+            `SELECT portfolio_id::text, cluster_id::text, score, match_reason
+             FROM public.portfolio_news_matches ORDER BY portfolio_id`,
+          );
+          assert.equal(links.length, 2);
+          assert.deepEqual(
+            links.map((link) => link.cluster_id),
+            [canonicalId, canonicalId],
+          );
+          assert.equal(Number(links[0].score), 0.8);
+          assert.deepEqual(links[0].match_reason.matched_tickers, ["AAPL"]);
+          assert.deepEqual(links[0].match_reason.matched_topics, ["tech"]);
+          assert.equal(links[1].portfolio_id, portfolioB);
+
+          const { rows: ledgerRows } = await client.query(
+            `SELECT score, trend, updated_at, evidence_cluster_ids, scored_cluster_ids
+             FROM public.company_sentiment WHERE company_key = 'ticker:AAPL'`,
+          );
+          assert.equal(Number(ledgerRows[0].score), 0.37);
+          assert.equal(ledgerRows[0].trend, "up");
+          assert.equal(ledgerRows[0].updated_at.toISOString(), oldUpdatedAt);
+          assert.deepEqual(ledgerRows[0].evidence_cluster_ids, [canonicalId, otherId]);
+          assert.deepEqual(
+            ledgerRows[0].scored_cluster_ids.map(({ id }) => id),
+            [canonicalId],
+          );
+
+          const { rows: pending } = await client.query(
+            `SELECT company_key, cluster_id, score FROM public.company_sentiment_pending
+             ORDER BY company_key`,
+          );
+          assert.deepEqual(
+            pending.map((row) => row.cluster_id),
+            [canonicalId, canonicalId],
+          );
+          assert.equal(Number(pending[0].score), 0.8);
+          assert.equal(Number(pending[1].score), 0.3);
+
+          await assert.rejects(
+            client.query(
+              `INSERT INTO public.news_clusters
+               (cluster_key, primary_article, published_at, expires_at)
+             VALUES ('another-provider-key', $1::jsonb, now(), now() + interval '2 days')`,
+              [JSON.stringify({ url })],
+            ),
+            (error) => error.code === "23505",
+          );
+        },
+      );
+
+      await t.test("serializes concurrent inserts for one exact article URL", async () => {
+        await reset(client);
+        const first = await connect();
+        const second = await connect();
+        const url = "https://example.com/articles/concurrent";
+        let firstOpen = false;
+        let competingInsert;
+        try {
+          const { rows: firstPidRows } = await first.query("SELECT pg_backend_pid() AS pid");
+          const { rows: secondPidRows } = await second.query("SELECT pg_backend_pid() AS pid");
+          await first.query("BEGIN");
+          firstOpen = true;
+          await first.query(
+            `INSERT INTO public.news_clusters
+               (cluster_key, primary_article, published_at, expires_at)
+             VALUES ('provider-one', $1::jsonb, now(), now() + interval '2 days')`,
+            [JSON.stringify({ url })],
+          );
+          competingInsert = second.query(
+            `INSERT INTO public.news_clusters
+               (cluster_key, primary_article, published_at, expires_at)
+             VALUES ('provider-two', $1::jsonb, now(), now() + interval '2 days')`,
+            [JSON.stringify({ url })],
+          );
+          await waitUntilBlocked(first, secondPidRows[0].pid, firstPidRows[0].pid);
+          await first.query("COMMIT");
+          firstOpen = false;
+          await assert.rejects(competingInsert, (error) => error.code === "23505");
+          const { rows } = await client.query(
+            "SELECT cluster_key FROM public.news_clusters WHERE article_url = $1",
+            [url],
+          );
+          assert.deepEqual(
+            rows.map((row) => row.cluster_key),
+            ["provider-one"],
+          );
+        } finally {
+          if (firstOpen) await first.query("ROLLBACK");
+          if (competingInsert) await competingInsert.catch(() => {});
+          await first.end();
+          await second.end();
+        }
+      });
     } finally {
       await client.end();
     }

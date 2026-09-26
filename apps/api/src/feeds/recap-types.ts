@@ -114,7 +114,13 @@ export interface NewsFanoutQueueMessage {
   scheduledTime: number;
 }
 
+export interface PolymarketFanoutQueueMessage {
+  type: "polymarket_fanout";
+  scheduledTime: number;
+}
+
 export type RecapQueueMessage =
+  | PolymarketFanoutQueueMessage
   | NewsFanoutQueueMessage
   | {
       recapId: string;

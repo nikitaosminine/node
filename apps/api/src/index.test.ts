@@ -243,7 +243,10 @@ describe("withInvocationSubrequestBudget", () => {
 describe("scheduled news queue handoff", () => {
   it("enqueues news before the shared scheduled work can consume its budget", async () => {
     const sent: unknown[] = [];
-    vi.stubGlobal("fetch", vi.fn(async () => new Response("[]", { status: 200 })));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response("[]", { status: 200 })),
+    );
     const queueEnv = {
       ...env,
       RECAP_QUEUE: { send: vi.fn(async (message: unknown) => sent.push(message)) },
@@ -259,6 +262,7 @@ describe("scheduled news queue handoff", () => {
     );
 
     expect(sent).toEqual([
+      { type: "polymarket_fanout", scheduledTime: Date.UTC(2026, 8, 21, 16, 30) },
       { type: "news_fanout", scheduledTime: Date.UTC(2026, 8, 21, 16, 30) },
     ]);
   });

@@ -43,6 +43,7 @@ const exaResults = [
 interface CapturedRequest {
   method: string;
   pathname: string;
+  search: string;
   columns: string | null;
   body: unknown;
 }
@@ -59,9 +60,15 @@ function stubFanoutHttp(options: {
   emptyNews?: boolean;
   pendingRows?: Array<Record<string, unknown>>;
   matchUpsertStatus?: number;
+  clusterUpsertConflict?: boolean;
 }) {
   const captured: CapturedRequest[] = [];
   let nextClusterId = 1;
+  const clusterIdsByKey = new Map<string, string>(
+    (options.existingClusters ?? [])
+      .filter((row) => typeof row.id === "string" && typeof row.cluster_key === "string")
+      .map((row) => [String(row.cluster_key), String(row.id)]),
+  );
   const storedSentiments = new Map<string, unknown>(
     (options.existingClusters ?? []).map((row) => [String(row.cluster_key), row.sentiments]),
   );
@@ -93,6 +100,7 @@ function stubFanoutHttp(options: {
     captured.push({
       method,
       pathname: url.pathname,
+      search: url.search,
       columns: url.searchParams.get("columns"),
       body,
     });
@@ -168,6 +176,12 @@ function stubFanoutHttp(options: {
       return jsonResponse(options.existingClusters ?? []);
     }
     if (url.pathname === "/rest/v1/news_clusters" && method === "POST") {
+      if (options.clusterUpsertConflict) {
+        return jsonResponse(
+          { code: "23505", message: "duplicate article_url from a concurrent fanout" },
+          409,
+        );
+      }
       const rows = body as Array<Record<string, unknown>>;
       const columns = new Set(
         (url.searchParams.get("columns") ?? "")
@@ -187,10 +201,15 @@ function stubFanoutHttp(options: {
         }
       }
       return jsonResponse(
-        rows.map((row) => ({
-          id: `db-${nextClusterId++}`,
-          cluster_key: row.cluster_key,
-        })),
+        rows.map((row) => {
+          const key = String(row.cluster_key);
+          let id = clusterIdsByKey.get(key);
+          if (!id) {
+            id = `db-${nextClusterId++}`;
+            clusterIdsByKey.set(key, id);
+          }
+          return { id, cluster_key: key };
+        }),
         201,
       );
     }
@@ -260,6 +279,25 @@ describe("runNewsFanout sentiment pipeline (end-to-end over stubbed HTTP)", () =
     expect(result.matchesUpserted).toBe(0);
     expect(result.persistenceFailed).toBe(true);
     expect(result.errors).toContain("batch match upsert: match upsert failed");
+  });
+
+  it("marks a concurrent URL uniqueness collision retryable without writing matches", async () => {
+    const { captured } = stubFanoutHttp({ grokStatus: 200, clusterUpsertConflict: true });
+
+    const result = await runNewsFanout(env);
+
+    expect(result.persistenceFailed).toBe(true);
+    expect(result.clustersUpserted).toBe(0);
+    expect(result.matchesUpserted).toBe(0);
+    expect(result.errors).toContain(
+      "batch cluster upsert: duplicate article_url from a concurrent fanout",
+    );
+    expect(
+      captured.some(
+        (request) =>
+          request.pathname === "/rest/v1/portfolio_news_matches" && request.method === "POST",
+      ),
+    ).toBe(false);
   });
 
   it("persists per-cluster sentiments and EWMA-updates the rolling company score", async () => {
@@ -349,6 +387,74 @@ describe("runNewsFanout sentiment pipeline (end-to-end over stubbed HTTP)", () =
     ]);
   });
 
+  it("reuses a legacy Exa cluster UUID for the same Firecrawl URL on repeat delivery", async () => {
+    const legacyId = "11111111-1111-4111-8111-111111111111";
+    const legacyKey = "exa-document-1";
+    const priorSentiments = [{ company_key: "ticker:BETA", score: -0.2, rationale: "Stored." }];
+    const { captured } = stubFanoutHttp({
+      grokStatus: 200,
+      existingClusters: [
+        {
+          id: legacyId,
+          cluster_key: legacyKey,
+          article_url: exaResults[0].url,
+          primary_article: {
+            title: "Stored Exa headline",
+            url: exaResults[0].url,
+            snippet: "",
+            source: "cnbc.com",
+            legacy_provider_id: legacyKey,
+          },
+          see_also: [{ title: "Earlier related story", url: "https://www.cnbc.com/earlier" }],
+          entities: { isins: [], tickers: ["BETA"], countries: [], sectors: [] },
+          sentiments: priorSentiments,
+          published_at: publishedAt,
+          expires_at: new Date(Date.now() + 2 * 86_400_000).toISOString(),
+        },
+      ],
+    });
+
+    const first = await runNewsFanout(env);
+    const second = await runNewsFanout(env);
+
+    expect(first.errors).toEqual([]);
+    expect(second.errors).toEqual([]);
+    const preReads = captured.filter(
+      (request) => request.pathname === "/rest/v1/news_clusters" && request.method === "GET",
+    );
+    expect(preReads).toHaveLength(2);
+    expect(preReads.every((request) => request.search.includes("article_url=in."))).toBe(true);
+
+    const legacyRows = clusterUpsertRows(captured).filter(
+      (row) => (row.primary_article as { url: string }).url === exaResults[0].url,
+    );
+    expect(legacyRows).toHaveLength(2);
+    expect(legacyRows.every((row) => row.cluster_key === legacyKey)).toBe(true);
+    expect(legacyRows[0].primary_article).toMatchObject({
+      title: exaResults[0].title,
+      snippet: exaResults[0].title,
+      url: exaResults[0].url,
+      legacy_provider_id: legacyKey,
+    });
+    expect(legacyRows[0].see_also).toEqual([
+      { title: "Earlier related story", url: "https://www.cnbc.com/earlier" },
+    ]);
+    expect((legacyRows[0].entities as { tickers: string[] }).tickers).toEqual(
+      expect.arrayContaining(["ACME", "BETA"]),
+    );
+    expect(legacyRows[0].sentiments).toEqual(
+      expect.arrayContaining([expect.objectContaining(priorSentiments[0])]),
+    );
+
+    const matchRows = captured
+      .filter(
+        (request) =>
+          request.pathname === "/rest/v1/portfolio_news_matches" && request.method === "POST",
+      )
+      .flatMap((request) => request.body as Array<{ cluster_id: string }>);
+    expect(matchRows.filter((row) => row.cluster_id === legacyId)).toHaveLength(2);
+  });
+
   it("skips the sentiments write for clusters Grok only partially answered, while scoring the rest", async () => {
     // Grok returns valid JSON but only answers pair 1 (cluster exa-1); the
     // (exa-2, ACME) pair is silently omitted. exa-2's write must be skipped
@@ -361,6 +467,7 @@ describe("runNewsFanout sentiment pipeline (end-to-end over stubbed HTTP)", () =
       existingClusters: [
         {
           cluster_key: exaResults[1].url,
+          article_url: exaResults[1].url,
           entities: { isins: [], tickers: [], countries: [], sectors: [] },
           sentiments: priorSentiments,
         },
@@ -467,19 +574,23 @@ describe("runNewsFanout sentiment pipeline (end-to-end over stubbed HTTP)", () =
     ).toBe(false);
   });
 
-  it("preserves stored sentiments when the cluster pre-read fails", async () => {
+  it("fails closed when URL identity cannot be read, so a legacy cluster cannot be duplicated", async () => {
     const { captured } = stubFanoutHttp({ grokStatus: 200, clusterPreReadStatus: 500 });
 
     const result = await runNewsFanout(env);
 
-    expect(result.clustersUpserted).toBe(2);
-    expect(result.matchesUpserted).toBe(2);
-    expect(result.errors).toContain("cluster entities pre-read: cluster pre-read failed");
+    expect(result.clustersUpserted).toBe(0);
+    expect(result.matchesUpserted).toBe(0);
+    expect(result.persistenceFailed).toBe(true);
+    expect(result.errors).toContain("cluster URL identity pre-read: cluster pre-read failed");
     expect(result.clustersScored).toBe(0);
     expect(result.companiesRescored).toBe(0);
-    for (const row of clusterUpsertRows(captured)) {
-      expect(row).not.toHaveProperty("sentiments");
-    }
+    expect(
+      captured.some((r) => r.pathname === "/rest/v1/news_clusters" && r.method === "POST"),
+    ).toBe(false);
+    expect(
+      captured.some((r) => r.pathname === "/rest/v1/portfolio_news_matches" && r.method === "POST"),
+    ).toBe(false);
     expect(
       captured.some(
         (r) => r.pathname === "/rest/v1/rpc/apply_company_sentiment_batch" && r.method === "POST",

@@ -35,6 +35,7 @@ import { generateRecap } from "./feeds/recaps";
 import { langsmithClient } from "./llm/langsmith";
 import type {
   NewsFanoutQueueMessage,
+  PolymarketFanoutQueueMessage,
   RecapQueueMessage,
   RecapType,
 } from "./feeds/recap-types";
@@ -2108,6 +2109,12 @@ function isRecapQueueMessage(
 
 function isNewsFanoutQueueMessage(message: WorkerQueueMessage): message is NewsFanoutQueueMessage {
   return "type" in message && message.type === "news_fanout";
+}
+
+function isPolymarketFanoutQueueMessage(
+  message: WorkerQueueMessage,
+): message is PolymarketFanoutQueueMessage {
+  return "type" in message && message.type === "polymarket_fanout";
 }
 
 async function fetchHistoricalPrices(
@@ -5898,6 +5905,19 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
   },
   async scheduled(controller: ScheduledController, env: Env, _ctx: ExecutionContext): Promise<void> {
     return withInvocationSubrequestBudget(async (invocationBudget) => {
+      // Enqueue before portfolio work can exhaust this invocation's budget.
+      // recap-queue uses max_batch_size=1, giving each feed job its own invocation.
+      try {
+        if (!env.RECAP_QUEUE) {
+          throw new Error("Server misconfiguration: RECAP_QUEUE binding is missing");
+        }
+        await env.RECAP_QUEUE.send({
+          type: "polymarket_fanout",
+          scheduledTime: controller.scheduledTime,
+        });
+      } catch (error) {
+        console.error("polymarket fanout enqueue failed", error);
+      }
       if (NEWS_CRON_SLOTS.some((slot) => slot === controller.cron)) {
         try {
           if (!env.RECAP_QUEUE) {
@@ -5928,11 +5948,6 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
         );
       } catch (error) {
         console.error("daily snapshot fanout failed", error);
-      }
-      try {
-        await runPolymarketFanout(env, { fetch: invocationBudget.fetch });
-      } catch (error) {
-        console.error("polymarket fanout failed", error);
       }
       // Weekly recap fanout — rides the hourly cron; fires for portfolios where
       // it is Saturday 08:00 in the user's tz. Daily recaps are chained off the
@@ -6020,6 +6035,22 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
         } catch (error) {
           await markGeographyJobsFailed(env, message.body.portfolio_id, holdingIds, error);
           console.error(`geography queue failed for portfolio ${message.body.portfolio_id}`, error);
+          message.retry();
+        }
+        continue;
+      }
+
+      if (isPolymarketFanoutQueueMessage(message.body)) {
+        try {
+          await withInvocationSubrequestBudget((budget) =>
+            runPolymarketFanout(env, { fetch: budget.fetch }),
+          );
+          message.ack();
+        } catch (error) {
+          console.error(
+            "polymarket fanout queue failed",
+            error instanceof Error ? error.message : String(error),
+          );
           message.retry();
         }
         continue;

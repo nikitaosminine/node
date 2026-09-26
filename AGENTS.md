@@ -62,7 +62,7 @@ Single Cloudflare Worker file (~6000 lines) handling all routing, business logic
 - `agent-runs` — thesis AI analysis
 - `snapshot-rebuild-queue` — portfolio performance snapshots
 - `geography-queue` — ETF geographic allocation + constituents enrichment via LLM
-- `recap-queue` — weekly/daily brief generation
+- `recap-queue` — weekly/daily briefs plus isolated news and Polymarket fanouts
 
 **Scheduled crons:** 5 triggers daily for market-hours fanout, news, polymarket, and recaps.
 

@@ -659,6 +659,23 @@ export function resolveSentimentsForRow(
 // a given article (published_at is fixed), so re-fetching computes the same value.
 // ---------------------------------------------------------------------------
 
+interface ExistingNewsCluster {
+  id: string;
+  cluster_key: string;
+  article_url: string;
+  primary_article: Record<string, unknown>;
+  see_also: unknown[];
+  entities: {
+    isins?: string[];
+    tickers?: string[];
+    countries?: string[];
+    sectors?: string[];
+  } | null;
+  sentiments: unknown[] | null;
+  published_at: string;
+  expires_at: string;
+}
+
 export function buildClusterRow(
   result: NewsSearchResult,
   tickers: string[],
@@ -669,8 +686,17 @@ export function buildClusterRow(
   countries: string[] = [],
   sectors: string[] = [],
   priorSentiments: unknown[] = [],
+  priorCluster?: ExistingNewsCluster,
 ) {
   const url = result.url;
+  const publishedAt = priorCluster?.published_at ?? result.publishedAt!;
+  const newExpiry = new Date(new Date(result.publishedAt!).getTime() + NEWS_WINDOW_MS);
+  const priorExpiryMs = Date.parse(priorCluster?.expires_at ?? "");
+  const expiresAt = Number.isFinite(priorExpiryMs)
+    ? new Date(Math.max(newExpiry.getTime(), priorExpiryMs))
+    : newExpiry;
+  const priorArticle = priorCluster?.primary_article ?? {};
+  const freshSnippet = summary.replace(/^\s*(summary|résumé|resume)\s*:\s*/i, "").trim();
   const currentSentiments =
     sentiments?.map((s) => {
       const ref = companiesByKey.get(s.companyKey);
@@ -694,18 +720,21 @@ export function buildClusterRow(
     },
   );
   return {
-    cluster_key: url,
+    cluster_key: priorCluster?.cluster_key ?? url,
     primary_article: {
-      title: result.title ?? "",
-      url,
+      // Preserve provider-specific fields while refreshing usable Firecrawl
+      // content. A blank scrape must not erase a stored headline or snippet.
+      ...priorArticle,
+      title: result.title?.trim() || priorArticle.title || "",
       source: hostname(url),
-      published_at: result.publishedAt!,
-      // Strip an occasional leading "Summary:"/"Résumé:" label.
-      snippet: summary.replace(/^\s*(summary|résumé|resume)\s*:\s*/i, "").trim(),
-      image: result.image ?? null,
-      exa_score: result.providerScore,
+      published_at: publishedAt,
+      snippet: freshSnippet || priorArticle.snippet || "",
+      image: result.image || priorArticle.image || null,
+      exa_score: result.providerScore ?? priorArticle.exa_score ?? null,
+      // The URL remains the exact identity used by the database guard.
+      url,
     },
-    see_also: [] as unknown[],
+    see_also: priorCluster?.see_also ?? ([] as unknown[]),
     entities: { isins, tickers, countries, sectors },
     // Per-(cluster, company) sentiment from the batched Grok scoring call —
     // reintroduces the field V1 deliberately dropped (see migration
@@ -719,9 +748,9 @@ export function buildClusterRow(
       : {
           sentiments: [...(currentSentiments ?? []), ...preservedSentiments],
         }),
-    published_at: result.publishedAt!,
+    published_at: publishedAt,
     fetched_at: new Date().toISOString(),
-    expires_at: new Date(new Date(result.publishedAt!).getTime() + NEWS_WINDOW_MS).toISOString(),
+    expires_at: expiresAt.toISOString(),
   };
 }
 
@@ -1179,8 +1208,8 @@ function dedupeByStory(
 //   M    market-topic Firecrawl searches (one per distinct ETF-derived topic,
 //        M ≤ MAX_MARKET_TOPICS=12, M≈4 today; no secondary tier for topics)
 //        summaries arrive inline with search results (no contents calls)
-//   1    cluster entities pre-read (batched .in() on cluster_key, so a
-//        re-upsert never erases entity attribution from a previous run)
+//   1    cluster identity/metadata pre-read (batched .in() on article_url, so
+//        Exa-keyed rows keep their UUID and earlier attribution)
 //   ≤2   batch cluster upserts (sentiment-bearing and sentiment-preserving rows)
 //   1    batch match upsert
 //   1    sweep
@@ -1544,17 +1573,17 @@ export async function runNewsFanout(
   // keep an empty snippet, exactly as before.
   const survivors = [...pendingClusters.values()];
 
-  // --- Merge prior-run entity attribution (1 subrequest) ---------------------
+  // --- Reuse the existing exact-URL identity and attribution (1 subrequest) --
   // The upsert below is last-writer-wins on the whole row: without this union a
   // cluster re-fetched by a different search (company vs market topic) would
   // erase the entities written by an earlier run.
-  // Read-merge-write is not atomic across CONCURRENT fanouts (scheduled + admin
-  // debug overlapping). That race is accepted: runs are minutes apart on 3 fixed
-  // cron slots, admin runs are rare and manual, a lost union self-heals on the
-  // next run's pre-read, and a DB-side jsonb merge would need a new RPC/trigger
-  // migration that this feature deliberately avoids.
+  // The generated article_url and its unique index (migration
+  // 20260820120000) protect exact URL identity across concurrent fanouts.
+  // A writer that loses the race returns persistenceFailed so the queued fanout
+  // retries against the winning row; the manual debug path reports the error.
+  const existingClustersByUrl = new Map<string, ExistingNewsCluster>();
   const existingSentimentsByClusterKey = new Map<string, unknown[]>();
-  let sentimentPreReadFailed = false;
+  let identityPreReadFailed = false;
   const companiesByKey = new Map<string, SentimentCompanyRef>();
   for (const [companyKey, entry] of workList) {
     const holderTickers = new Set<string>();
@@ -1573,31 +1602,25 @@ export async function runNewsFanout(
   if (survivors.length > 0) {
     const { data: existingRows, error: preReadError } = await client
       .from("news_clusters")
-      .select("cluster_key,entities,sentiments")
+      .select(
+        "id,cluster_key,article_url,primary_article,see_also,entities,sentiments,published_at,expires_at",
+      )
       .in(
-        "cluster_key",
+        "article_url",
         survivors.map((p) => p.result.url),
       );
-    if (preReadError) {
-      sentimentPreReadFailed = true;
-      errors.push(`cluster entities pre-read: ${preReadError.message}`);
-      console.error("[news] cluster entities pre-read failed:", preReadError.message);
+    if (preReadError || !Array.isArray(existingRows)) {
+      identityPreReadFailed = true;
+      const message = preReadError?.message ?? "identity lookup returned no rows payload";
+      errors.push(`cluster URL identity pre-read: ${message}`);
+      console.error("[news] cluster URL identity pre-read failed:", message);
     }
-    const rows =
-      (existingRows as Array<{
-        cluster_key: string;
-        entities: {
-          isins?: string[];
-          tickers?: string[];
-          countries?: string[];
-          sectors?: string[];
-        } | null;
-        sentiments: unknown[] | null;
-      }> | null) ?? [];
+    const rows = (existingRows as ExistingNewsCluster[] | null) ?? [];
     for (const row of rows) {
-      const pending = pendingClusters.get(row.cluster_key);
+      const pending = pendingClusters.get(row.article_url);
+      existingClustersByUrl.set(row.article_url, row);
       if (Array.isArray(row.sentiments)) {
-        existingSentimentsByClusterKey.set(row.cluster_key, row.sentiments);
+        existingSentimentsByClusterKey.set(row.article_url, row.sentiments);
       }
       if (pending && row.entities) {
         (row.entities.tickers ?? []).forEach((t) => pending.tickers.add(t));
@@ -1648,32 +1671,36 @@ export async function runNewsFanout(
   const resolvedSentimentsByClusterKey = new Map<string, ClusterSentiment[] | null>();
 
   // --- Batch cluster upsert ---------------------------------------------------
-  const clusterRows = survivors.map((p) => {
+  // A failed identity lookup must never fall through to URL-key insertion:
+  // that would fork a legacy Exa-keyed article into a second cluster.
+  const clusterRows = (identityPreReadFailed ? [] : survivors).map((p) => {
     const clusterKey = p.result.url;
-    const resolvedSentiments = sentimentPreReadFailed
-      ? null
-      : resolveSentimentsForRow(
-          expectedCompanyKeysByCluster.get(clusterKey) ?? [],
-          sentimentsByClusterKey.get(clusterKey) ?? [],
-          sentimentError,
-        );
+    const resolvedSentiments = resolveSentimentsForRow(
+      expectedCompanyKeysByCluster.get(clusterKey) ?? [],
+      sentimentsByClusterKey.get(clusterKey) ?? [],
+      sentimentError,
+    );
     resolvedSentimentsByClusterKey.set(clusterKey, resolvedSentiments);
     return buildClusterRow(
       p.result,
       [...p.tickers],
       [...p.isins],
       p.result.summary,
-      sentimentPreReadFailed ? null : resolvedSentiments,
+      resolvedSentiments,
       companiesByKey,
       [...p.countries],
       [...p.sectors],
       existingSentimentsByClusterKey.get(clusterKey) ?? [],
+      existingClustersByUrl.get(clusterKey),
     );
   });
   let clustersUpserted = 0;
-  let persistenceFailed = false;
+  let persistenceFailed = identityPreReadFailed;
   const clusterMap = new Map<string, ClusterAccum>();
   const clusterKeyToId = new Map<string, string>();
+  const urlByClusterKey = new Map(
+    clusterRows.map((row, index) => [row.cluster_key, survivors[index].result.url]),
+  );
 
   const clusterRowsWithSentiments = clusterRows.filter((row) =>
     Object.prototype.hasOwnProperty.call(row, "sentiments"),
@@ -1699,14 +1726,15 @@ export async function runNewsFanout(
       continue;
     }
     for (const row of upserted ?? []) {
-      const pending = pendingClusters.get(row.cluster_key);
-      if (pending) {
+      const url = urlByClusterKey.get(row.cluster_key);
+      const pending = url ? pendingClusters.get(url) : undefined;
+      if (url && pending) {
         clusterMap.set(row.id, {
           publishedAt: pending.result.publishedAt ?? new Date().toISOString(),
           exaScore: pending.exaScore,
           companyKeys: pending.companyKeys,
         });
-        clusterKeyToId.set(row.cluster_key, row.id);
+        clusterKeyToId.set(url, row.id);
       }
     }
   }

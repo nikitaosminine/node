@@ -381,6 +381,7 @@ describe("runNewsFanout — ETF-derived market coverage", () => {
     state.existingClusters = [
       {
         cluster_key: "https://www.cnbc.com/nasdaq-rally",
+        article_url: "https://www.cnbc.com/nasdaq-rally",
         entities: { isins: ["US0378331005"], tickers: ["AAPL"], countries: [], sectors: [] },
       },
     ];
@@ -600,9 +601,9 @@ describe("runNewsFanout — ETF-derived market coverage", () => {
       MAX_COMPANY_SEARCHES_PER_RUN,
       scheduledTime,
     );
-    expect(expected.every((company) => state.searchQueries.some((query) => query.includes(company)))).toBe(
-      true,
-    );
+    expect(
+      expected.every((company) => state.searchQueries.some((query) => query.includes(company))),
+    ).toBe(true);
   });
 
   it("counts physical Firecrawl retries and degrades before the hard budget", async () => {
@@ -846,12 +847,14 @@ describe("selectRotatingWindow", () => {
     expect(configuredNewsSlots).toEqual([...NEWS_CRON_SLOTS]);
     const entries = Array.from({ length: 30 }, (_, i) => `company-${i}`);
     const monday = Date.UTC(2026, 8, 21);
-    const slots = Array.from({ length: 5 }, (_, day) =>
-      [
-        [day, 6, 30],
-        [day, 16, 30],
-        [day, 21, 0],
-      ] as Array<[number, number, number]>,
+    const slots = Array.from(
+      { length: 5 },
+      (_, day) =>
+        [
+          [day, 6, 30],
+          [day, 16, 30],
+          [day, 21, 0],
+        ] as Array<[number, number, number]>,
     ).flat();
     const seen = new Set<string>();
 
