@@ -109,6 +109,21 @@ export interface RecapRow {
   updated_at: string;
 }
 
-export interface RecapQueueMessage {
-  recapId: string;
+export interface NewsFanoutQueueMessage {
+  type: "news_fanout";
+  scheduledTime: number;
 }
+
+export interface PolymarketFanoutQueueMessage {
+  type: "polymarket_fanout";
+  scheduledTime: number;
+  afterPortfolioId?: string;
+  portfolioId?: string;
+}
+
+export type RecapQueueMessage =
+  | PolymarketFanoutQueueMessage
+  | NewsFanoutQueueMessage
+  | {
+      recapId: string;
+    };

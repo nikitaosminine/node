@@ -23,7 +23,7 @@ import {
   extractAndNormalizeConstituents,
   upsertEtfConstituents,
 } from "./feeds/etf-constituents";
-import { runNewsFanout } from "./feeds/news";
+import { NEWS_CRON_SLOTS, runNewsFanout } from "./feeds/news";
 import {
   runPolymarketFanout,
   NON_FINANCIAL_RE,
@@ -33,7 +33,12 @@ import {
 } from "./feeds/polymarket";
 import { generateRecap } from "./feeds/recaps";
 import { langsmithClient } from "./llm/langsmith";
-import type { RecapQueueMessage, RecapType } from "./feeds/recap-types";
+import type {
+  NewsFanoutQueueMessage,
+  PolymarketFanoutQueueMessage,
+  RecapQueueMessage,
+  RecapType,
+} from "./feeds/recap-types";
 
 export interface Env {
   SUPABASE_URL: string;
@@ -57,6 +62,8 @@ export interface Env {
   SUB_AGENT_PLANNING_SYSTEM_PROMPT?: string;
   FRED_API_KEY?: string;
   EXA_SEARCH?: string;
+  // Firecrawl serves news search; Exa remains available to recaps.
+  FIRECRAWL_API_KEY?: string;
   POLYMARKET_GAMMA_BASE_URL?: string;
   GEMINI_API_KEY?: string;
   GEMINI_MODEL?: string;
@@ -84,6 +91,32 @@ const CORS_HEADERS = {
 
 function json(body: unknown, status = 200): Response {
   return Response.json(body, { status, headers: CORS_HEADERS });
+}
+
+const INVOCATION_SUBREQUEST_BUDGET = 50;
+
+export interface InvocationSubrequestBudget {
+  remaining(): number;
+  fetch: typeof globalThis.fetch;
+}
+
+export async function withInvocationSubrequestBudget<T>(
+  work: (budget: InvocationSubrequestBudget) => Promise<T>,
+): Promise<T> {
+  const nativeFetch = globalThis.fetch.bind(globalThis);
+  let used = 0;
+  const guardedFetch: typeof globalThis.fetch = async (input, init) => {
+    if (used >= INVOCATION_SUBREQUEST_BUDGET) {
+      throw new Error("scheduled invocation subrequest budget exhausted");
+    }
+    used++;
+    return nativeFetch(input, init);
+  };
+
+  return work({
+    remaining: () => INVOCATION_SUBREQUEST_BUDGET - used,
+    fetch: guardedFetch,
+  });
 }
 
 // Deterministic UUID from a stable input string (SHA-256 → UUID format).
@@ -1087,8 +1120,11 @@ function resolveFastHoldingGeography(
   };
 }
 
-async function runGeographyMonthlyRefresh(env: Env): Promise<void> {
-  const { data, error } = await adminDb(env).from("portfolios").select("id");
+async function runGeographyMonthlyRefresh(
+  env: Env,
+  fetchImpl?: typeof globalThis.fetch,
+): Promise<void> {
+  const { data, error } = await adminDb(env, { fetch: fetchImpl }).from("portfolios").select("id");
   if (error) throw new Error(`monthly geography refresh portfolio lookup failed: ${error.message}`);
   const portfolioIds = (data ?? []).map((r) => String(r.id));
   await Promise.all(
@@ -1096,6 +1132,7 @@ async function runGeographyMonthlyRefresh(env: Env): Promise<void> {
       enqueuePendingGeographyResearch(env, portfolioId, "monthly_refresh", {
         force: true,
         includeResearched: true,
+        fetch: fetchImpl,
       }).catch((err) => console.error(`monthly geography refresh failed for ${portfolioId}:`, err)),
     ),
   );
@@ -1249,9 +1286,9 @@ async function recomputePortfolioGeography(env: Env, portfolioId: string): Promi
 async function pendingFundLikeHoldingIds(
   env: Env,
   portfolioId: string,
-  options: { includeResearched?: boolean } = {},
+  options: { includeResearched?: boolean; fetch?: typeof globalThis.fetch } = {},
 ): Promise<string[]> {
-  const client = adminDb(env);
+  const client = adminDb(env, { fetch: options.fetch });
   const { data, error } = await client
     .from("holdings")
     .select("id,ticker,name,asset_type")
@@ -1291,11 +1328,12 @@ async function enqueuePendingGeographyResearch(
   env: Env,
   portfolioId: string,
   reason: GeographyQueueMessage["reason"],
-  options: { force?: boolean; includeResearched?: boolean } = {},
+  options: { force?: boolean; includeResearched?: boolean; fetch?: typeof globalThis.fetch } = {},
 ): Promise<{ queued: boolean; pendingResearchCount: number; holdingIds: string[]; sentHoldingIds: string[] }> {
-  const client = adminDb(env);
+  const client = adminDb(env, { fetch: options.fetch });
   const holdingIds = await pendingFundLikeHoldingIds(env, portfolioId, {
     includeResearched: options.includeResearched,
+    fetch: options.fetch,
   });
   if (holdingIds.length === 0) {
     return { queued: false, pendingResearchCount: 0, holdingIds, sentHoldingIds: [] };
@@ -2063,8 +2101,20 @@ function isGeographyQueueMessage(message: WorkerQueueMessage): message is Geogra
   return "type" in message && message.type === "geography_research";
 }
 
-function isRecapQueueMessage(message: WorkerQueueMessage): message is RecapQueueMessage {
+function isRecapQueueMessage(
+  message: WorkerQueueMessage,
+): message is Extract<RecapQueueMessage, { recapId: string }> {
   return "recapId" in message;
+}
+
+function isNewsFanoutQueueMessage(message: WorkerQueueMessage): message is NewsFanoutQueueMessage {
+  return "type" in message && message.type === "news_fanout";
+}
+
+function isPolymarketFanoutQueueMessage(
+  message: WorkerQueueMessage,
+): message is PolymarketFanoutQueueMessage {
+  return "type" in message && message.type === "polymarket_fanout";
 }
 
 async function fetchHistoricalPrices(
@@ -3156,7 +3206,11 @@ async function appendTodaySnapshot(env: Env, portfolioId: string): Promise<strin
   return date;
 }
 
-async function enqueueDailySnapshotsForClosedMarkets(env: Env, scheduledTime: number): Promise<void> {
+async function enqueueDailySnapshotsForClosedMarkets(
+  env: Env,
+  scheduledTime: number,
+  fetchImpl?: typeof globalThis.fetch,
+): Promise<void> {
   if (!env.SNAPSHOT_QUEUE) return;
   const scheduledAt = new Date(scheduledTime);
   const timeKey = `${scheduledAt.getUTCHours()}:${String(scheduledAt.getUTCMinutes()).padStart(2, "0")}`;
@@ -3169,7 +3223,7 @@ async function enqueueDailySnapshotsForClosedMarkets(env: Env, scheduledTime: nu
   const exchanges = exchangesByTime[timeKey] ?? [];
   if (exchanges.length === 0) return;
 
-  const { data, error } = await adminDb(env)
+  const { data, error } = await adminDb(env, { fetch: fetchImpl })
     .from("portfolios")
     .select("id")
     .in("primary_exchange", exchanges);
@@ -3318,8 +3372,9 @@ async function createAndQueueRecap(
     periodStart: string;
     periodEnd: string;
   },
+  fetchImpl?: typeof globalThis.fetch,
 ): Promise<string | null> {
-  const client = adminDb(env);
+  const client = adminDb(env, { fetch: fetchImpl });
   const { data, error } = await client
     .from("recaps")
     .insert({
@@ -3348,8 +3403,9 @@ async function createAndQueueRecap(
 async function runWeeklyRecapFanout(
   env: Env,
   options: { now: Date; dryRun?: boolean },
+  fetchImpl?: typeof globalThis.fetch,
 ): Promise<{ dryRun: boolean; checkedPortfolios: number; duePortfolios: number; queued: number; queuedIds: string[] }> {
-  const client = adminDb(env);
+  const client = adminDb(env, { fetch: fetchImpl });
   const [{ data: portfolios, error: pErr }, { data: userSettings, error: sErr }] = await Promise.all([
     client.from("portfolios").select("id,user_id"),
     client.from("agent_user_settings").select("user_id,timezone"),
@@ -3390,7 +3446,7 @@ async function runWeeklyRecapFanout(
       type: "weekly",
       periodStart,
       periodEnd,
-    });
+    }, fetchImpl);
     if (id) queuedIds.push(id);
   }
 
@@ -3405,7 +3461,7 @@ async function runWeeklyRecapFanout(
 
 async function runScheduledFanout(
   env: Env,
-  options: { now: Date; dryRun?: boolean; source: "cron" | "manual" },
+  options: { now: Date; dryRun?: boolean; source: "cron" | "manual"; fetch?: typeof globalThis.fetch },
 ): Promise<{
   source: "cron" | "manual";
   dryRun: boolean;
@@ -3418,7 +3474,7 @@ async function runScheduledFanout(
     throw new Error("Server misconfiguration: AGENT_RUNS_QUEUE binding is missing");
   }
 
-  const client = adminDb(env);
+  const client = adminDb(env, { fetch: options.fetch });
   const [{ data: portfolios, error: portfoliosError }, { data: userSettings, error: userSettingsError }, { data: portfolioSettings, error: portfolioSettingsError }] =
     await Promise.all([
       client.from("portfolios").select("id,user_id"),
@@ -3487,7 +3543,7 @@ async function runScheduledFanout(
 
   const queuedRunIds: string[] = [];
   for (const target of dueTargets) {
-    const run = await createRun(adminDb(env), {
+    const run = await createRun(client, {
       userId: String(target.user_id),
       portfolioId: String(target.id),
       triggerType: "scheduled",
@@ -5418,6 +5474,22 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
     }
 
 
+    // GET /api/_debug/company-sentiment — inspect rolling per-company scores.
+    if (method === "GET" && pathname === "/api/_debug/company-sentiment") {
+      const adminError = requireAdmin(request, env);
+      if (adminError) return adminError;
+      try {
+        const { data, error } = await adminDb(env)
+          .from("company_sentiment")
+          .select("*")
+          .order("updated_at", { ascending: false });
+        if (error) return json({ error: error.message }, 500);
+        return json({ companies: data ?? [] }, 200);
+      } catch (err) {
+        return json({ error: err instanceof Error ? err.message : String(err) }, 500);
+      }
+    }
+
     if (method === "POST" && pathname === "/api/_debug/run-polymarket-fanout") {
       const adminError = requireAdmin(request, env);
       if (adminError) return adminError;
@@ -5540,10 +5612,8 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
         )
         .eq("portfolio_id", portfolioId)
         .gt("news_clusters.expires_at", new Date().toISOString())
-        // Minimum score floor. Score is exaScore × recency × holdingsBooster,
-        // whose distribution differs from the previous provider's entity-weight
-        // one — so this starts permissive and MUST be recalibrated empirically
-        // from observed Exa output (see plan verification step).
+        // Minimum score floor. Firecrawl rank decay combines with recency and
+        // holdings overlap; the permissive floor trims near-expiry low-rank news.
         .gte("score", 0.05)
         .order("score", { ascending: false })
         .limit(limit);
@@ -5834,56 +5904,77 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
     return json({ error: "Not found" }, 404);
   },
   async scheduled(controller: ScheduledController, env: Env, _ctx: ExecutionContext): Promise<void> {
-    try {
-      await runScheduledFanout(env, {
-        now: new Date(controller.scheduledTime),
-        source: "cron",
-      });
-    } catch (error) {
-      console.error("scheduled fanout failed", error);
-    }
-    try {
-      await enqueueDailySnapshotsForClosedMarkets(env, controller.scheduledTime);
-    } catch (error) {
-      console.error("daily snapshot fanout failed", error);
-    }
-    // News fanout — decoupled from the hourly cron to a few times/day to cut Exa
-    // spend. Runs only on these cron slots (not the hourly "5 * * * *"): weekday
-    // morning, afternoon, and evening. Manual runs go via /api/_debug/run-news-fanout.
-    const NEWS_CRON_SLOTS = new Set(["30 6 * * 2-6", "30 16 * * 1-5", "0 21 * * 1-5"]);
-    if (NEWS_CRON_SLOTS.has(controller.cron)) {
+    return withInvocationSubrequestBudget(async (invocationBudget) => {
+      // Enqueue before portfolio work can exhaust this invocation's budget.
+      // recap-queue uses max_batch_size=1, giving each feed job its own invocation.
       try {
-        await runNewsFanout(env);
+        if (!env.RECAP_QUEUE) {
+          throw new Error("Server misconfiguration: RECAP_QUEUE binding is missing");
+        }
+        await env.RECAP_QUEUE.send({
+          type: "polymarket_fanout",
+          scheduledTime: controller.scheduledTime,
+        });
       } catch (error) {
-        console.error("news fanout failed", error);
+        console.error("polymarket fanout enqueue failed", error);
       }
-    }
-    try {
-      await runPolymarketFanout(env);
-    } catch (error) {
-      console.error("polymarket fanout failed", error);
-    }
-    // Weekly recap fanout — rides the hourly cron; fires for portfolios where
-    // it is Saturday 08:00 in the user's tz. Daily recaps are chained off the
-    // snapshot commit in queue(), not here.
-    if (controller.cron === "5 * * * *") {
-      try {
-        await runWeeklyRecapFanout(env, { now: new Date(controller.scheduledTime) });
-      } catch (error) {
-        console.error("weekly recap fanout failed", error);
-      }
-      // Monthly ETF geography refresh — piggybacks on the hourly cron on the
-      // first of each month at UTC midnight (fires at 00:05). Re-researches all
-      // ETF holdings across all portfolios to pick up index rebalancing changes.
-      const scheduledDate = new Date(controller.scheduledTime);
-      if (scheduledDate.getUTCDate() === 1 && scheduledDate.getUTCHours() === 0) {
+      if (NEWS_CRON_SLOTS.some((slot) => slot === controller.cron)) {
         try {
-          await runGeographyMonthlyRefresh(env);
+          if (!env.RECAP_QUEUE) {
+            throw new Error("Server misconfiguration: RECAP_QUEUE binding is missing");
+          }
+          await env.RECAP_QUEUE.send({
+            type: "news_fanout",
+            scheduledTime: controller.scheduledTime,
+          });
         } catch (error) {
-          console.error("monthly geography refresh failed", error);
+          console.error("news fanout enqueue failed", error);
         }
       }
-    }
+      try {
+        await runScheduledFanout(env, {
+          now: new Date(controller.scheduledTime),
+          source: "cron",
+          fetch: invocationBudget.fetch,
+        });
+      } catch (error) {
+        console.error("scheduled fanout failed", error);
+      }
+      try {
+        await enqueueDailySnapshotsForClosedMarkets(
+          env,
+          controller.scheduledTime,
+          invocationBudget.fetch,
+        );
+      } catch (error) {
+        console.error("daily snapshot fanout failed", error);
+      }
+      // Weekly recap fanout — rides the hourly cron; fires for portfolios where
+      // it is Saturday 08:00 in the user's tz. Daily recaps are chained off the
+      // snapshot commit in queue(), not here.
+      if (controller.cron === "5 * * * *") {
+        try {
+          await runWeeklyRecapFanout(
+            env,
+            { now: new Date(controller.scheduledTime) },
+            invocationBudget.fetch,
+          );
+        } catch (error) {
+          console.error("weekly recap fanout failed", error);
+        }
+        // Monthly ETF geography refresh — piggybacks on the hourly cron on the
+        // first of each month at UTC midnight (fires at 00:05). Re-researches all
+        // ETF holdings across all portfolios to pick up index rebalancing changes.
+        const scheduledDate = new Date(controller.scheduledTime);
+        if (scheduledDate.getUTCDate() === 1 && scheduledDate.getUTCHours() === 0) {
+          try {
+            await runGeographyMonthlyRefresh(env, invocationBudget.fetch);
+          } catch (error) {
+            console.error("monthly geography refresh failed", error);
+          }
+        }
+      }
+    });
   },
   async queue(batch: MessageBatch<WorkerQueueMessage>, env: Env): Promise<void> {
     for (const message of batch.messages) {
@@ -5944,6 +6035,80 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
         } catch (error) {
           await markGeographyJobsFailed(env, message.body.portfolio_id, holdingIds, error);
           console.error(`geography queue failed for portfolio ${message.body.portfolio_id}`, error);
+          message.retry();
+        }
+        continue;
+      }
+
+      if (isPolymarketFanoutQueueMessage(message.body)) {
+        const fanoutMessage = message.body;
+        try {
+          const result = await withInvocationSubrequestBudget((budget) =>
+            runPolymarketFanout(env, {
+              fetch: budget.fetch,
+              maxPortfolios: 5,
+              afterPortfolioId: fanoutMessage.afterPortfolioId,
+              portfolioId: fanoutMessage.portfolioId,
+            }),
+          );
+          if (
+            result.portfoliosSkipped !== result.skippedPortfolioIds.length ||
+            (result.errors.length > 0 &&
+              result.portfoliosProcessed === 0 &&
+              result.portfoliosSkipped === 0)
+          ) {
+            throw new Error(`polymarket fanout incomplete: ${result.errors.join("; ")}`);
+          }
+          if (fanoutMessage.portfolioId && result.portfoliosSkipped > 0) {
+            throw new Error(`polymarket portfolio retry failed: ${result.errors.join("; ")}`);
+          }
+          if (result.skippedPortfolioIds.length > 0 || result.nextPortfolioCursor) {
+            if (!env.RECAP_QUEUE) {
+              throw new Error("Server misconfiguration: RECAP_QUEUE binding is missing");
+            }
+            for (const portfolioId of result.skippedPortfolioIds) {
+              await env.RECAP_QUEUE.send({
+                type: "polymarket_fanout",
+                scheduledTime: fanoutMessage.scheduledTime,
+                portfolioId,
+              });
+            }
+            if (result.nextPortfolioCursor) {
+              await env.RECAP_QUEUE.send({
+                type: "polymarket_fanout",
+                scheduledTime: fanoutMessage.scheduledTime,
+                afterPortfolioId: result.nextPortfolioCursor,
+              });
+            }
+          }
+          message.ack();
+        } catch (error) {
+          console.error(
+            "polymarket fanout queue failed",
+            error instanceof Error ? error.message : String(error),
+          );
+          message.retry();
+        }
+        continue;
+      }
+
+      if (isNewsFanoutQueueMessage(message.body)) {
+        try {
+          const result = await runNewsFanout(env, { scheduledTime: message.body.scheduledTime });
+          if (
+            result.persistenceFailed ||
+            (result.errors.length > 0 &&
+              result.clustersUpserted === 0 &&
+              result.matchesUpserted === 0)
+          ) {
+            throw new Error(`news fanout produced no coverage: ${result.errors.join("; ")}`);
+          }
+          message.ack();
+        } catch (error) {
+          console.error(
+            "news fanout queue failed",
+            error instanceof Error ? error.message : String(error),
+          );
           message.retry();
         }
         continue;

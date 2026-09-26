@@ -127,6 +127,11 @@ interface HoldingsCacheRow {
 
 export interface PolymarketFanoutOptions {
   forceRescore?: boolean;
+  fetch?: typeof globalThis.fetch;
+  // Queue deliveries use a bounded page or a single failed portfolio.
+  afterPortfolioId?: string;
+  maxPortfolios?: number;
+  portfolioId?: string;
 }
 
 export interface PolymarketFanoutResult {
@@ -134,6 +139,8 @@ export interface PolymarketFanoutResult {
   marketsDeactivated: number;
   portfoliosProcessed: number;
   portfoliosSkipped: number;
+  skippedPortfolioIds: string[];
+  nextPortfolioCursor: string | null;
   curation: {
     model: string;
     reasoningEffort: PolymarketGrokReasoningEffort;
@@ -254,12 +261,13 @@ export async function invokePolymarketGrok(
   env: Env,
   systemPrompt: string,
   userPrompt: string,
+  fetchImpl: typeof globalThis.fetch = globalThis.fetch,
 ): Promise<string> {
   const apiKey = env.GROK_MAIN_API_KEY ?? env.GROK_SUB_API_KEY ?? env.GROK_NORMALIZATION_API_KEY;
   if (!apiKey) throw new Error("[polymarket] No Grok API key available");
   const { model, reasoningEffort } = getPolymarketGrokConfig(env);
 
-  const res = await fetch(`${getGrokBaseUrl(env)}/chat/completions`, {
+  const res = await fetchImpl(`${getGrokBaseUrl(env)}/chat/completions`, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${apiKey}`,
@@ -346,8 +354,11 @@ function gammaBase(env: Env): string {
   return (env.POLYMARKET_GAMMA_BASE_URL || "https://gamma-api.polymarket.com").replace(/\/$/, "");
 }
 
-async function fetchGammaJson<T>(url: string): Promise<T> {
-  const res = await fetch(url, {
+async function fetchGammaJson<T>(
+  url: string,
+  fetchImpl: typeof globalThis.fetch = globalThis.fetch,
+): Promise<T> {
+  const res = await fetchImpl(url, {
     headers: { Accept: "application/json" },
   });
   if (!res.ok) {
@@ -422,7 +433,10 @@ function flattenEvent(event: GammaEvent): FlatMarket[] {
 // Candidate pool fetch (tag-filtered only — no broad pool)
 // ---------------------------------------------------------------------------
 
-export async function fetchCandidateMarkets(env: Env): Promise<Map<string, FlatMarket>> {
+export async function fetchCandidateMarkets(
+  env: Env,
+  fetchImpl: typeof globalThis.fetch = globalThis.fetch,
+): Promise<Map<string, FlatMarket>> {
   const base = gammaBase(env);
   const marketMap = new Map<string, FlatMarket>();
   const failures: string[] = [];
@@ -432,6 +446,7 @@ export async function fetchCandidateMarkets(env: Env): Promise<Map<string, FlatM
     try {
       const events = await fetchGammaJson<GammaEvent[]>(
         `${base}/events?tag_id=${tagId}&active=true&closed=false&order=volume24hr&ascending=false&limit=30`,
+        fetchImpl,
       );
       successfulTags++;
       let added = 0;
@@ -780,6 +795,7 @@ async function scoreRotatingCandidates(
   env: Env,
   profileSummary: string,
   candidates: FlatMarket[],
+  fetchImpl: typeof globalThis.fetch = globalThis.fetch,
 ): Promise<GrokScoringResult> {
   if (candidates.length === 0) return { scores: [], grokInvoked: false };
 
@@ -817,7 +833,7 @@ Return JSON array only. No sports, no entertainment, no individual political can
   const validIds = new Set(candidates.slice(0, ROTATING_BATCH_SIZE).map((m) => m.condition_id));
 
   try {
-    const raw = await invokeGrok(env, systemPrompt, userPrompt);
+    const raw = await invokeGrok(env, systemPrompt, userPrompt, fetchImpl);
     const items = extractJsonArray(raw);
     return {
       scores: items
@@ -906,13 +922,23 @@ export async function runPolymarketFanout(
   env: Env,
   options: PolymarketFanoutOptions = {},
 ): Promise<PolymarketFanoutResult> {
-  const client: AnySupabaseClient = createClient(env.SUPABASE_URL, env.SUPABASE_SERVICE_KEY);
+  if (
+    options.maxPortfolios !== undefined &&
+    (!Number.isSafeInteger(options.maxPortfolios) || options.maxPortfolios < 1)
+  ) {
+    throw new Error("[polymarket] maxPortfolios must be a positive integer");
+  }
+  const fetchImpl = options.fetch ?? globalThis.fetch;
+  const client: AnySupabaseClient = createClient(env.SUPABASE_URL, env.SUPABASE_SERVICE_KEY, {
+    global: { fetch: fetchImpl },
+  });
   const forceRescore = options.forceRescore === true;
   const { model, reasoningEffort } = getPolymarketGrokConfig(env);
 
   const errors: string[] = [];
   let portfoliosProcessed = 0;
   let portfoliosSkipped = 0;
+  const skippedPortfolioIds: string[] = [];
   const curation: PolymarketFanoutResult["curation"] = {
     model,
     reasoningEffort,
@@ -927,7 +953,7 @@ export async function runPolymarketFanout(
   // 1. Fetch and flatten candidate markets. A completely empty candidate pool
   // is fatal: continuing would eventually replace every portfolio feed with
   // an empty set. Let the scheduled/debug caller surface the failure instead.
-  const candidateMap = await fetchCandidateMarkets(env);
+  const candidateMap = await fetchCandidateMarkets(env, fetchImpl);
 
   // 2. Upsert all markets (prices + probabilities refresh every run)
   const allMarkets = Array.from(candidateMap.values());
@@ -951,12 +977,30 @@ export async function runPolymarketFanout(
       marketsDeactivated,
       portfoliosProcessed,
       portfoliosSkipped,
+      skippedPortfolioIds,
+      nextPortfolioCursor: null,
       curation,
       errors,
     };
   }
 
-  const portfolios = portfoliosData as PortfolioRow[];
+  const allPortfolios = portfoliosData as PortfolioRow[];
+  const eligiblePortfolios = options.portfolioId
+    ? allPortfolios.filter((portfolio) => portfolio.id === options.portfolioId)
+    : options.maxPortfolios !== undefined
+      ? allPortfolios
+          .filter((portfolio) => portfolio.id > (options.afterPortfolioId ?? ""))
+          .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+      : allPortfolios;
+  const portfolios = options.maxPortfolios !== undefined && !options.portfolioId
+    ? eligiblePortfolios.slice(0, options.maxPortfolios)
+    : eligiblePortfolios;
+  const nextPortfolioCursor =
+    options.maxPortfolios !== undefined &&
+    !options.portfolioId &&
+    eligiblePortfolios.length > portfolios.length
+      ? portfolios.at(-1)?.id ?? null
+      : null;
 
   // Collapse multi-bucket events (e.g. "How many Fed cuts?") to a SINGLE
   // representative market — the highest-Yes bucket (consensus answer) — BEFORE
@@ -1124,9 +1168,9 @@ export async function runPolymarketFanout(
         try {
           scoringResult = curationRun
             ? await withRunTree(curationRun, () =>
-                scoreRotatingCandidates(env, profileSummary, rotatingCandidates),
+                scoreRotatingCandidates(env, profileSummary, rotatingCandidates, fetchImpl),
               )
-            : await scoreRotatingCandidates(env, profileSummary, rotatingCandidates);
+            : await scoreRotatingCandidates(env, profileSummary, rotatingCandidates, fetchImpl);
         } catch (err) {
           if (curationRun && lsClient) {
             try {
@@ -1220,6 +1264,7 @@ export async function runPolymarketFanout(
       console.error(`[polymarket] unexpected error for portfolio ${portfolioId}:`, msg);
       errors.push(`portfolio ${portfolioId}: ${msg}`);
       portfoliosSkipped++;
+      skippedPortfolioIds.push(portfolioId);
     }
   }
 
@@ -1228,6 +1273,8 @@ export async function runPolymarketFanout(
     marketsDeactivated,
     portfoliosProcessed,
     portfoliosSkipped,
+    skippedPortfolioIds,
+    nextPortfolioCursor,
     curation,
     errors,
   };

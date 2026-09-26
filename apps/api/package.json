@@ -8,6 +8,7 @@
     "cf-typegen": "wrangler types",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "test:postgres": "node --test ./scripts/postgres-sentiment-integration.mjs",
     "eval:agent": "node ./scripts/eval-agent-runs.mjs",
     "eval:curation": "node ./scripts/eval-curation.mjs",
     "check:fetch-auth": "bash ./scripts/check-fetch-auth.sh"
@@ -20,6 +21,8 @@
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.0.0",
+    "pg": "^8.16.3",
+    "smol-toml": "^1.9.0",
     "typescript": "^5.8.3",
     "vitest": "^3.2.6",
     "wrangler": "^4.0.0"

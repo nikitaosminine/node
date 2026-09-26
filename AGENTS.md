@@ -39,8 +39,9 @@ npm run eval:curation          # Polymarket curation quality eval — docs: apps
 
 No monorepo-level build or test command exists; lint/build/test per-app.
 
-CI (`.github/workflows/ci.yml`) runs on every PR to `main`: `check-web` does lint + `tsc --noEmit`
-+ `npm test` in `apps/web`; `check-api` does `npm run typecheck` + `npm test` (vitest) in `apps/api`.
+CI (`.github/workflows/ci.yml`) runs on every PR to `main`: `check-web` runs lint, `tsc --noEmit`,
+and `npm test` in `apps/web`; `check-api` runs `npm run typecheck`, `npm test` (Vitest), and
+`npm run test:postgres` (PostgreSQL 17 integration) in `apps/api`.
 
 ## Deployment rules
 
@@ -61,9 +62,13 @@ Single Cloudflare Worker file (~6000 lines) handling all routing, business logic
 - `agent-runs` — thesis AI analysis
 - `snapshot-rebuild-queue` — portfolio performance snapshots
 - `geography-queue` — ETF geographic allocation + constituents enrichment via LLM
-- `recap-queue` — weekly/daily brief generation
+- `recap-queue` — weekly/daily briefs plus isolated news and Polymarket fanouts; Polymarket
+  processes five-portfolio pages with a stable cursor, retries skipped portfolios individually,
+  and acknowledges only after continuation messages are queued
 
-**Scheduled crons:** 5 triggers daily for market-hours fanout, news, polymarket, and recaps.
+**Scheduled crons:** five cron expressions: one hourly trigger for scheduled portfolio work and
+four weekday feed windows. Polymarket enqueues on every trigger; news enqueues on three of the
+weekday windows.
 
 **Never call `getPortfolioGeography()` inside a POST endpoint response** — it triggers Yahoo Finance requests that cause rate limiting. Geography is always enqueued as a background job.
 
@@ -93,7 +98,7 @@ Page-wrapper padding and the `@container` containment rule live in `apps/web/DES
 
 Supabase PostgreSQL. RLS is enabled on all tables — queries from the frontend use the anon key and are row-restricted by policy. The Worker uses the service key to perform cross-user operations (snapshots, fanout).
 
-Key tables: `profiles`, `portfolios`, `holdings`, `theses`, `agent_runs`, `transactions`, `holding_geography_allocations`, `news_clusters`/`portfolio_news_matches`, `polymarket_markets`/`portfolio_polymarket_matches`, `recaps`, `allowed_emails`.
+Key tables: `profiles`, `portfolios`, `holdings`, `theses`, `agent_runs`, `transactions`, `holding_geography_allocations`, `news_clusters` (per-cluster `sentiments` jsonb)/`portfolio_news_matches`, `polymarket_markets`/`portfolio_polymarket_matches`, `company_sentiment` (rolling per-company EWMA, recomputed at the end of every news fanout — see `apps/api/src/feeds/sentiment.ts`), `recaps`, `allowed_emails`.
 
 Migration files: `supabase/migrations/` — timestamped SQL, applied in order.
 
@@ -103,9 +108,9 @@ Migration files: `supabase/migrations/` — timestamped SQL, applied in order.
 
 **Backend:** Cloudflare Workers, Supabase (PostgreSQL + Auth), Cloudflare Queues.
 
-**AI models (xAI Grok):** `grok-4.20-0309-reasoning` for thesis agent and benchmarks; `grok-4-1-fast-non-reasoning` for sub-agent and broker-CSV normalization; `grok-4.3` for expense-CSV normalization (`GROK_NORMALIZATION_MODEL`; `reasoning_effort` via `GROK_NORMALIZATION_EFFORT`, default `none` — reasoning over a whole CSV in one call exceeds the 90s timeout); `grok-4.6` with medium reasoning for Polymarket curation (`POLYMARKET_GROK_MODEL`, `POLYMARKET_GROK_REASONING_EFFORT`); Gemini for recaps.
+**AI models (xAI Grok):** `grok-4.20-0309-reasoning` for thesis agent and benchmarks; `grok-4-1-fast-non-reasoning` for sub-agent and broker-CSV normalization; `grok-4.3` for expense-CSV normalization (`GROK_NORMALIZATION_MODEL`; `reasoning_effort` via `GROK_NORMALIZATION_EFFORT`, default `none` — reasoning over a whole CSV in one call exceeds the 90s timeout); `grok-4.6` with medium reasoning for Polymarket curation (`POLYMARKET_GROK_MODEL`, `POLYMARKET_GROK_REASONING_EFFORT`); Gemini for recaps. News sentiment uses the configurable `SENTIMENT_GROK_MODEL`; see the README model table for its default.
 
-**Market data:** Yahoo Finance (quotes/search), FRED (economic indicators), Exa Search (web), Polymarket Gamma (prediction markets).
+**Market data:** Yahoo Finance (quotes/search), FRED (economic indicators), Firecrawl (news fanout search + summaries), Exa Search (recap agent web search), Polymarket Gamma (prediction markets).
 
 ## Environment variables
 
@@ -118,7 +123,7 @@ NEXT_PUBLIC_MIXPANEL_TOKEN=                  # optional
 ```
 
 API secrets (set via `npx wrangler secret put`):
-`SUPABASE_SERVICE_KEY`, `SUPABASE_ANON_KEY`, `GROK_MAIN_API_KEY`, `GROK_SUB_API_KEY`, `GROK_NORMALIZATION_API_KEY`, `FRED_API_KEY`, `EXA_SEARCH`, `GEMINI_API_KEY`, `ADMIN_SECRET`
+`SUPABASE_SERVICE_KEY`, `SUPABASE_ANON_KEY`, `GROK_MAIN_API_KEY`, `GROK_SUB_API_KEY`, `GROK_NORMALIZATION_API_KEY`, `FRED_API_KEY`, `EXA_SEARCH` (recaps), `FIRECRAWL_API_KEY` (see `apps/api/wrangler.toml`), `GEMINI_API_KEY`, `ADMIN_SECRET`
 
 ## Beta access
 

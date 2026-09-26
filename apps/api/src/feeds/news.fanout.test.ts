@@ -1,0 +1,664 @@
+// End-to-end fanout test: runs the real runNewsFanout over a stubbed HTTP
+// layer (Firecrawl search, Grok chat/completions, Supabase PostgREST) and
+// asserts on the actual rows the Worker would persist — per-cluster sentiments
+// folded into the news_clusters upsert, and the EWMA-updated company_sentiment
+// row — plus the graceful-degradation path when the Grok call fails.
+
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+import { runNewsFanout } from "./news";
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
+
+const SUPABASE_URL = "http://supabase.local";
+
+const env = {
+  SUPABASE_URL,
+  SUPABASE_SERVICE_KEY: "service-key",
+  FIRECRAWL_API_KEY: "fc-key",
+  GROK_MAIN_API_KEY: "grok-key",
+};
+
+const publishedAt = new Date(Date.now() - 24 * 3_600_000).toISOString();
+
+const exaResults = [
+  {
+    id: "exa-1",
+    url: "https://www.cnbc.com/acme-earnings",
+    title: "Acme Corp posts record quarterly earnings beat",
+    publishedDate: publishedAt,
+    score: 0.9,
+  },
+  {
+    id: "exa-2",
+    url: "https://www.cnbc.com/acme-expansion",
+    title: "Acme Corp announces factory expansion in France",
+    publishedDate: publishedAt,
+    score: 0.8,
+  },
+];
+
+interface CapturedRequest {
+  method: string;
+  pathname: string;
+  search: string;
+  columns: string | null;
+  body: unknown;
+}
+
+// Routes every outbound HTTP call runNewsFanout makes. `grokStatus` controls
+// the sentiment-scoring branch (`grokScores` optionally overrides the scored
+// pairs it returns); everything else stays healthy.
+function stubFanoutHttp(options: {
+  grokStatus: number;
+  grokScores?: Array<{ i: number; sentiment: number; rationale: string }>;
+  multiCompany?: boolean;
+  clusterPreReadStatus?: number;
+  existingClusters?: Array<Record<string, unknown>>;
+  emptyNews?: boolean;
+  pendingRows?: Array<Record<string, unknown>>;
+  matchUpsertStatus?: number;
+  clusterUpsertConflict?: boolean;
+  companySentimentEnqueueStatus?: number;
+  companySentimentApplyStatus?: number;
+}) {
+  const captured: CapturedRequest[] = [];
+  let nextClusterId = 1;
+  const clusterIdsByKey = new Map<string, string>(
+    (options.existingClusters ?? [])
+      .filter((row) => typeof row.id === "string" && typeof row.cluster_key === "string")
+      .map((row) => [String(row.cluster_key), String(row.id)]),
+  );
+  const storedSentiments = new Map<string, unknown>(
+    (options.existingClusters ?? []).map((row) => [String(row.cluster_key), row.sentiments]),
+  );
+  const results = options.emptyNews
+    ? []
+    : options.multiCompany
+      ? [
+          {
+            id: "exa-shared",
+            url: "https://www.cnbc.com/acme-beta-joint-expansion",
+            title: "Acme Corp and Beta Corp announce a joint expansion",
+            publishedDate: publishedAt,
+            score: 0.9,
+          },
+        ]
+      : exaResults;
+
+  const jsonResponse = (body: unknown, status = 200, headers: Record<string, string> = {}) =>
+    new Response(body === null ? null : JSON.stringify(body), {
+      status,
+      headers: { "Content-Type": "application/json", ...headers },
+    });
+
+  const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = new URL(String(input));
+    const method = init?.method ?? "GET";
+    const rawBody = typeof init?.body === "string" ? init.body : null;
+    const body = rawBody ? JSON.parse(rawBody) : null;
+    captured.push({
+      method,
+      pathname: url.pathname,
+      search: url.search,
+      columns: url.searchParams.get("columns"),
+      body,
+    });
+
+    // --- Firecrawl -----------------------------------------------------------
+    if (url.hostname === "api.firecrawl.dev" && url.pathname === "/v2/search") {
+      const isPrimary = (body as { includeDomains: string[] }).includeDomains.includes("ft.com");
+      return jsonResponse({
+        success: true,
+        data: {
+          news: (isPrimary ? results : []).map((result) => ({
+            url: result.url,
+            title: result.title,
+            summary: result.title,
+            metadata: { "article:published_time": result.publishedDate },
+            position: result.score === 0.9 ? 1 : 2,
+          })),
+        },
+      });
+    }
+
+    // --- Grok sentiment scoring ---------------------------------------------
+    if (url.hostname === "api.x.ai") {
+      if (options.grokStatus !== 200)
+        return new Response("grok down", { status: options.grokStatus });
+      const content = JSON.stringify({
+        scores: options.grokScores ?? [
+          { i: 1, sentiment: 0.7, rationale: "Earnings beat." },
+          { i: 2, sentiment: 0.3, rationale: "Expansion positive." },
+        ],
+      });
+      return jsonResponse({ choices: [{ message: { content } }] });
+    }
+
+    // --- Supabase PostgREST --------------------------------------------------
+    if (url.pathname === "/rest/v1/holdings") {
+      return jsonResponse(
+        options.multiCompany
+          ? [
+              {
+                ticker: "ACME",
+                isin: null,
+                asset_type: "stock",
+                name: "Acme Corp",
+                quantity: 10,
+                portfolio_id: "p-1",
+              },
+              {
+                ticker: "BETA",
+                isin: null,
+                asset_type: "stock",
+                name: "Beta Corp",
+                quantity: 10,
+                portfolio_id: "p-1",
+              },
+            ]
+          : [
+              {
+                ticker: "ACME",
+                isin: null,
+                asset_type: "stock",
+                name: "Acme Corp",
+                quantity: 10,
+                portfolio_id: "p-1",
+              },
+            ],
+      );
+    }
+    if (url.pathname === "/rest/v1/news_clusters" && method === "GET") {
+      if (options.clusterPreReadStatus && options.clusterPreReadStatus !== 200) {
+        return jsonResponse({ message: "cluster pre-read failed" }, options.clusterPreReadStatus);
+      }
+      return jsonResponse(options.existingClusters ?? []);
+    }
+    if (url.pathname === "/rest/v1/news_clusters" && method === "POST") {
+      if (options.clusterUpsertConflict) {
+        return jsonResponse(
+          { code: "23505", message: "duplicate article_url from a concurrent fanout" },
+          409,
+        );
+      }
+      const rows = body as Array<Record<string, unknown>>;
+      const columns = new Set(
+        (url.searchParams.get("columns") ?? "")
+          .split(",")
+          .map((column) => column.replaceAll('"', "")),
+      );
+      if (columns.has("sentiments") && rows.some((row) => !("sentiments" in row))) {
+        return jsonResponse(
+          { message: "null value in column sentiments violates not-null constraint" },
+          400,
+        );
+      }
+      for (const row of rows) {
+        if ("sentiments" in row) storedSentiments.set(String(row.cluster_key), row.sentiments);
+        else if (!storedSentiments.has(String(row.cluster_key))) {
+          storedSentiments.set(String(row.cluster_key), []);
+        }
+      }
+      return jsonResponse(
+        rows.map((row) => {
+          const key = String(row.cluster_key);
+          let id = clusterIdsByKey.get(key);
+          if (!id) {
+            id = `db-${nextClusterId++}`;
+            clusterIdsByKey.set(key, id);
+          }
+          return { id, cluster_key: key };
+        }),
+        201,
+      );
+    }
+    if (url.pathname === "/rest/v1/news_clusters" && method === "DELETE") {
+      return jsonResponse(null, 204, { "content-range": "*/0" });
+    }
+    if (url.pathname === "/rest/v1/company_sentiment" && method === "GET") {
+      return jsonResponse([
+        {
+          company_key: "ticker:ACME",
+          score: 0,
+          evidence_cluster_ids: ["old-1"],
+          scored_cluster_ids: [
+            {
+              id: "old-1",
+              scoredAt: new Date(Date.now() - 3_600_000).toISOString(),
+              publishedAt: new Date(Date.now() - 3 * 24 * 3_600_000).toISOString(),
+            },
+          ],
+        },
+      ]);
+    }
+    if (url.pathname === "/rest/v1/company_sentiment_pending" && method === "GET") {
+      return jsonResponse(options.pendingRows ?? []);
+    }
+    if (url.pathname === "/rest/v1/portfolio_news_matches" && method === "POST") {
+      if (options.matchUpsertStatus) {
+        return jsonResponse({ message: "match upsert failed" }, options.matchUpsertStatus);
+      }
+      return jsonResponse(null, 201);
+    }
+    if (url.pathname === "/rest/v1/rpc/try_acquire_company_sentiment_lock" && method === "POST") {
+      return jsonResponse(true, 200);
+    }
+    if (url.pathname === "/rest/v1/rpc/enqueue_company_sentiment_pending" && method === "POST") {
+      if (options.companySentimentEnqueueStatus) {
+        return jsonResponse({ message: "company sentiment enqueue failed" }, options.companySentimentEnqueueStatus);
+      }
+      return jsonResponse(true, 200);
+    }
+    if (url.pathname === "/rest/v1/rpc/apply_company_sentiment_batch" && method === "POST") {
+      if (options.companySentimentApplyStatus) {
+        return jsonResponse({ message: "company sentiment apply failed" }, options.companySentimentApplyStatus);
+      }
+      return jsonResponse(true, 200);
+    }
+    if (url.pathname === "/rest/v1/company_sentiment_lock" && method === "DELETE") {
+      return jsonResponse(null, 204);
+    }
+
+    throw new Error(`Unexpected request in test: ${method} ${url.href}`);
+  });
+
+  vi.stubGlobal("fetch", fetchMock);
+  return { captured, storedSentiments };
+}
+
+function clusterUpsertRows(captured: CapturedRequest[]): Array<Record<string, unknown>> {
+  const requests = captured.filter(
+    (r) => r.pathname === "/rest/v1/news_clusters" && r.method === "POST",
+  );
+  expect(requests.length).toBeGreaterThan(0);
+  return requests.flatMap((request) => request.body as Array<Record<string, unknown>>);
+}
+
+describe("runNewsFanout sentiment pipeline (end-to-end over stubbed HTTP)", () => {
+  it("marks a partial match persistence failure as retryable", async () => {
+    stubFanoutHttp({ grokStatus: 500, matchUpsertStatus: 503 });
+
+    const result = await runNewsFanout(env);
+
+    expect(result.clustersUpserted).toBe(2);
+    expect(result.matchesUpserted).toBe(0);
+    expect(result.persistenceFailed).toBe(true);
+    expect(result.errors).toContain("batch match upsert: match upsert failed");
+  });
+
+  it("marks a concurrent URL uniqueness collision retryable without writing matches", async () => {
+    const { captured } = stubFanoutHttp({ grokStatus: 200, clusterUpsertConflict: true });
+
+    const result = await runNewsFanout(env);
+
+    expect(result.persistenceFailed).toBe(true);
+    expect(result.clustersUpserted).toBe(0);
+    expect(result.matchesUpserted).toBe(0);
+    expect(result.errors).toContain(
+      "batch cluster upsert: duplicate article_url from a concurrent fanout",
+    );
+    expect(
+      captured.some(
+        (request) =>
+          request.pathname === "/rest/v1/portfolio_news_matches" && request.method === "POST",
+      ),
+    ).toBe(false);
+  });
+
+  it.each([
+    ["enqueue", { companySentimentEnqueueStatus: 503 }, "company sentiment enqueue failed"],
+    ["guarded EWMA write", { companySentimentApplyStatus: 503 }, "company sentiment apply failed"],
+  ])("marks a company sentiment %s failure retryable", async (_name, options, message) => {
+    stubFanoutHttp({ grokStatus: 200, ...options });
+
+    const result = await runNewsFanout(env);
+
+    expect(result.clustersUpserted).toBe(2);
+    expect(result.matchesUpserted).toBe(2);
+    expect(result.persistenceFailed).toBe(true);
+    expect(result.errors).toContain(`company sentiment: ${message}`);
+  });
+
+  it("persists per-cluster sentiments and EWMA-updates the rolling company score", async () => {
+    const { captured } = stubFanoutHttp({ grokStatus: 200 });
+
+    const result = await runNewsFanout(env);
+
+    expect(result.errors).toEqual([]);
+    expect(result.clustersUpserted).toBe(2);
+    expect(result.matchesUpserted).toBe(2);
+    expect(result.clustersScored).toBe(2);
+    expect(result.companiesRescored).toBe(1);
+
+    // All newly-upserted cluster/company pairs share exactly one cheap Grok
+    // request for this fanout, keeping the Worker within its subrequest budget.
+    const grokRequests = captured.filter(
+      (r) => r.pathname === "/v1/chat/completions" && r.method === "POST",
+    );
+    expect(grokRequests).toHaveLength(1);
+    expect(grokRequests[0].body).toMatchObject({
+      model: "grok-4-1-fast-non-reasoning",
+      response_format: { type: "json_object" },
+    });
+
+    // Per-cluster sentiments are folded into the single batch cluster upsert.
+    const rows = clusterUpsertRows(captured);
+    const clusterRequests = captured.filter(
+      (r) => r.pathname === "/rest/v1/news_clusters" && r.method === "POST",
+    );
+    expect(
+      clusterRequests.every((request) => {
+        const rows = request.body as Array<Record<string, unknown>>;
+        return (
+          new Set(rows.map((row) => Object.prototype.hasOwnProperty.call(row, "sentiments")))
+            .size === 1
+        );
+      }),
+    ).toBe(true);
+    expect(rows.map((r) => r.cluster_key)).toEqual(exaResults.map((result) => result.url));
+    expect(rows[0].sentiments).toEqual([
+      {
+        company_key: "ticker:ACME",
+        company_name: "Acme Corp",
+        tickers: ["ACME"],
+        isins: [],
+        score: 0.7,
+        rationale: "Earnings beat.",
+      },
+    ]);
+    expect(rows[1].sentiments).toEqual([
+      {
+        company_key: "ticker:ACME",
+        company_name: "Acme Corp",
+        tickers: ["ACME"],
+        isins: [],
+        score: 0.3,
+        rationale: "Expansion positive.",
+      },
+    ]);
+
+    // Rolling row: mean(0.7, 0.3)=0.5 observed, EWMA over prior 0 with
+    // alpha=0.35 → 0.175; cluster-id lists use the durable DB ids, fresh first.
+    // The write goes through the lease-guarded RPC, not a plain upsert.
+    const companyApply = captured.find(
+      (r) => r.pathname === "/rest/v1/rpc/apply_company_sentiment_batch" && r.method === "POST",
+    );
+    expect(companyApply).toBeDefined();
+    const applyBody = companyApply!.body as {
+      p_holder: string;
+      p_rows: Array<Record<string, unknown>>;
+    };
+    expect(applyBody.p_holder).toEqual(expect.any(String));
+    const companyRow = applyBody.p_rows[0];
+    expect(companyRow).toMatchObject({
+      company_key: "ticker:ACME",
+      company_name: "Acme Corp",
+      ticker: "ACME",
+      isin: null,
+      score: 0.175,
+      trend: "up",
+      evidence_cluster_ids: ["db-1", "db-2", "old-1"],
+    });
+    expect((companyRow.scored_cluster_ids as Array<{ id: string }>).map((r) => r.id)).toEqual([
+      "db-1",
+      "db-2",
+      "old-1",
+    ]);
+  });
+
+  it("reuses a legacy Exa cluster UUID for the same Firecrawl URL on repeat delivery", async () => {
+    const legacyId = "11111111-1111-4111-8111-111111111111";
+    const legacyKey = "exa-document-1";
+    const priorSentiments = [{ company_key: "ticker:BETA", score: -0.2, rationale: "Stored." }];
+    const { captured } = stubFanoutHttp({
+      grokStatus: 200,
+      existingClusters: [
+        {
+          id: legacyId,
+          cluster_key: legacyKey,
+          article_url: exaResults[0].url,
+          primary_article: {
+            title: "Stored Exa headline",
+            url: exaResults[0].url,
+            snippet: "",
+            source: "cnbc.com",
+            legacy_provider_id: legacyKey,
+          },
+          see_also: [{ title: "Earlier related story", url: "https://www.cnbc.com/earlier" }],
+          entities: { isins: [], tickers: ["BETA"], countries: [], sectors: [] },
+          sentiments: priorSentiments,
+          published_at: publishedAt,
+          expires_at: new Date(Date.now() + 2 * 86_400_000).toISOString(),
+        },
+      ],
+    });
+
+    const first = await runNewsFanout(env);
+    const second = await runNewsFanout(env);
+
+    expect(first.errors).toEqual([]);
+    expect(second.errors).toEqual([]);
+    const preReads = captured.filter(
+      (request) => request.pathname === "/rest/v1/news_clusters" && request.method === "GET",
+    );
+    expect(preReads).toHaveLength(2);
+    expect(preReads.every((request) => request.search.includes("article_url=in."))).toBe(true);
+
+    const legacyRows = clusterUpsertRows(captured).filter(
+      (row) => (row.primary_article as { url: string }).url === exaResults[0].url,
+    );
+    expect(legacyRows).toHaveLength(2);
+    expect(legacyRows.every((row) => row.cluster_key === legacyKey)).toBe(true);
+    expect(legacyRows[0].primary_article).toMatchObject({
+      title: exaResults[0].title,
+      snippet: exaResults[0].title,
+      url: exaResults[0].url,
+      legacy_provider_id: legacyKey,
+    });
+    expect(legacyRows[0].see_also).toEqual([
+      { title: "Earlier related story", url: "https://www.cnbc.com/earlier" },
+    ]);
+    expect((legacyRows[0].entities as { tickers: string[] }).tickers).toEqual(
+      expect.arrayContaining(["ACME", "BETA"]),
+    );
+    expect(legacyRows[0].sentiments).toEqual(
+      expect.arrayContaining([expect.objectContaining(priorSentiments[0])]),
+    );
+
+    const matchRows = captured
+      .filter(
+        (request) =>
+          request.pathname === "/rest/v1/portfolio_news_matches" && request.method === "POST",
+      )
+      .flatMap((request) => request.body as Array<{ cluster_id: string }>);
+    expect(matchRows.filter((row) => row.cluster_id === legacyId)).toHaveLength(2);
+  });
+
+  it("skips the sentiments write for clusters Grok only partially answered, while scoring the rest", async () => {
+    // Grok returns valid JSON but only answers pair 1 (cluster exa-1); the
+    // (exa-2, ACME) pair is silently omitted. exa-2's write must be skipped
+    // (preserving any stored sentiment) instead of persisting [], and only
+    // exa-1 may be folded into the rolling score.
+    const priorSentiments = [{ company_key: "ticker:BETA", score: -0.2, rationale: "Prior." }];
+    const { captured, storedSentiments } = stubFanoutHttp({
+      grokStatus: 200,
+      grokScores: [{ i: 1, sentiment: 0.7, rationale: "Earnings beat." }],
+      existingClusters: [
+        {
+          cluster_key: exaResults[1].url,
+          article_url: exaResults[1].url,
+          entities: { isins: [], tickers: [], countries: [], sectors: [] },
+          sentiments: priorSentiments,
+        },
+      ],
+    });
+
+    const result = await runNewsFanout(env);
+
+    expect(result.clustersUpserted).toBe(2);
+    expect(result.matchesUpserted).toBe(2);
+    const rows = clusterUpsertRows(captured);
+    const clusterRequests = captured.filter(
+      (r) => r.pathname === "/rest/v1/news_clusters" && r.method === "POST",
+    );
+    expect(clusterRequests).toHaveLength(2);
+    // The real Supabase client serializes each upsert's union of row keys as
+    // `columns`. A mixed request would default the omitted NOT NULL column to
+    // SQL NULL and reject the entire batch in PostgREST.
+    expect(
+      clusterRequests[0].columns?.split(",").map((column) => column.replaceAll('"', "")),
+    ).toContain("sentiments");
+    expect(
+      clusterRequests[1].columns?.split(",").map((column) => column.replaceAll('"', "")),
+    ).not.toContain("sentiments");
+    expect(result.errors).toEqual([]);
+    expect(
+      clusterRequests.every((request) => {
+        const rows = request.body as Array<Record<string, unknown>>;
+        return (
+          new Set(rows.map((row) => Object.prototype.hasOwnProperty.call(row, "sentiments")))
+            .size === 1
+        );
+      }),
+    ).toBe(true);
+    expect(rows.map((r) => r.cluster_key)).toEqual(exaResults.map((result) => result.url));
+    expect((rows[0].sentiments as Array<Record<string, unknown>>).map((s) => s.score)).toEqual([
+      0.7,
+    ]);
+    // The unanswered cluster omits the key entirely so the conflict upsert
+    // leaves previously stored sentiments untouched.
+    expect(rows[1]).not.toHaveProperty("sentiments");
+    expect(storedSentiments.get(exaResults[1].url)).toEqual(priorSentiments);
+
+    // Only the answered cluster reaches the rolling score: EWMA over prior 0
+    // with alpha=0.35 and a single 0.7 observation → 0.245. exa-2 is NOT
+    // marked as scored, so it stays eligible for the next fanout run.
+    expect(result.clustersScored).toBe(1);
+    expect(result.companiesRescored).toBe(1);
+    const companyApply = captured.find(
+      (r) => r.pathname === "/rest/v1/rpc/apply_company_sentiment_batch" && r.method === "POST",
+    );
+    expect(companyApply).toBeDefined();
+    const companyRow = (companyApply!.body as { p_rows: Array<Record<string, unknown>> }).p_rows[0];
+    expect(companyRow).toMatchObject({ company_key: "ticker:ACME", score: 0.245, trend: "up" });
+    expect((companyRow.scored_cluster_ids as Array<{ id: string }>).map((r) => r.id)).toEqual([
+      "db-1",
+      "old-1",
+    ]);
+  });
+
+  it("still fully populates the feed when Grok scoring fails, without touching stored sentiment", async () => {
+    const { captured } = stubFanoutHttp({ grokStatus: 500 });
+
+    const result = await runNewsFanout(env);
+
+    // Feed populated as if sentiment scoring did not exist.
+    expect(result.clustersUpserted).toBe(2);
+    expect(result.matchesUpserted).toBe(2);
+    expect(result.clustersScored).toBe(0);
+    expect(result.companiesRescored).toBe(0);
+    expect(result.errors).toHaveLength(1);
+    expect(result.errors[0]).toContain("sentiment scoring");
+
+    // The sentiments key is omitted so the conflict upsert preserves any
+    // previously stored per-cluster sentiment.
+    for (const row of clusterUpsertRows(captured)) {
+      expect(row).not.toHaveProperty("sentiments");
+    }
+
+    expect(
+      captured.some(
+        (r) => r.pathname === "/rest/v1/rpc/apply_company_sentiment_batch" && r.method === "POST",
+      ),
+    ).toBe(false);
+  });
+
+  it("does not fold the answered member of a partially answered cluster into EWMA", async () => {
+    const { captured } = stubFanoutHttp({
+      grokStatus: 200,
+      multiCompany: true,
+      grokScores: [{ i: 1, sentiment: 0.7, rationale: "Earnings beat." }],
+    });
+
+    const result = await runNewsFanout(env);
+
+    expect(result.clustersUpserted).toBe(1);
+    expect(result.clustersScored).toBe(0);
+    expect(result.companiesRescored).toBe(0);
+    expect(clusterUpsertRows(captured)[0]).not.toHaveProperty("sentiments");
+    expect(
+      captured.some(
+        (r) => r.pathname === "/rest/v1/rpc/apply_company_sentiment_batch" && r.method === "POST",
+      ),
+    ).toBe(false);
+  });
+
+  it("fails closed when URL identity cannot be read, so a legacy cluster cannot be duplicated", async () => {
+    const { captured } = stubFanoutHttp({ grokStatus: 200, clusterPreReadStatus: 500 });
+
+    const result = await runNewsFanout(env);
+
+    expect(result.clustersUpserted).toBe(0);
+    expect(result.matchesUpserted).toBe(0);
+    expect(result.persistenceFailed).toBe(true);
+    expect(result.errors).toContain("cluster URL identity pre-read: cluster pre-read failed");
+    expect(result.clustersScored).toBe(0);
+    expect(result.companiesRescored).toBe(0);
+    expect(
+      captured.some((r) => r.pathname === "/rest/v1/news_clusters" && r.method === "POST"),
+    ).toBe(false);
+    expect(
+      captured.some((r) => r.pathname === "/rest/v1/portfolio_news_matches" && r.method === "POST"),
+    ).toBe(false);
+    expect(
+      captured.some(
+        (r) => r.pathname === "/rest/v1/rpc/apply_company_sentiment_batch" && r.method === "POST",
+      ),
+    ).toBe(false);
+  });
+
+  it("drains durable sentiment from a prior run when Firecrawl returns no articles", async () => {
+    const { captured } = stubFanoutHttp({
+      grokStatus: 200,
+      emptyNews: true,
+      pendingRows: [
+        {
+          id: 42,
+          company_key: "ticker:ACME",
+          cluster_id: "db-pending",
+          company_name: "Acme Corp",
+          ticker: "ACME",
+          isin: null,
+          score: 0.7,
+          rationale: "Strong quarter.",
+          published_at: new Date(Date.now() - 3_600_000).toISOString(),
+          observed_at: new Date().toISOString(),
+        },
+      ],
+    });
+
+    const result = await runNewsFanout(env);
+    expect(result.clustersUpserted).toBe(0);
+    expect(result.matchesUpserted).toBe(0);
+    expect(result.clustersScored).toBe(0);
+    expect(result.companiesRescored).toBe(1);
+    expect(result.errors).toEqual([]);
+    expect(captured.some((request) => request.pathname === "/v1/chat/completions")).toBe(false);
+
+    const apply = captured.find(
+      (request) =>
+        request.pathname === "/rest/v1/rpc/apply_company_sentiment_batch" &&
+        request.method === "POST",
+    );
+    expect(apply).toBeDefined();
+    const row = (apply!.body as { p_rows: Array<Record<string, unknown>> }).p_rows[0];
+    expect(row).toMatchObject({
+      company_key: "ticker:ACME",
+      score: 0.245,
+      evidence_cluster_ids: ["db-pending", "old-1"],
+    });
+  });
+});
