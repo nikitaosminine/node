@@ -210,6 +210,8 @@ export const POLITICAL_NOMINATION_RE =
 
 const NAMED_PERSON_NOMINATION_RE =
   /\b(?:will|could|can)\s+(?:(?:\p{Lu}\p{Ll}+(?:['’]\p{Lu}\p{Ll}+)?|(?:\p{Lu}\.){1,3}))(?:\s+(?:(?:\p{Lu}\p{Ll}+(?:['’]\p{Lu}\p{Ll}+)?|(?:\p{Lu}\.){1,3})))*[^\n?]{0,30}\b(?:win|wins)\b[^\n?]{0,30}\b(?:the\s+)?nomination\b(?!\s+for\s+(?:an?\s+)?(?:innovation\s+)?(?:award|prize)\b)/u;
+const NON_POLITICAL_NOMINATION_RE =
+  /\b(?:nominee|nomination|nominated)\b[^\n?]{0,60}\b(?:award|prize|innovation|startup)\b/i;
 
 function hasTagId(tags: unknown, tagId: number): boolean {
   return (
@@ -226,8 +228,9 @@ export function isNonLlmDeliveryExcluded(
   tags?: unknown,
 ): boolean {
   const text = question ?? "";
+  if (NON_FINANCIAL_RE.test(text)) return true;
+  if (NON_POLITICAL_NOMINATION_RE.test(text)) return false;
   return (
-    NON_FINANCIAL_RE.test(text) ||
     POLITICAL_NOMINATION_RE.test(text) ||
     (NAMED_PERSON_NOMINATION_RE.test(text) && hasTagId(tags, TAG_IDS.politics))
   );

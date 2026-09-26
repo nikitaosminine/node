@@ -136,6 +136,11 @@ describe("GET /api/polymarket/category", () => {
         question: "Will Candidate X win the 2028 Democratic nomination?",
       }),
       marketRow({
+        condition_id: "tagged-nomination",
+        question: "Will O’Rourke win the nomination?",
+        tags: [{ id: 2, label: "Politics" }],
+      }),
+      marketRow({
         condition_id: "excluded-tag",
         tags: [{ id: 104152, label: "Finance Up/Down" }],
       }),

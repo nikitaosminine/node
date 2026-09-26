@@ -269,6 +269,7 @@ describe("non-LLM Polymarket delivery filter", () => {
     );
     expect(isNonLlmDeliveryExcluded("Will the film be nominated for an award?")).toBe(false);
     expect(isNonLlmDeliveryExcluded("Will Acme Corp be nominated for an innovation award?")).toBe(false);
+    expect(isNonLlmDeliveryExcluded("Will Acme be the nominee for an innovation award?")).toBe(false);
     expect(isNonLlmDeliveryExcluded("Will Acme win the nomination for an innovation award?")).toBe(false);
     expect(isNonLlmDeliveryExcluded("Will O’Rourke win the nomination?", [{ id: 2 }])).toBe(
       true,
@@ -677,7 +678,8 @@ describe("Polymarket Grok curation", () => {
     curatedElection.markets[0].question =
       "Will the 2028 presidential election be won by Candidate X?";
     const nominationMarket = gammaEvent("0xnomination", "event-nomination", "nomination-2028");
-    nominationMarket.markets[0].question = "Will Candidate X win the 2028 Democratic nomination?";
+    nominationMarket.tags = [{ id: 2, label: "Politics" }];
+    nominationMarket.markets[0].question = "Will O’Rourke win the nomination?";
 
     const xaiRequests: Array<{ model: string; reasoning_effort: string }> = [];
     vi.stubGlobal(
