@@ -456,7 +456,12 @@ interface YahooQuoteSummaryResponse {
 
 type AgentRunTriggerType = "scheduled" | "ondemand";
 type AgentRunStatus =
-  "queued" | "running" | "completed" | "failed" | "cancelled" | "failed_validation";
+  | "queued"
+  | "running"
+  | "completed"
+  | "failed"
+  | "cancelled"
+  | "failed_validation";
 
 interface AgentRunQueueMessage {
   runId: string;
@@ -487,7 +492,10 @@ interface GeographyQueueMessage {
 }
 
 type WorkerQueueMessage =
-  AgentRunQueueMessage | SnapshotQueueMessage | GeographyQueueMessage | RecapQueueMessage;
+  | AgentRunQueueMessage
+  | SnapshotQueueMessage
+  | GeographyQueueMessage
+  | RecapQueueMessage;
 
 const STALE_GEOGRAPHY_RUNNING_JOB_MS = 15 * 60 * 1000;
 
@@ -526,7 +534,11 @@ interface AssetSearchResult {
 }
 
 type AgentToolName =
-  "portfolio_context" | "market_quotes" | "get_ecb_data" | "get_fred_indicator" | "search_news";
+  | "portfolio_context"
+  | "market_quotes"
+  | "get_ecb_data"
+  | "get_fred_indicator"
+  | "search_news";
 
 interface AgentToolCall {
   tool: AgentToolName;
@@ -4107,7 +4119,10 @@ function normalizeMainAgentOutput(raw: Record<string, unknown>): MainAgentOutput
         const riskHorizon = row.risk_horizon == null ? null : String(row.risk_horizon);
         const changeTypeRaw = String(row.change_type ?? "new_information");
         const changeType:
-          "new_information" | "confirmation" | "contradiction" | "no_material_change" =
+          | "new_information"
+          | "confirmation"
+          | "contradiction"
+          | "no_material_change" =
           changeTypeRaw === "confirmation" ||
           changeTypeRaw === "contradiction" ||
           changeTypeRaw === "no_material_change"
@@ -5854,9 +5869,10 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
 
         if (error) return json({ error: error.message }, 500);
 
-        const pageRows = (data ?? []).filter((r) =>
-          !hasExcludedPolymarketTag((r as any).polymarket_markets?.tags) &&
-          isEligibleMarket((r as any).polymarket_markets ?? {}, eligibilityNow),
+        const pageRows = (data ?? []).filter(
+          (r) =>
+            !hasExcludedPolymarketTag((r as any).polymarket_markets?.tags) &&
+            isEligibleMarket((r as any).polymarket_markets ?? {}, eligibilityNow),
         );
         rows.push(...pageRows);
         if ((data ?? []).length < feedPageSize) break;
@@ -6085,11 +6101,7 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
       const categoryPageSize = Math.max(limit * 2, 30);
       const categoryMaxPages = 5;
       const filtered: any[] = [];
-      for (
-        let page = 0;
-        page < categoryMaxPages && filtered.length < limit;
-        page++
-      ) {
+      for (let page = 0; page < categoryMaxPages && filtered.length < limit; page++) {
         const { data, error } = await auth.db
           .from("polymarket_markets")
           .select(

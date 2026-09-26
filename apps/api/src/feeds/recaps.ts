@@ -571,9 +571,7 @@ export async function gatherContext(
 
     const pageRowsTyped = (pageRows ?? []) as unknown as PolymarketWatchRow[];
     watchRowsRaw.push(
-      ...pageRowsTyped.filter(
-        (row) => !hasExcludedPolymarketTag(row.polymarket_markets?.tags),
-      ),
+      ...pageRowsTyped.filter((row) => !hasExcludedPolymarketTag(row.polymarket_markets?.tags)),
     );
     if (
       pageRowsTyped.length < watchPageSize ||
@@ -583,10 +581,7 @@ export async function gatherContext(
     }
   }
 
-  const watchRows = filterEligiblePolymarketWatchRows(
-    watchRowsRaw,
-    watchEligibilityNow,
-  );
+  const watchRows = filterEligiblePolymarketWatchRows(watchRowsRaw, watchEligibilityNow);
 
   // Geography exposure for the watch prompt (US% and notable ETFs).
   const { data: geoRows } = await client

@@ -162,9 +162,6 @@ describe("recap Polymarket watch filter", () => {
         topProbability: 0.6,
       },
     ]);
-    expect(watchEndDateFilter).toEqual([
-      "polymarket_markets.end_date",
-      reviewNow.toISOString(),
-    ]);
+    expect(watchEndDateFilter).toEqual(["polymarket_markets.end_date", reviewNow.toISOString()]);
   });
 });

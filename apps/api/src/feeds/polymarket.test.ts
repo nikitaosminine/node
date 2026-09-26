@@ -252,9 +252,7 @@ describe("non-LLM Polymarket delivery filter", () => {
     expect(isNonLlmDeliveryExcluded("Will Candidate X win the 2028 Democratic primary?")).toBe(
       true,
     );
-    expect(isNonLlmDeliveryExcluded("Will Candidate X be the 2028 Democratic nominee?")).toBe(
-      true,
-    );
+    expect(isNonLlmDeliveryExcluded("Will Candidate X be the 2028 Democratic nominee?")).toBe(true);
     expect(isNonLlmDeliveryExcluded("Will Trump be the nominee for president?")).toBe(true);
     expect(isNonLlmDeliveryExcluded("Will Trump win the nomination?", [{ id: 2 }])).toBe(true);
     expect(isNonLlmDeliveryExcluded("Will Trump become the nominee?")).toBe(false);
@@ -264,19 +262,19 @@ describe("non-LLM Polymarket delivery filter", () => {
     expect(isNonLlmDeliveryExcluded("Will Trump win the nomination for president?")).toBe(true);
     expect(isNonLlmDeliveryExcluded("Will Trump be nominated for president?")).toBe(true);
     expect(isNonLlmDeliveryExcluded("Will a candidate be nominated for governor?")).toBe(true);
-    expect(isNonLlmDeliveryExcluded("Will Trump be nominated by the Republican Party?")).toBe(
-      true,
-    );
-    expect(isNonLlmDeliveryExcluded("Will J.D. Vance win the nomination?", [{ id: 2 }])).toBe(
-      true,
-    );
+    expect(isNonLlmDeliveryExcluded("Will Trump be nominated by the Republican Party?")).toBe(true);
+    expect(isNonLlmDeliveryExcluded("Will J.D. Vance win the nomination?", [{ id: 2 }])).toBe(true);
     expect(isNonLlmDeliveryExcluded("Will the film be nominated for an award?")).toBe(false);
-    expect(isNonLlmDeliveryExcluded("Will Acme Corp be nominated for an innovation award?")).toBe(false);
-    expect(isNonLlmDeliveryExcluded("Will Acme be the nominee for an innovation award?")).toBe(false);
-    expect(isNonLlmDeliveryExcluded("Will Acme win the nomination for an innovation award?")).toBe(false);
-    expect(isNonLlmDeliveryExcluded("Will O’Rourke win the nomination?", [{ id: 2 }])).toBe(
-      true,
+    expect(isNonLlmDeliveryExcluded("Will Acme Corp be nominated for an innovation award?")).toBe(
+      false,
     );
+    expect(isNonLlmDeliveryExcluded("Will Acme be the nominee for an innovation award?")).toBe(
+      false,
+    );
+    expect(isNonLlmDeliveryExcluded("Will Acme win the nomination for an innovation award?")).toBe(
+      false,
+    );
+    expect(isNonLlmDeliveryExcluded("Will O’Rourke win the nomination?", [{ id: 2 }])).toBe(true);
     expect(
       isNonLlmDeliveryExcluded("Will Acme win the nomination for best startup?", [{ id: 107 }]),
     ).toBe(false);
@@ -330,8 +328,7 @@ describe("fetchCandidateMarkets", () => {
         .sort((a, b) => a - b),
     ).toEqual([...expectedTagIds].sort((a, b) => a - b));
     const expectedExcludeTagIds = [
-      102169, 102134, 102127, 104152, 102264, 102281, 103665, 101757, 102516, 1, 315, 596,
-      18,
+      102169, 102134, 102127, 104152, 102264, 102281, 103665, 101757, 102516, 1, 315, 596, 18,
     ];
     for (const requestedUrl of requestedUrls) {
       const url = new URL(requestedUrl);

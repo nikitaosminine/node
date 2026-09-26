@@ -220,8 +220,7 @@ function hasTagId(tags: unknown, tagId: number): boolean {
   return (
     Array.isArray(tags) &&
     tags.some(
-      (tag) =>
-        tag && typeof tag === "object" && Number((tag as { id?: unknown }).id) === tagId,
+      (tag) => tag && typeof tag === "object" && Number((tag as { id?: unknown }).id) === tagId,
     )
   );
 }
