@@ -212,7 +212,7 @@ const AMBIGUOUS_NOMINATION_RE =
   /\b(?:will|could|can)\b[^\n?]{0,80}\b(?:be|become|be named)\b[^\n?]{0,30}\b(?:the\s+)?nominee\b/i;
 
 const NAMED_PERSON_NOMINATION_RE =
-  /\b(?:will|could|can)\s+(?:(?:\p{Lu}\p{Ll}+(?:['’]\p{Lu}\p{Ll}+)?|(?:\p{Lu}\.){1,3}))(?:\s+(?:(?:\p{Lu}\p{Ll}+(?:['’]\p{Lu}\p{Ll}+)?|(?:\p{Lu}\.){1,3})))*[^\n?]{0,30}\b(?:win|wins)\b[^\n?]{0,30}\b(?:the\s+)?nomination\b(?!\s+for\s+(?:an?\s+)?(?:innovation\s+)?(?:award|prize)\b)/u;
+  /\b(?:will|could|can)\s+(?:(?:\p{Lu}(?:\p{Ll}+|['’]\p{Lu}\p{Ll}+)|(?:\p{Lu}\.){1,3}))(?:\s+(?:(?:\p{Lu}(?:\p{Ll}+|['’]\p{Lu}\p{Ll}+)|(?:\p{Lu}\.){1,3})))*[^\n?]{0,30}\b(?:win|wins)\b[^\n?]{0,30}\b(?:the\s+)?nomination\b(?!\s+for\s+(?:an?\s+)?(?:innovation\s+)?(?:award|prize)\b)/iu;
 const NON_POLITICAL_NOMINATION_RE =
   /\b(?:nominee|nomination|nominated)\b[^\n?]{0,60}\b(?:award|prize|innovation|startup)\b/i;
 
