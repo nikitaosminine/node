@@ -6041,10 +6041,46 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
       }
 
       if (isPolymarketFanoutQueueMessage(message.body)) {
+        const fanoutMessage = message.body;
         try {
-          await withInvocationSubrequestBudget((budget) =>
-            runPolymarketFanout(env, { fetch: budget.fetch }),
+          const result = await withInvocationSubrequestBudget((budget) =>
+            runPolymarketFanout(env, {
+              fetch: budget.fetch,
+              maxPortfolios: 5,
+              afterPortfolioId: fanoutMessage.afterPortfolioId,
+              portfolioId: fanoutMessage.portfolioId,
+            }),
           );
+          if (
+            result.portfoliosSkipped !== result.skippedPortfolioIds.length ||
+            (result.errors.length > 0 &&
+              result.portfoliosProcessed === 0 &&
+              result.portfoliosSkipped === 0)
+          ) {
+            throw new Error(`polymarket fanout incomplete: ${result.errors.join("; ")}`);
+          }
+          if (fanoutMessage.portfolioId && result.portfoliosSkipped > 0) {
+            throw new Error(`polymarket portfolio retry failed: ${result.errors.join("; ")}`);
+          }
+          if (result.skippedPortfolioIds.length > 0 || result.nextPortfolioCursor) {
+            if (!env.RECAP_QUEUE) {
+              throw new Error("Server misconfiguration: RECAP_QUEUE binding is missing");
+            }
+            for (const portfolioId of result.skippedPortfolioIds) {
+              await env.RECAP_QUEUE.send({
+                type: "polymarket_fanout",
+                scheduledTime: fanoutMessage.scheduledTime,
+                portfolioId,
+              });
+            }
+            if (result.nextPortfolioCursor) {
+              await env.RECAP_QUEUE.send({
+                type: "polymarket_fanout",
+                scheduledTime: fanoutMessage.scheduledTime,
+                afterPortfolioId: result.nextPortfolioCursor,
+              });
+            }
+          }
           message.ack();
         } catch (error) {
           console.error(

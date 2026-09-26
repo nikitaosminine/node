@@ -77,7 +77,8 @@ max_retries = 2
 # Hourly cron for scheduled fanout. Actual per-portfolio run times are selected
 # in code based on user timezone + effective runs/day setting.
 # Polymarket enqueues on every invocation; news enqueues on three weekday slots.
-# Feed jobs use recap-queue (one message per invocation) for independent budgets.
+# Feed jobs use recap-queue (one message per invocation) for independent budgets;
+# Polymarket advances in five-portfolio pages and retries skipped portfolios alone.
 # Free plan cap: 5 crons.
 crons = [
   "5 * * * *",

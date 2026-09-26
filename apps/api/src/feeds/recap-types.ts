@@ -117,6 +117,8 @@ export interface NewsFanoutQueueMessage {
 export interface PolymarketFanoutQueueMessage {
   type: "polymarket_fanout";
   scheduledTime: number;
+  afterPortfolioId?: string;
+  portfolioId?: string;
 }
 
 export type RecapQueueMessage =

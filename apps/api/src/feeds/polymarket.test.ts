@@ -600,6 +600,94 @@ describe("Polymarket Grok curation", () => {
       errors: [],
     });
   });
+
+  it("pages portfolio work in stable order without revisiting earlier portfolios", async () => {
+    const portfolios = Array.from({ length: 24 }, (_, index) => ({
+      id: `portfolio-${String(index + 1).padStart(2, "0")}`,
+      user_id: `user-${index + 1}`,
+    })).reverse();
+    const visited: string[] = [];
+    let failPortfolioThreeOnce = true;
+    dbFrom.mockImplementation((table: string) => {
+      if (table === "polymarket_markets") {
+        return {
+          upsert: vi.fn().mockResolvedValue({ error: null }),
+          update: vi.fn(() => ({
+            eq: vi.fn(() => ({
+              or: vi.fn(() => ({
+                select: vi.fn().mockResolvedValue({ data: [], error: null }),
+              })),
+            })),
+          })),
+        };
+      }
+      if (table === "portfolios") {
+        return { select: vi.fn().mockResolvedValue({ data: portfolios, error: null }) };
+      }
+      if (table === "holdings") {
+        let portfolioId = "";
+        return {
+          select: vi.fn(() => ({
+            eq: vi.fn((_column: string, id: string) => {
+              portfolioId = id;
+              return {
+                gt: vi.fn(async () => {
+                  visited.push(portfolioId);
+                  if (portfolioId === "portfolio-03" && failPortfolioThreeOnce) {
+                    failPortfolioThreeOnce = false;
+                    throw new Error("scheduled invocation subrequest budget exhausted");
+                  }
+                  return { data: [], error: null };
+                }),
+              };
+            }),
+          })),
+        };
+      }
+      if (table === "portfolio_polymarket_matches") {
+        const eq = vi.fn(() => Object.assign(Promise.resolve({ error: null }), { eq }));
+        return { delete: vi.fn(() => ({ eq })) };
+      }
+      throw new Error(`Unexpected table: ${table}`);
+    });
+    const fetchMock = vi.fn(async () => Response.json([gammaEvent()]));
+    const first = await runPolymarketFanout(env, { fetch: fetchMock, maxPortfolios: 5 });
+    const second = await runPolymarketFanout(env, {
+      fetch: fetchMock,
+      maxPortfolios: 5,
+      afterPortfolioId: first.nextPortfolioCursor!,
+    });
+    const retried = await runPolymarketFanout(env, {
+      fetch: fetchMock,
+      maxPortfolios: 5,
+      portfolioId: first.skippedPortfolioIds[0],
+    });
+    expect(first).toMatchObject({
+      portfoliosProcessed: 4,
+      portfoliosSkipped: 1,
+      skippedPortfolioIds: ["portfolio-03"],
+      nextPortfolioCursor: "portfolio-05",
+    });
+    expect(second).toMatchObject({
+      portfoliosProcessed: 5,
+      portfoliosSkipped: 0,
+      nextPortfolioCursor: "portfolio-10",
+    });
+    expect(retried).toMatchObject({
+      portfoliosProcessed: 1,
+      portfoliosSkipped: 0,
+      skippedPortfolioIds: [],
+      nextPortfolioCursor: null,
+    });
+    expect(visited).toEqual(
+      [
+        ...Array.from({ length: 10 }, (_, index) =>
+          `portfolio-${String(index + 1).padStart(2, "0")}`,
+        ),
+        "portfolio-03",
+      ],
+    );
+  });
 });
 
 describe("ETF constituents in portfolio profiles", () => {

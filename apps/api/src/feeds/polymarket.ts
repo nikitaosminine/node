@@ -128,6 +128,10 @@ interface HoldingsCacheRow {
 export interface PolymarketFanoutOptions {
   forceRescore?: boolean;
   fetch?: typeof globalThis.fetch;
+  // Queue deliveries use a bounded page or a single failed portfolio.
+  afterPortfolioId?: string;
+  maxPortfolios?: number;
+  portfolioId?: string;
 }
 
 export interface PolymarketFanoutResult {
@@ -135,6 +139,8 @@ export interface PolymarketFanoutResult {
   marketsDeactivated: number;
   portfoliosProcessed: number;
   portfoliosSkipped: number;
+  skippedPortfolioIds: string[];
+  nextPortfolioCursor: string | null;
   curation: {
     model: string;
     reasoningEffort: PolymarketGrokReasoningEffort;
@@ -916,6 +922,12 @@ export async function runPolymarketFanout(
   env: Env,
   options: PolymarketFanoutOptions = {},
 ): Promise<PolymarketFanoutResult> {
+  if (
+    options.maxPortfolios !== undefined &&
+    (!Number.isSafeInteger(options.maxPortfolios) || options.maxPortfolios < 1)
+  ) {
+    throw new Error("[polymarket] maxPortfolios must be a positive integer");
+  }
   const fetchImpl = options.fetch ?? globalThis.fetch;
   const client: AnySupabaseClient = createClient(env.SUPABASE_URL, env.SUPABASE_SERVICE_KEY, {
     global: { fetch: fetchImpl },
@@ -926,6 +938,7 @@ export async function runPolymarketFanout(
   const errors: string[] = [];
   let portfoliosProcessed = 0;
   let portfoliosSkipped = 0;
+  const skippedPortfolioIds: string[] = [];
   const curation: PolymarketFanoutResult["curation"] = {
     model,
     reasoningEffort,
@@ -964,12 +977,30 @@ export async function runPolymarketFanout(
       marketsDeactivated,
       portfoliosProcessed,
       portfoliosSkipped,
+      skippedPortfolioIds,
+      nextPortfolioCursor: null,
       curation,
       errors,
     };
   }
 
-  const portfolios = portfoliosData as PortfolioRow[];
+  const allPortfolios = portfoliosData as PortfolioRow[];
+  const eligiblePortfolios = options.portfolioId
+    ? allPortfolios.filter((portfolio) => portfolio.id === options.portfolioId)
+    : options.maxPortfolios !== undefined
+      ? allPortfolios
+          .filter((portfolio) => portfolio.id > (options.afterPortfolioId ?? ""))
+          .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+      : allPortfolios;
+  const portfolios = options.maxPortfolios !== undefined && !options.portfolioId
+    ? eligiblePortfolios.slice(0, options.maxPortfolios)
+    : eligiblePortfolios;
+  const nextPortfolioCursor =
+    options.maxPortfolios !== undefined &&
+    !options.portfolioId &&
+    eligiblePortfolios.length > portfolios.length
+      ? portfolios.at(-1)?.id ?? null
+      : null;
 
   // Collapse multi-bucket events (e.g. "How many Fed cuts?") to a SINGLE
   // representative market — the highest-Yes bucket (consensus answer) — BEFORE
@@ -1233,6 +1264,7 @@ export async function runPolymarketFanout(
       console.error(`[polymarket] unexpected error for portfolio ${portfolioId}:`, msg);
       errors.push(`portfolio ${portfolioId}: ${msg}`);
       portfoliosSkipped++;
+      skippedPortfolioIds.push(portfolioId);
     }
   }
 
@@ -1241,6 +1273,8 @@ export async function runPolymarketFanout(
     marketsDeactivated,
     portfoliosProcessed,
     portfoliosSkipped,
+    skippedPortfolioIds,
+    nextPortfolioCursor,
     curation,
     errors,
   };

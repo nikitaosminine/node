@@ -16,6 +16,29 @@ const baseEnv = {
   SUPABASE_SERVICE_KEY: "test-service-key",
 } as Env;
 
+function fanoutResult(overrides: Record<string, unknown> = {}) {
+  return {
+    marketsUpserted: 1,
+    marketsDeactivated: 0,
+    portfoliosProcessed: 5,
+    portfoliosSkipped: 0,
+    skippedPortfolioIds: [],
+    nextPortfolioCursor: null,
+    curation: {
+      model: "test",
+      reasoningEffort: "medium",
+      forceRescore: false,
+      grokRuns: 0,
+      cacheHits: 5,
+      fallbacks: 0,
+      portfoliosWithoutHoldings: 0,
+      rotatingMatchesWritten: 0,
+    },
+    errors: [],
+    ...overrides,
+  };
+}
+
 function batch(body: unknown, ack = vi.fn(), retry = vi.fn()) {
   return {
     value: { messages: [{ body, ack, retry }] } as unknown as Parameters<typeof worker.queue>[0],
@@ -64,6 +87,7 @@ describe("scheduled Polymarket queue isolation", () => {
     vi.stubGlobal("fetch", fetchMock);
     polymarketFanout.mockImplementation(async (_env, options) => {
       await options.fetch("https://gamma.example/events");
+      return fanoutResult();
     });
     const sent: Array<{ body: unknown; fetchCount: number }> = [];
     const sendRun = vi.fn().mockResolvedValue(undefined);
@@ -102,7 +126,7 @@ describe("scheduled Polymarket queue isolation", () => {
   it("retries a failed refresh and acknowledges its successful redelivery", async () => {
     polymarketFanout
       .mockRejectedValueOnce(new Error("Gamma unavailable"))
-      .mockResolvedValueOnce(undefined);
+      .mockResolvedValueOnce(fanoutResult());
     const first = batch({ type: "polymarket_fanout", scheduledTime });
     const second = batch({ type: "polymarket_fanout", scheduledTime });
     await worker.queue(first.value, baseEnv);
@@ -111,6 +135,78 @@ describe("scheduled Polymarket queue isolation", () => {
     expect(first.ack).not.toHaveBeenCalled();
     expect(second.ack).toHaveBeenCalledOnce();
     expect(second.retry).not.toHaveBeenCalled();
+  });
+
+  it("continues after five portfolios and retries skipped portfolios separately", async () => {
+    const send = vi.fn().mockResolvedValue(undefined);
+    const env = { ...baseEnv, RECAP_QUEUE: { send } } as unknown as Env;
+    polymarketFanout.mockResolvedValueOnce(
+      fanoutResult({
+        portfoliosProcessed: 4,
+        portfoliosSkipped: 1,
+        skippedPortfolioIds: ["portfolio-3"],
+        nextPortfolioCursor: "portfolio-5",
+        errors: ["portfolio portfolio-3: scheduled invocation subrequest budget exhausted"],
+      }),
+    );
+    const delivery = batch({ type: "polymarket_fanout", scheduledTime });
+    await worker.queue(delivery.value, env);
+
+    expect(polymarketFanout).toHaveBeenCalledWith(
+      env,
+      expect.objectContaining({ maxPortfolios: 5 }),
+    );
+    expect(send).toHaveBeenCalledWith({
+      type: "polymarket_fanout",
+      scheduledTime,
+      portfolioId: "portfolio-3",
+    });
+    expect(send).toHaveBeenCalledWith({
+      type: "polymarket_fanout",
+      scheduledTime,
+      afterPortfolioId: "portfolio-5",
+    });
+    expect(delivery.ack).toHaveBeenCalledOnce();
+    expect(delivery.retry).not.toHaveBeenCalled();
+  });
+
+  it("retries the delivery if a skipped portfolio cannot be queued", async () => {
+    const send = vi.fn().mockRejectedValue(new Error("queue unavailable"));
+    const env = { ...baseEnv, RECAP_QUEUE: { send } } as unknown as Env;
+    polymarketFanout.mockResolvedValueOnce(
+      fanoutResult({
+        portfoliosProcessed: 4,
+        portfoliosSkipped: 1,
+        skippedPortfolioIds: ["portfolio-3"],
+      }),
+    );
+    const delivery = batch({ type: "polymarket_fanout", scheduledTime });
+    await worker.queue(delivery.value, env);
+    expect(delivery.retry).toHaveBeenCalledOnce();
+    expect(delivery.ack).not.toHaveBeenCalled();
+  });
+
+  it("retries an individually skipped portfolio", async () => {
+    polymarketFanout.mockResolvedValueOnce(
+      fanoutResult({
+        portfoliosProcessed: 0,
+        portfoliosSkipped: 1,
+        skippedPortfolioIds: ["portfolio-3"],
+        errors: ["portfolio portfolio-3: Gamma unavailable"],
+      }),
+    );
+    const delivery = batch({
+      type: "polymarket_fanout",
+      scheduledTime,
+      portfolioId: "portfolio-3",
+    });
+    await worker.queue(delivery.value, baseEnv);
+    expect(polymarketFanout).toHaveBeenCalledWith(
+      baseEnv,
+      expect.objectContaining({ portfolioId: "portfolio-3", maxPortfolios: 5 }),
+    );
+    expect(delivery.retry).toHaveBeenCalledOnce();
+    expect(delivery.ack).not.toHaveBeenCalled();
   });
 
   it("keeps each queued feed refresh in its own deployed invocation", () => {
