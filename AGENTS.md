@@ -62,9 +62,13 @@ Single Cloudflare Worker file (~6000 lines) handling all routing, business logic
 - `agent-runs` — thesis AI analysis
 - `snapshot-rebuild-queue` — portfolio performance snapshots
 - `geography-queue` — ETF geographic allocation + constituents enrichment via LLM
-- `recap-queue` — weekly/daily briefs plus isolated news and Polymarket fanouts
+- `recap-queue` — weekly/daily briefs plus isolated news and Polymarket fanouts; Polymarket
+  processes five-portfolio pages with a stable cursor, retries skipped portfolios individually,
+  and acknowledges only after continuation messages are queued
 
-**Scheduled crons:** 5 triggers daily for market-hours fanout, news, polymarket, and recaps.
+**Scheduled crons:** five cron expressions: one hourly trigger for scheduled portfolio work and
+four weekday feed windows. Polymarket enqueues on every trigger; news enqueues on three of the
+weekday windows.
 
 **Never call `getPortfolioGeography()` inside a POST endpoint response** — it triggers Yahoo Finance requests that cause rate limiting. Geography is always enqueued as a background job.
 

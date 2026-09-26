@@ -186,6 +186,38 @@ describe("scheduled Polymarket queue isolation", () => {
     expect(delivery.ack).not.toHaveBeenCalled();
   });
 
+  it("does not acknowledge until every continuation is queued", async () => {
+    const send = vi
+      .fn()
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error("continuation queue unavailable"));
+    const env = { ...baseEnv, RECAP_QUEUE: { send } } as unknown as Env;
+    polymarketFanout.mockResolvedValueOnce(
+      fanoutResult({
+        portfoliosProcessed: 4,
+        portfoliosSkipped: 1,
+        skippedPortfolioIds: ["portfolio-3"],
+        nextPortfolioCursor: "portfolio-5",
+        errors: ["portfolio portfolio-3: scheduled invocation subrequest budget exhausted"],
+      }),
+    );
+    const delivery = batch({ type: "polymarket_fanout", scheduledTime });
+    await worker.queue(delivery.value, env);
+
+    expect(send).toHaveBeenNthCalledWith(1, {
+      type: "polymarket_fanout",
+      scheduledTime,
+      portfolioId: "portfolio-3",
+    });
+    expect(send).toHaveBeenNthCalledWith(2, {
+      type: "polymarket_fanout",
+      scheduledTime,
+      afterPortfolioId: "portfolio-5",
+    });
+    expect(delivery.retry).toHaveBeenCalledOnce();
+    expect(delivery.ack).not.toHaveBeenCalled();
+  });
+
   it("retries an individually skipped portfolio", async () => {
     polymarketFanout.mockResolvedValueOnce(
       fanoutResult({
