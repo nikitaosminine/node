@@ -1,10 +1,10 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // Exercise the real Worker fetch handler for GET /api/polymarket/category with
 // a stubbed auth context and Supabase query builder, so the test proves the
-// endpoint itself applies the NON_FINANCIAL_RE / isShortTermMarket /
-// isNearCertainMarket filter chain (not just that the helpers work in
-// isolation).
+// endpoint itself applies the non-LLM delivery backstop plus the shared
+// isEligibleMarket gate (end_date/duration/near-certain/liquidity) — not just
+// that the helpers work in isolation.
 
 vi.mock("@supabase/supabase-js", () => ({
   createClient: vi.fn(),
@@ -12,6 +12,7 @@ vi.mock("@supabase/supabase-js", () => ({
 
 const fromCalls: Array<{ table: string; args: Record<string, unknown[]> }> = [];
 let seededRows: unknown[] = [];
+const reviewNow = new Date("2026-08-16T00:00:00Z");
 
 function makeFakeDb() {
   return {
@@ -19,15 +20,34 @@ function makeFakeDb() {
       const call = { table, args: {} as Record<string, unknown[]> };
       fromCalls.push(call);
       const builder: Record<string, unknown> = {};
+      let filteredRows = seededRows;
       for (const method of ["select", "contains", "eq", "or", "order"]) {
         builder[method] = (...args: unknown[]) => {
           call.args[method] = args;
           return builder;
         };
       }
-      builder.limit = (...args: unknown[]) => {
-        call.args.limit = args;
-        return Promise.resolve({ data: seededRows, error: null });
+      builder.gt = (...args: unknown[]) => {
+        call.args.gt = args;
+        filteredRows = filteredRows.filter((row) => {
+          const endDate = (row as { end_date?: unknown }).end_date;
+          return typeof endDate === "string" && endDate > String(args[1]);
+        });
+        return builder;
+      };
+      builder.gte = (...args: unknown[]) => {
+        call.args.gte = args;
+        filteredRows = filteredRows.filter(
+          (row) => Number((row as { liquidity?: unknown }).liquidity) >= Number(args[1]),
+        );
+        return builder;
+      };
+      builder.range = (...args: unknown[]) => {
+        call.args.range = args;
+        return Promise.resolve({
+          data: filteredRows.slice(Number(args[0]), Number(args[1]) + 1),
+          error: null,
+        });
       };
       return builder;
     },
@@ -64,10 +84,10 @@ function marketRow(overrides: Record<string, unknown>) {
     tags: [{ id: 100328 }],
     outcomes: ["Yes", "No"],
     outcome_prices: [0.6, 0.4],
-    liquidity: 1000,
+    liquidity: 5000,
     volume_24hr: 500,
     start_date: "2026-01-01T00:00:00Z",
-    end_date: "2026-12-31T00:00:00Z",
+    end_date: "2027-12-31T00:00:00Z",
     image: null,
     active: true,
     fetched_at: "2026-08-01T00:00:00Z",
@@ -76,8 +96,26 @@ function marketRow(overrides: Record<string, unknown>) {
 }
 
 describe("GET /api/polymarket/category", () => {
+  beforeEach(() => {
+    fromCalls.length = 0;
+    seededRows = [];
+    vi.useFakeTimers();
+    vi.setSystemTime(reviewNow);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it("excludes short-duration, near-certain, and non-financial markets from the response", async () => {
     seededRows = [
+      ...Array.from({ length: 60 }, (_, index) =>
+        marketRow({
+          condition_id: `short-leading-${index}`,
+          start_date: "2027-12-20T00:00:00Z",
+          end_date: "2027-12-31T00:00:00Z",
+        }),
+      ),
       marketRow({
         condition_id: "short-term",
         question: "Will MSFT close $440-$450 this week?",
@@ -92,6 +130,24 @@ describe("GET /api/polymarket/category", () => {
       marketRow({
         condition_id: "non-financial",
         question: "Will the Super Bowl champion be decided by field goal?",
+      }),
+      marketRow({
+        condition_id: "nomination",
+        question: "Will Candidate X win the 2028 Democratic nomination?",
+      }),
+      marketRow({
+        condition_id: "tagged-nomination",
+        question: "Will O’Rourke win the nomination?",
+        tags: [{ id: 2, label: "Politics" }],
+      }),
+      marketRow({
+        condition_id: "excluded-tag",
+        tags: [{ id: 104152, label: "Finance Up/Down" }],
+      }),
+      marketRow({
+        condition_id: "illiquid",
+        question: "Will an AI-arena model be the top performer this month?",
+        liquidity: 333,
       }),
       marketRow({
         condition_id: "keeper",
@@ -110,10 +166,9 @@ describe("GET /api/polymarket/category", () => {
     const body = (await response.json()) as Array<{ condition_id: string }>;
     expect(body.map((m) => m.condition_id)).toEqual(["keeper"]);
 
-    // The query must fetch start_date so isShortTermMarket has real input.
     const query = fromCalls.find((c) => c.table === "polymarket_markets");
     expect(query).toBeDefined();
-    expect(String(query?.args.select?.[0])).toContain("start_date");
+    expect(query?.args.gt).toEqual(["end_date", reviewNow.toISOString()]);
   });
 
   it("keeps normal markets when nothing matches the filters", async () => {

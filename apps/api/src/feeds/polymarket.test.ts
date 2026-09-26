@@ -7,13 +7,16 @@ vi.mock("@supabase/supabase-js", () => ({
 }));
 
 import {
-  NON_FINANCIAL_RE,
-  TAG_IDS,
+  MIN_LIQUIDITY_USD,
   buildPortfolioProfile,
   enqueueEtfConstituentsEnrichment,
   fetchCandidateMarkets,
   invokePolymarketGrok,
+  isBelowLiquidityFloor,
+  isEligibleMarket,
+  hasExcludedPolymarketTag,
   isNearCertainMarket,
+  isNonLlmDeliveryExcluded,
   isShortTermMarket,
   runPolymarketFanout,
   shouldUsePolymarketCurationCache,
@@ -25,6 +28,8 @@ const env = {
   SUPABASE_SERVICE_KEY: "service-key",
   POLYMARKET_GAMMA_BASE_URL: "https://gamma.example",
 };
+
+const reviewNow = new Date("2026-08-16T00:00:00Z");
 
 function gammaEvent(conditionId = "0xmarket", eventId = "event-1", eventSlug = "fed-rates-2026") {
   return {
@@ -40,10 +45,10 @@ function gammaEvent(conditionId = "0xmarket", eventId = "event-1", eventSlug = "
         question: "Will the Fed cut rates in 2026?",
         outcomes: '["Yes","No"]',
         outcomePrices: '["0.55","0.45"]',
-        liquidity: 1000,
+        liquidity: 5000,
         volume24hr: 500,
         startDate: "2026-01-01T00:00:00Z",
-        endDate: "2026-12-31T00:00:00Z",
+        endDate: "2027-12-31T00:00:00Z",
         active: true,
       },
     ],
@@ -64,12 +69,15 @@ async function holdingsHash(holding: {
 
 beforeEach(() => {
   dbFrom.mockReset();
+  vi.useFakeTimers();
+  vi.setSystemTime(reviewNow);
   vi.spyOn(console, "error").mockImplementation(() => undefined);
   vi.spyOn(console, "log").mockImplementation(() => undefined);
   vi.spyOn(console, "warn").mockImplementation(() => undefined);
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
@@ -105,54 +113,193 @@ describe("isNearCertainMarket", () => {
   });
 });
 
+describe("isBelowLiquidityFloor", () => {
+  it("flags markets below the $2,000 liquidity floor", () => {
+    expect(isBelowLiquidityFloor(1999)).toBe(true);
+    expect(isBelowLiquidityFloor(333)).toBe(true);
+  });
+
+  it("keeps markets at or above the floor", () => {
+    expect(isBelowLiquidityFloor(MIN_LIQUIDITY_USD)).toBe(false);
+    expect(isBelowLiquidityFloor(5000)).toBe(false);
+  });
+
+  it("rejects markets with missing or invalid liquidity", () => {
+    expect(isBelowLiquidityFloor(null)).toBe(true);
+    expect(isBelowLiquidityFloor(undefined)).toBe(true);
+    expect(isBelowLiquidityFloor("not-a-number")).toBe(true);
+  });
+});
+
+describe("isEligibleMarket", () => {
+  const now = new Date("2026-08-16T00:00:00Z");
+  const baseMarket = {
+    start_date: "2026-01-01T00:00:00Z",
+    end_date: "2026-12-31T00:00:00Z",
+    outcome_prices: [0.55, 0.45],
+    liquidity: 5000,
+  };
+
+  it("accepts a market passing every check", () => {
+    expect(isEligibleMarket(baseMarket, now)).toBe(true);
+  });
+
+  it("rejects a market whose end_date has already passed", () => {
+    expect(isEligibleMarket({ ...baseMarket, end_date: "2026-01-01T00:00:00Z" }, now)).toBe(false);
+  });
+
+  it("rejects a short-duration market", () => {
+    expect(
+      isEligibleMarket(
+        { ...baseMarket, start_date: "2026-08-01T00:00:00Z", end_date: "2026-08-05T00:00:00Z" },
+        now,
+      ),
+    ).toBe(false);
+  });
+
+  it("rejects a near-certain market", () => {
+    expect(isEligibleMarket({ ...baseMarket, outcome_prices: [0.98, 0.02] }, now)).toBe(false);
+  });
+
+  it("rejects a market below the liquidity floor", () => {
+    expect(isEligibleMarket({ ...baseMarket, liquidity: 333 }, now)).toBe(false);
+  });
+
+  it("rejects markets with missing or invalid required metadata", () => {
+    expect(
+      isEligibleMarket(
+        { start_date: null, end_date: null, outcome_prices: null, liquidity: null },
+        now,
+      ),
+    ).toBe(false);
+    expect(isEligibleMarket({ ...baseMarket, end_date: "not-a-date" }, now)).toBe(false);
+    expect(isEligibleMarket({ ...baseMarket, liquidity: "not-a-number" }, now)).toBe(false);
+  });
+});
+
 describe("category endpoint filter application", () => {
   // Mirrors the filter chain applied post-query in the
-  // GET /api/polymarket/category handler in index.ts.
+  // GET /api/polymarket/category handler in index.ts: the slimmed
+  // non-LLM delivery backstop plus the shared isEligibleMarket gate.
   function applyCategoryFilters(
     markets: Array<{
       question: string;
       start_date: string | null;
       end_date: string | null;
       outcome_prices: number[];
+      liquidity: number | null;
     }>,
   ) {
     return markets
-      .filter((m) => !NON_FINANCIAL_RE.test(m.question ?? ""))
-      .filter((m) => !isShortTermMarket(m.start_date, m.end_date))
-      .filter((m) => !isNearCertainMarket(m.outcome_prices));
+      .filter((m) => !isNonLlmDeliveryExcluded(m.question))
+      .filter((m) => isEligibleMarket(m));
   }
 
-  it("drops short-duration, near-certain, and non-financial markets while keeping normal ones", () => {
+  it("drops short-duration, near-certain, illiquid, and non-financial markets while keeping normal ones", () => {
     const markets = [
       {
         question: "Will MSFT close $440-$450 this week?",
-        start_date: "2026-01-01T00:00:00Z",
-        end_date: "2026-01-05T00:00:00Z",
+        start_date: "2027-01-01T00:00:00Z",
+        end_date: "2027-01-05T00:00:00Z",
         outcome_prices: [0.5, 0.5],
+        liquidity: 5000,
       },
       {
-        question: "Will the Fed cut rates in 2026?",
-        start_date: "2026-01-01T00:00:00Z",
-        end_date: "2026-12-31T00:00:00Z",
+        question: "Will the Fed cut rates in 2027?",
+        start_date: "2027-01-01T00:00:00Z",
+        end_date: "2027-12-31T00:00:00Z",
         outcome_prices: [0.99, 0.01],
+        liquidity: 5000,
       },
       {
         question: "Will the Super Bowl champion be decided by field goal?",
-        start_date: "2026-01-01T00:00:00Z",
-        end_date: "2026-12-31T00:00:00Z",
+        start_date: "2027-01-01T00:00:00Z",
+        end_date: "2027-12-31T00:00:00Z",
         outcome_prices: [0.5, 0.5],
+        liquidity: 5000,
+      },
+      {
+        question: "Will an AI-arena model be the top performer this month?",
+        start_date: "2027-01-01T00:00:00Z",
+        end_date: "2027-03-01T00:00:00Z",
+        outcome_prices: [0.6, 0.4],
+        liquidity: 500,
       },
       {
         question: "Will EWY close above $60 in May?",
-        start_date: "2026-01-01T00:00:00Z",
-        end_date: "2026-02-01T00:00:00Z",
+        start_date: "2027-01-01T00:00:00Z",
+        end_date: "2027-02-01T00:00:00Z",
         outcome_prices: [0.6, 0.4],
+        liquidity: 5000,
+      },
+      {
+        question: "Will Candidate X win the 2028 Democratic nomination?",
+        start_date: "2027-01-01T00:00:00Z",
+        end_date: "2027-12-31T00:00:00Z",
+        outcome_prices: [0.6, 0.4],
+        liquidity: 5000,
       },
     ];
 
     const filtered = applyCategoryFilters(markets);
 
     expect(filtered.map((m) => m.question)).toEqual(["Will EWY close above $60 in May?"]);
+  });
+});
+
+describe("non-LLM Polymarket delivery filter", () => {
+  it("excludes nomination markets without excluding broader elections", () => {
+    expect(isNonLlmDeliveryExcluded("Will Candidate X win the 2028 Democratic primary?")).toBe(
+      true,
+    );
+    expect(isNonLlmDeliveryExcluded("Will Candidate X be the 2028 Democratic nominee?")).toBe(true);
+    expect(isNonLlmDeliveryExcluded("Will Trump be the nominee for president?")).toBe(true);
+    expect(isNonLlmDeliveryExcluded("Will Trump win the nomination?", [{ id: 2 }])).toBe(true);
+    expect(isNonLlmDeliveryExcluded("Will Trump become the nominee?")).toBe(false);
+    expect(isNonLlmDeliveryExcluded("Will Trump become the nominee?", [{ id: 2 }])).toBe(true);
+    expect(isNonLlmDeliveryExcluded("Will Acme become the nominee?")).toBe(false);
+    expect(isNonLlmDeliveryExcluded("Will Acme become the nominee?", [{ id: 2 }])).toBe(true);
+    expect(isNonLlmDeliveryExcluded("Will Trump win the nomination for president?")).toBe(true);
+    expect(isNonLlmDeliveryExcluded("Will Trump be nominated for president?")).toBe(true);
+    expect(isNonLlmDeliveryExcluded("Will a candidate be nominated for governor?")).toBe(true);
+    expect(isNonLlmDeliveryExcluded("Will Trump be nominated by the Republican Party?")).toBe(true);
+    expect(isNonLlmDeliveryExcluded("Will J.D. Vance win the nomination?", [{ id: 2 }])).toBe(true);
+    expect(isNonLlmDeliveryExcluded("Will the film be nominated for an award?")).toBe(false);
+    expect(isNonLlmDeliveryExcluded("Will Acme Corp be nominated for an innovation award?")).toBe(
+      false,
+    );
+    expect(isNonLlmDeliveryExcluded("Will Acme be the nominee for an innovation award?")).toBe(
+      false,
+    );
+    expect(isNonLlmDeliveryExcluded("Will Acme win the nomination for an innovation award?")).toBe(
+      false,
+    );
+    expect(isNonLlmDeliveryExcluded("Will O’Rourke win the nomination?", [{ id: 2 }])).toBe(true);
+    expect(
+      isNonLlmDeliveryExcluded("Will Acme win the nomination for best startup?", [{ id: 107 }]),
+    ).toBe(false);
+    expect(
+      isNonLlmDeliveryExcluded("Will the 2028 presidential election be won by Candidate X?"),
+    ).toBe(false);
+    expect(isNonLlmDeliveryExcluded("Will primary issuance exceed $10 billion this year?")).toBe(
+      false,
+    );
+    expect(isNonLlmDeliveryExcluded("Will primary dealers absorb the new bond supply?")).toBe(
+      false,
+    );
+    expect(isNonLlmDeliveryExcluded("Will the Fed be a primary dealer in 2028?")).toBe(false);
+    expect(isNonLlmDeliveryExcluded("Who will win the primary market?")).toBe(false);
+    expect(isNonLlmDeliveryExcluded("Who will win the Republican primary?")).toBe(true);
+    expect(
+      isNonLlmDeliveryExcluded("Will Democratic Republic of Congo primary bond issuance rise?"),
+    ).toBe(false);
+  });
+});
+
+describe("persisted Polymarket tag filtering", () => {
+  it("recognizes excluded Gamma tags without excluding ordinary tags", () => {
+    expect(hasExcludedPolymarketTag([{ id: 104152, label: "Finance Up/Down" }])).toBe(true);
+    expect(hasExcludedPolymarketTag([{ id: 120, label: "Finance" }])).toBe(false);
   });
 });
 
@@ -173,13 +320,50 @@ describe("fetchCandidateMarkets", () => {
     const markets = await fetchCandidateMarkets(env);
 
     expect(markets.size).toBe(1);
-    expect(requestedUrls).toHaveLength(Object.keys(TAG_IDS).length);
+    const expectedTagIds = [100265, 2, 100328, 120, 21, 107, 1401];
+    expect(requestedUrls).toHaveLength(expectedTagIds.length);
+    expect(
+      requestedUrls
+        .map((requestedUrl) => Number(new URL(requestedUrl).searchParams.get("tag_id")))
+        .sort((a, b) => a - b),
+    ).toEqual([...expectedTagIds].sort((a, b) => a - b));
+    const expectedExcludeTagIds = [
+      102169, 102134, 102127, 104152, 102264, 102281, 103665, 101757, 102516, 1, 315, 596, 18,
+    ];
     for (const requestedUrl of requestedUrls) {
       const url = new URL(requestedUrl);
       expect(url.searchParams.get("order")).toBe("volume24hr");
       expect(url.searchParams.get("active")).toBe("true");
       expect(url.searchParams.get("closed")).toBe("false");
+      expect(url.searchParams.getAll("exclude_tag_id").sort()).toEqual(
+        expectedExcludeTagIds.map(String).sort(),
+      );
     }
+  });
+
+  it("ingests a broad election market available only through the politics tag", async () => {
+    const electionEvent = gammaEvent("0xpolitical-election", "event-election", "election-2028");
+    electionEvent.tags = [{ id: 2, label: "Politics" }];
+    electionEvent.markets[0].question =
+      "Will the 2028 presidential election be won by Candidate X?";
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = new URL(String(input));
+        const events = url.searchParams.get("tag_id") === "2" ? [electionEvent] : [];
+        return new Response(JSON.stringify(events), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }),
+    );
+
+    const markets = await fetchCandidateMarkets(env);
+
+    expect(markets.get("0xpolitical-election")?.question).toBe(
+      "Will the 2028 presidential election be won by Candidate X?",
+    );
   });
 
   it("rejects a completely failed candidate refresh before any database access", async () => {
@@ -199,6 +383,47 @@ describe("fetchCandidateMarkets", () => {
 
     await expect(runPolymarketFanout(env)).rejects.toThrow("Gamma candidate pool is empty");
     expect(dbFrom).not.toHaveBeenCalled();
+  });
+
+  it("does not let an ineligible market enter the fanout candidate pool", async () => {
+    dbFrom.mockImplementation((table: string) => {
+      if (table === "polymarket_markets") {
+        return {
+          upsert: vi.fn().mockResolvedValue({ error: null }),
+          update: vi.fn(() => ({
+            eq: vi.fn(() => ({
+              or: vi.fn(() => ({
+                select: vi.fn().mockResolvedValue({ data: [], error: null }),
+              })),
+            })),
+          })),
+        };
+      }
+      if (table === "portfolios") {
+        return {
+          select: vi.fn().mockResolvedValue({ data: [], error: null }),
+        };
+      }
+      throw new Error(`Unexpected table: ${table}`);
+    });
+
+    const ineligibleEvent = gammaEvent();
+    ineligibleEvent.markets[0].liquidity = 333;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify([ineligibleEvent]), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          }),
+      ),
+    );
+
+    await expect(runPolymarketFanout(env)).rejects.toThrow(
+      "no eligible rotating candidates remained",
+    );
+    expect(dbFrom).toHaveBeenCalledWith("portfolios");
   });
 });
 
@@ -449,6 +674,13 @@ describe("Polymarket Grok curation", () => {
       throw new Error(`Unexpected table: ${table}`);
     });
 
+    const curatedElection = gammaEvent("0xrotating", "event-election", "election-2028");
+    curatedElection.markets[0].question =
+      "Will the 2028 presidential election be won by Candidate X?";
+    const nominationMarket = gammaEvent("0xnomination", "event-nomination", "nomination-2028");
+    nominationMarket.tags = [{ id: 2, label: "Politics" }];
+    nominationMarket.markets[0].question = "Will O’Rourke win the nomination?";
+
     const xaiRequests: Array<{ model: string; reasoning_effort: string }> = [];
     vi.stubGlobal(
       "fetch",
@@ -462,7 +694,7 @@ describe("Polymarket Grok curation", () => {
                   {
                     condition_id: "0xrotating",
                     score: 0.91,
-                    reason: "Rate changes affect AAPL valuation",
+                    reason: "Election outcomes affect AAPL valuation",
                   },
                 ])
               : "[]";
@@ -477,7 +709,7 @@ describe("Polymarket Grok curation", () => {
             { status: 200, headers: { "Content-Type": "application/json" } },
           );
         }
-        return new Response(JSON.stringify([gammaEvent("0xrotating")]), {
+        return new Response(JSON.stringify([curatedElection, nominationMarket]), {
           status: 200,
           headers: { "Content-Type": "application/json" },
         });
@@ -500,7 +732,7 @@ describe("Polymarket Grok curation", () => {
         portfolio_id: "portfolio-1",
         condition_id: "0xrotating",
         score: 0.91,
-        reason: "Rate changes affect AAPL valuation",
+        reason: "Election outcomes affect AAPL valuation",
         is_pinned: false,
       },
     ]);
@@ -515,7 +747,7 @@ describe("Polymarket Grok curation", () => {
     ]);
     expect(cacheUpsert).toHaveBeenCalledTimes(2);
     expect(result).toMatchObject({
-      marketsUpserted: 1,
+      marketsUpserted: 2,
       portfoliosProcessed: 2,
       portfoliosSkipped: 0,
       curation: {

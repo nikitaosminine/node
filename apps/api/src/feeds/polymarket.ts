@@ -147,20 +147,38 @@ export interface PolymarketFanoutResult {
   errors: string[];
 }
 
-
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
 export const TAG_IDS = {
-  politics: 2,
   geopolitics: 100265,
+  politics: 2,
   economy: 100328,
   finance: 120,
   crypto: 21,
   business: 107,
   tech: 1401,
-  stocks: 604,
+} as const;
+
+// Gamma's own noise labels, stripped at the source via `exclude_tag_id` on the
+// fetch URL. Verified live against the Gamma API (design doc 1A-122 P2/P5):
+// series-type price-ladder tags Polymarket itself flags as junk, plus the
+// broad Sports/Entertainment/Culture/Awards umbrella tags.
+export const EXCLUDE_TAG_IDS = {
+  hideFromNew: 102169,
+  hitPrice: 102134,
+  upOrDown: 102127,
+  financeUpdown: 104152,
+  weekly: 102264,
+  daily: 102281,
+  dailyClose: 103665,
+  recurring: 101757,
+  multiStrikes: 102516,
+  sports: 1,
+  entertainment: 315,
+  culture: 596,
+  awards: 18,
 } as const;
 
 const ROTATING_BATCH_SIZE = 60; // max candidate markets sent to Grok per portfolio (event-deduped by highest-Yes bucket)
@@ -179,16 +197,50 @@ const POLYMARKET_GROK_REASONING_EFFORTS = new Set<PolymarketGrokReasoningEffort>
 const CACHE_TTL_HOURS = 6;
 
 // ---------------------------------------------------------------------------
-// Non-financial market filter — applied before Grok to prevent LLM from
-// wasting tokens on sports/entertainment/individual political candidacies.
-// Exported so the /api/polymarket/category endpoint in index.ts can reuse it.
+// Non-LLM delivery filter for the category-browse and volume-fallback paths.
+// The personalized Grok path keeps the broader candidate set for semantic
+// relevance decisions (design doc 1A-122 P2).
 // ---------------------------------------------------------------------------
 
 export const NON_FINANCIAL_RE =
-  /\b(fifa|world cup|super bowl|nfl|nba|nhl|mlb|premier league|la liga|bundesliga|serie a|champions league|olympic|euro 202[0-9]|euros 202[0-9]|wimbledon|grand prix|formula.?1\b|f1 race|moto ?gp|cricket|rugby world|march madness|stanley cup|gold cup|copa am[eé]rica|esports|grammy|oscar|emmy|golden globe|box office|celebrity|reality (tv|show)|presidential nomination|republican nomination|democratic nomination|win the .{0,30} nomination|become .{0,20} nominee|primary election|senate seat|congressional seat|gubernatorial|win the .{0,20} primary|win the \d{4} .{0,30} presidential election|win the \d{4} us presidential|us president in \d{4})\b/i;
+  /\b(fifa|world cup|super bowl|nfl|nba|nhl|mlb|premier league|la liga|bundesliga|serie a|champions league|olympic|euro 202[0-9]|euros 202[0-9]|wimbledon|grand prix|formula.?1\b|f1 race|moto ?gp|cricket|rugby world|march madness|stanley cup|gold cup|copa am[eé]rica|esports|grammy|oscar|emmy|golden globe|box office|celebrity|reality (tv|show))\b/i;
 
-export function isNonFinancialQuestion(question: string): boolean {
-  return NON_FINANCIAL_RE.test(question);
+export const POLITICAL_NOMINATION_RE =
+  /\b(?:democratic|republican|gop|libertarian|green|party)\s+(?:party\s+)?(?:primary|primaries|nominee|nomination)\b|\b(?:presidential|president(?:ial)?|vice[- ]president|governor|senator|senate|congress(?:ional)?|representative|mayor)\b[^\n?]{0,60}\b(?:nominee|nomination)\b|\b(?:which candidate|candidate)\b[^\n?]{0,80}\b(?:win|wins|be|become|be named|secure|capture)\b[^\n?]{0,80}\b(?:nominee|nomination|primary|primaries)\b|\b(?:will|could|can)\b[^\n?]{0,80}\b(?:win|wins)\b[^\n?]{0,30}\b(?:the\s+)?nomination\b[^\n?]{0,30}\bfor\b[^\n?]{0,30}\b(?:president(?:ial)?|vice[- ]president|governor|senator|mayor)\b|\b(?:will|could|can)\b[^\n?]{0,80}\b(?:be|become|be named)\b[^\n?]{0,30}\b(?:the\s+)?nominee\b[^\n?]{0,30}\b(?:for|of)\b[^\n?]{0,30}\b(?:president(?:ial)?|vice[- ]president|governor|senator|mayor)\b|\b(?:will|could|can)\b[^\n?]{0,80}\b(?:nominate|nominated)\b[^\n?]{0,30}\b(?:for|as)\b[^\n?]{0,30}\b(?:president(?:ial)?|vice[- ]president|governor|senator|mayor)\b|\b(?:will|could|can)\b[^\n?]{0,80}\b(?:nominate|nominated)\b[^\n?]{0,30}\b(?:by|from)\b[^\n?]{0,30}\b(?:democratic|republican|gop|libertarian|green)\s+party\b/i;
+
+const AMBIGUOUS_NOMINATION_RE =
+  /\b(?:will|could|can)\b[^\n?]{0,80}\b(?:be|become|be named)\b[^\n?]{0,30}\b(?:the\s+)?nominee\b/i;
+
+const NAMED_PERSON_NOMINATION_RE =
+  /\b(?:will|could|can)\s+(?:(?:\p{Lu}(?:\p{Ll}+|['’]\p{Lu}\p{Ll}+)|(?:\p{Lu}\.){1,3}))(?:\s+(?:(?:\p{Lu}(?:\p{Ll}+|['’]\p{Lu}\p{Ll}+)|(?:\p{Lu}\.){1,3})))*[^\n?]{0,30}\b(?:win|wins)\b[^\n?]{0,30}\b(?:the\s+)?nomination\b(?!\s+for\s+(?:an?\s+)?(?:innovation\s+)?(?:award|prize)\b)/iu;
+const NON_POLITICAL_NOMINATION_RE =
+  /\b(?:nominee|nomination|nominated)\b[^\n?]{0,60}\b(?:award|prize|innovation|startup)\b/i;
+
+function hasTagId(tags: unknown, tagId: number): boolean {
+  return (
+    Array.isArray(tags) &&
+    tags.some(
+      (tag) => tag && typeof tag === "object" && Number((tag as { id?: unknown }).id) === tagId,
+    )
+  );
+}
+
+export function isNonLlmDeliveryExcluded(
+  question: string | null | undefined,
+  tags?: unknown,
+): boolean {
+  const text = question ?? "";
+  if (NON_FINANCIAL_RE.test(text)) return true;
+  if (NON_POLITICAL_NOMINATION_RE.test(text)) return false;
+  return (
+    POLITICAL_NOMINATION_RE.test(text) ||
+    ((AMBIGUOUS_NOMINATION_RE.test(text) || NAMED_PERSON_NOMINATION_RE.test(text)) &&
+      hasTagId(tags, TAG_IDS.politics))
+  );
+}
+
+export function hasExcludedPolymarketTag(tags: unknown): boolean {
+  return Object.values(EXCLUDE_TAG_IDS).some((tagId) => hasTagId(tags, tagId));
 }
 
 // ---------------------------------------------------------------------------
@@ -223,6 +275,52 @@ export function isNearCertainMarket(outcomePrices: number[] | null | undefined):
   if (!outcomePrices || outcomePrices.length === 0) return false;
   const topProb = Math.max(...outcomePrices, 0);
   return topProb >= MAX_CERTAIN_PROB;
+}
+
+// ---------------------------------------------------------------------------
+// Liquidity floor — the first use of the stored-but-previously-unused
+// `liquidity` column. Snapshot evidence (design doc 1A-122 P3): among the
+// eligible pool, median liquidity is $333; a $2k floor removes the dead,
+// untradeable tail without touching the current top-60 (AI-arena markets at
+// $203-$800 liquidity are the only real casualties). Deliberately no 24h
+// volume floor — volume is spiky day-to-day and stays a ranking signal only.
+// ---------------------------------------------------------------------------
+
+export const MIN_LIQUIDITY_USD = 2000;
+
+export function isBelowLiquidityFloor(liquidity: number | string | null | undefined): boolean {
+  if (liquidity == null) return true;
+  const value = Number(liquidity);
+  return !Number.isFinite(value) || value < MIN_LIQUIDITY_USD;
+}
+
+// ---------------------------------------------------------------------------
+// Single eligibility gate — applied identically across every read path
+// (fanout candidate pool, /api/polymarket/category, recaps watch slide) so a
+// market is never "too junky to personalize but fine to browse" (design doc
+// 1A-122 P3). Unifies what were three separate per-path checks:
+//   - end_date > now (resolved markets never render)
+//   - duration >= MIN_MARKET_DURATION_DAYS (isShortTermMarket)
+//   - leading outcome < MAX_CERTAIN_PROB (isNearCertainMarket)
+//   - liquidity >= MIN_LIQUIDITY_USD (isBelowLiquidityFloor)
+// The end date and liquidity gates fail closed when Gamma omits or corrupts
+// either value. Unknown duration keeps the existing helper behavior.
+// ---------------------------------------------------------------------------
+
+export interface MarketEligibilityInput {
+  start_date?: string | null;
+  end_date?: string | null;
+  outcome_prices?: number[] | null;
+  liquidity?: number | string | null;
+}
+
+export function isEligibleMarket(market: MarketEligibilityInput, now: Date = new Date()): boolean {
+  const endMs = market.end_date ? new Date(market.end_date).getTime() : Number.NaN;
+  if (!Number.isFinite(endMs) || endMs <= now.getTime()) return false;
+  if (isShortTermMarket(market.start_date, market.end_date)) return false;
+  if (isNearCertainMarket(market.outcome_prices)) return false;
+  if (isBelowLiquidityFloor(market.liquidity)) return false;
+  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -422,6 +520,12 @@ function flattenEvent(event: GammaEvent): FlatMarket[] {
 // Candidate pool fetch (tag-filtered only — no broad pool)
 // ---------------------------------------------------------------------------
 
+function excludeTagIdQuery(): string {
+  return Object.values(EXCLUDE_TAG_IDS)
+    .map((id) => `exclude_tag_id=${id}`)
+    .join("&");
+}
+
 export async function fetchCandidateMarkets(env: Env): Promise<Map<string, FlatMarket>> {
   const base = gammaBase(env);
   const marketMap = new Map<string, FlatMarket>();
@@ -431,13 +535,12 @@ export async function fetchCandidateMarkets(env: Env): Promise<Map<string, FlatM
   for (const [tagName, tagId] of Object.entries(TAG_IDS)) {
     try {
       const events = await fetchGammaJson<GammaEvent[]>(
-        `${base}/events?tag_id=${tagId}&active=true&closed=false&order=volume24hr&ascending=false&limit=30`,
+        `${base}/events?tag_id=${tagId}&${excludeTagIdQuery()}&active=true&closed=false&order=volume24hr&ascending=false&limit=30`,
       );
       successfulTags++;
       let added = 0;
       for (const event of events) {
         for (const market of flattenEvent(event)) {
-          if (isNonFinancialQuestion(market.question)) continue;
           if (!marketMap.has(market.condition_id)) {
             marketMap.set(market.condition_id, market);
             added++;
@@ -473,10 +576,7 @@ export async function fetchCandidateMarkets(env: Env): Promise<Map<string, FlatM
 // Upsert markets into polymarket_markets
 // ---------------------------------------------------------------------------
 
-async function upsertMarkets(
-  client: AnySupabaseClient,
-  markets: FlatMarket[],
-): Promise<void> {
+async function upsertMarkets(client: AnySupabaseClient, markets: FlatMarket[]): Promise<void> {
   if (markets.length === 0) return;
 
   const rows = markets.map((m) => ({
@@ -529,9 +629,7 @@ const STALE_FANOUT_WINDOW_HOURS = 48;
  */
 async function deactivateStaleMarkets(client: AnySupabaseClient): Promise<number> {
   const nowIso = new Date().toISOString();
-  const staleCutoffIso = new Date(
-    Date.now() - STALE_FANOUT_WINDOW_HOURS * 3_600_000,
-  ).toISOString();
+  const staleCutoffIso = new Date(Date.now() - STALE_FANOUT_WINDOW_HOURS * 3_600_000).toISOString();
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const { data, error } = (await (client as any)
@@ -539,7 +637,10 @@ async function deactivateStaleMarkets(client: AnySupabaseClient): Promise<number
     .update({ active: false })
     .eq("active", true)
     .or(`end_date.lt.${nowIso},fetched_at.lt.${staleCutoffIso}`)
-    .select("condition_id")) as { data: { condition_id: string }[] | null; error: { message: string } | null };
+    .select("condition_id")) as {
+    data: { condition_id: string }[] | null;
+    error: { message: string } | null;
+  };
 
   if (error) {
     throw new Error(`[polymarket] failed to deactivate stale markets: ${error.message}`);
@@ -704,9 +805,7 @@ export async function enqueueEtfConstituentsEnrichment(
       error: { message: string } | null;
     };
     if (updateError) {
-      throw new Error(
-        `[polymarket] constituents enrichment claim failed: ${updateError.message}`,
-      );
+      throw new Error(`[polymarket] constituents enrichment claim failed: ${updateError.message}`);
     }
     if (updatedRows && updatedRows.length > 0) {
       claimed.push(gap);
@@ -965,11 +1064,10 @@ export async function runPolymarketFanout(
   // the meaningful one ("Will 0 cuts happen?" at 67% Yes).
   // Drop near-certain markets (see isNearCertainMarket) so noise like
   // "Will MSFT hit $435 in May? 100% Yes" never reaches Grok.
+  const fanoutNow = new Date();
   const consensusByEvent = new Map<string, FlatMarket>();
   for (const m of allMarkets) {
-    // Drop weekly/daily price-target gambling markets (short duration)
-    if (isShortTermMarket(m.start_date, m.end_date)) continue;
-    if (isNearCertainMarket(m.outcome_prices)) continue;
+    if (!isEligibleMarket(m, fanoutNow)) continue;
     const key = m.event_id || m.condition_id;
     const existing = consensusByEvent.get(key);
     if (!existing || getYesProb(m) > getYesProb(existing)) {
@@ -984,6 +1082,9 @@ export async function runPolymarketFanout(
       "[polymarket] no eligible rotating candidates remained after filtering; preserving existing portfolio matches",
     );
   }
+  const volumeFallbackCandidates = rotatingCandidates.filter(
+    (market) => !isNonLlmDeliveryExcluded(market.question, market.tags),
+  );
 
   const hasGrokKey = !!(
     env.GROK_MAIN_API_KEY ||
@@ -1064,7 +1165,7 @@ export async function runPolymarketFanout(
       if (!hasGrokKey) {
         curation.fallbacks++;
         errors.push(`portfolio ${portfolioId}: no Grok key available — using volume fallback`);
-        scored = rotatingCandidates.slice(0, 10).map((m) => ({
+        scored = volumeFallbackCandidates.slice(0, 10).map((m) => ({
           condition_id: m.condition_id,
           score: 0,
           reason: null,
@@ -1160,7 +1261,7 @@ export async function runPolymarketFanout(
           errors.push(
             `portfolio ${portfolioId}: Grok scoring returned 0 results — using volume fallback`,
           );
-          scored = rotatingCandidates.slice(0, 10).map((m) => ({
+          scored = volumeFallbackCandidates.slice(0, 10).map((m) => ({
             condition_id: m.condition_id,
             score: 0,
             reason: null,
