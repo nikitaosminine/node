@@ -211,22 +211,30 @@ export const POLITICAL_NOMINATION_RE =
 const NAMED_PERSON_NOMINATION_RE =
   /\b(?:will|could|can)\s+(?:(?:\p{Lu}\p{Ll}+(?:['’]\p{Lu}\p{Ll}+)?|(?:\p{Lu}\.){1,3}))(?:\s+(?:(?:\p{Lu}\p{Ll}+(?:['’]\p{Lu}\p{Ll}+)?|(?:\p{Lu}\.){1,3})))*[^\n?]{0,30}\b(?:win|wins)\b[^\n?]{0,30}\b(?:the\s+)?nomination\b(?!\s+for\s+(?:an?\s+)?(?:innovation\s+)?(?:award|prize)\b)/u;
 
-export function isNonLlmDeliveryExcluded(question: string | null | undefined): boolean {
+function hasTagId(tags: unknown, tagId: number): boolean {
+  return (
+    Array.isArray(tags) &&
+    tags.some(
+      (tag) =>
+        tag && typeof tag === "object" && Number((tag as { id?: unknown }).id) === tagId,
+    )
+  );
+}
+
+export function isNonLlmDeliveryExcluded(
+  question: string | null | undefined,
+  tags?: unknown,
+): boolean {
   const text = question ?? "";
   return (
     NON_FINANCIAL_RE.test(text) ||
     POLITICAL_NOMINATION_RE.test(text) ||
-    NAMED_PERSON_NOMINATION_RE.test(text)
+    (NAMED_PERSON_NOMINATION_RE.test(text) && hasTagId(tags, TAG_IDS.politics))
   );
 }
 
 export function hasExcludedPolymarketTag(tags: unknown): boolean {
-  if (!Array.isArray(tags)) return false;
-  const excludedIds = new Set(Object.values(EXCLUDE_TAG_IDS));
-  return tags.some((tag) => {
-    if (!tag || typeof tag !== "object") return false;
-    return excludedIds.has(Number((tag as { id?: unknown }).id));
-  });
+  return Object.values(EXCLUDE_TAG_IDS).some((tagId) => hasTagId(tags, tagId));
 }
 
 // ---------------------------------------------------------------------------
@@ -1069,7 +1077,7 @@ export async function runPolymarketFanout(
     );
   }
   const volumeFallbackCandidates = rotatingCandidates.filter(
-    (market) => !isNonLlmDeliveryExcluded(market.question),
+    (market) => !isNonLlmDeliveryExcluded(market.question, market.tags),
   );
 
   const hasGrokKey = !!(

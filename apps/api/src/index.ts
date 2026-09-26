@@ -6107,7 +6107,7 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
         filtered.push(
           ...(data ?? [])
             .filter((m) => !hasExcludedPolymarketTag(m.tags))
-            .filter((m) => !isNonLlmDeliveryExcluded(m.question))
+            .filter((m) => !isNonLlmDeliveryExcluded(m.question, m.tags))
             .filter((m) => isEligibleMarket(m, eligibilityNow)),
         );
         if ((data ?? []).length < categoryPageSize) break;
