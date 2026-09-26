@@ -9,7 +9,6 @@ vi.mock("@supabase/supabase-js", () => ({
 import {
   EXCLUDE_TAG_IDS,
   MIN_LIQUIDITY_USD,
-  NON_FINANCIAL_RE,
   TAG_IDS,
   buildPortfolioProfile,
   enqueueEtfConstituentsEnrichment,
@@ -18,6 +17,7 @@ import {
   isBelowLiquidityFloor,
   isEligibleMarket,
   isNearCertainMarket,
+  isNonLlmDeliveryExcluded,
   isShortTermMarket,
   runPolymarketFanout,
   shouldUsePolymarketCurationCache,
@@ -181,7 +181,7 @@ describe("isEligibleMarket", () => {
 describe("category endpoint filter application", () => {
   // Mirrors the filter chain applied post-query in the
   // GET /api/polymarket/category handler in index.ts: the slimmed
-  // NON_FINANCIAL_RE backstop plus the shared isEligibleMarket gate.
+  // non-LLM delivery backstop plus the shared isEligibleMarket gate.
   function applyCategoryFilters(
     markets: Array<{
       question: string;
@@ -192,7 +192,7 @@ describe("category endpoint filter application", () => {
     }>,
   ) {
     return markets
-      .filter((m) => !NON_FINANCIAL_RE.test(m.question ?? ""))
+      .filter((m) => !isNonLlmDeliveryExcluded(m.question))
       .filter((m) => isEligibleMarket(m));
   }
 
@@ -233,11 +233,32 @@ describe("category endpoint filter application", () => {
         outcome_prices: [0.6, 0.4],
         liquidity: 5000,
       },
+      {
+        question: "Will Candidate X win the 2028 Democratic nomination?",
+        start_date: "2027-01-01T00:00:00Z",
+        end_date: "2027-12-31T00:00:00Z",
+        outcome_prices: [0.6, 0.4],
+        liquidity: 5000,
+      },
     ];
 
     const filtered = applyCategoryFilters(markets);
 
     expect(filtered.map((m) => m.question)).toEqual(["Will EWY close above $60 in May?"]);
+  });
+});
+
+describe("non-LLM Polymarket delivery filter", () => {
+  it("excludes nomination markets without excluding broader elections", () => {
+    expect(isNonLlmDeliveryExcluded("Will Candidate X win the 2028 Democratic primary?")).toBe(
+      true,
+    );
+    expect(isNonLlmDeliveryExcluded("Will Candidate X be the 2028 Democratic nominee?")).toBe(
+      true,
+    );
+    expect(
+      isNonLlmDeliveryExcluded("Will the 2028 presidential election be won by Candidate X?"),
+    ).toBe(false);
   });
 });
 
@@ -593,6 +614,12 @@ describe("Polymarket Grok curation", () => {
       throw new Error(`Unexpected table: ${table}`);
     });
 
+    const curatedElection = gammaEvent("0xrotating", "event-election", "election-2028");
+    curatedElection.markets[0].question =
+      "Will the 2028 presidential election be won by Candidate X?";
+    const nominationMarket = gammaEvent("0xnomination", "event-nomination", "nomination-2028");
+    nominationMarket.markets[0].question = "Will Candidate X win the 2028 Democratic nomination?";
+
     const xaiRequests: Array<{ model: string; reasoning_effort: string }> = [];
     vi.stubGlobal(
       "fetch",
@@ -606,7 +633,7 @@ describe("Polymarket Grok curation", () => {
                   {
                     condition_id: "0xrotating",
                     score: 0.91,
-                    reason: "Rate changes affect AAPL valuation",
+                    reason: "Election outcomes affect AAPL valuation",
                   },
                 ])
               : "[]";
@@ -621,7 +648,7 @@ describe("Polymarket Grok curation", () => {
             { status: 200, headers: { "Content-Type": "application/json" } },
           );
         }
-        return new Response(JSON.stringify([gammaEvent("0xrotating")]), {
+        return new Response(JSON.stringify([curatedElection, nominationMarket]), {
           status: 200,
           headers: { "Content-Type": "application/json" },
         });
@@ -644,7 +671,7 @@ describe("Polymarket Grok curation", () => {
         portfolio_id: "portfolio-1",
         condition_id: "0xrotating",
         score: 0.91,
-        reason: "Rate changes affect AAPL valuation",
+        reason: "Election outcomes affect AAPL valuation",
         is_pinned: false,
       },
     ]);
@@ -659,7 +686,7 @@ describe("Polymarket Grok curation", () => {
     ]);
     expect(cacheUpsert).toHaveBeenCalledTimes(2);
     expect(result).toMatchObject({
-      marketsUpserted: 1,
+      marketsUpserted: 2,
       portfoliosProcessed: 2,
       portfoliosSkipped: 0,
       curation: {

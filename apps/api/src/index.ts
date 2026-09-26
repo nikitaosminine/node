@@ -21,7 +21,7 @@ import {
 import { runNewsFanout } from "./feeds/news";
 import {
   runPolymarketFanout,
-  NON_FINANCIAL_RE,
+  isNonLlmDeliveryExcluded,
   TAG_IDS,
   isEligibleMarket,
 } from "./feeds/polymarket";
@@ -6046,7 +6046,7 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
 
     // GET /api/polymarket/category?tag=finance|geopolitics|tech|economy&limit=30
     // Returns volume-ranked markets for a given category tag, filtered by the
-    // shared eligibility gate plus the NON_FINANCIAL_RE backstop. No portfolio
+    // shared eligibility gate plus the non-LLM delivery backstop. No portfolio
     // context or LLM call — suitable for browsing.
     if (method === "GET" && pathname === "/api/polymarket/category") {
       const auth = await requireAuth(request, env);
@@ -6086,9 +6086,9 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
 
       // Apply the same eligibility gate as the personalized rotating path
       // (isEligibleMarket: end_date/duration/near-certain/liquidity), plus the
-      // slimmed NON_FINANCIAL_RE backstop that only this LLM-free path needs.
+      // non-LLM delivery backstop.
       const filtered = (data ?? [])
-        .filter((m) => !NON_FINANCIAL_RE.test(m.question ?? ""))
+        .filter((m) => !isNonLlmDeliveryExcluded(m.question))
         .filter((m) => isEligibleMarket(m, eligibilityNow))
         .slice(0, limit);
 

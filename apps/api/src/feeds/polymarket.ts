@@ -196,17 +196,20 @@ const POLYMARKET_GROK_REASONING_EFFORTS = new Set<PolymarketGrokReasoningEffort>
 const CACHE_TTL_HOURS = 6;
 
 // ---------------------------------------------------------------------------
-// Non-financial market filter — a slimmed backstop for the category-browse
-// path only (`/api/polymarket/category`), where no LLM runs. The personalized
-// fanout path no longer applies this: it relies on source-side tag exclusion
-// (EXCLUDE_TAG_IDS) plus Grok as the semantic judge (design doc 1A-122 P2).
-// Kept to clear sports/culture patterns only — political-nomination noise is
-// now handled by dropping `politics` from TAG_IDS and excluding Sports/
-// Entertainment/Culture/Awards at the source.
+// Non-LLM delivery filter for the category-browse and volume-fallback paths.
+// The personalized Grok path keeps the broader candidate set for semantic
+// relevance decisions (design doc 1A-122 P2).
 // ---------------------------------------------------------------------------
 
 export const NON_FINANCIAL_RE =
   /\b(fifa|world cup|super bowl|nfl|nba|nhl|mlb|premier league|la liga|bundesliga|serie a|champions league|olympic|euro 202[0-9]|euros 202[0-9]|wimbledon|grand prix|formula.?1\b|f1 race|moto ?gp|cricket|rugby world|march madness|stanley cup|gold cup|copa am[eé]rica|esports|grammy|oscar|emmy|golden globe|box office|celebrity|reality (tv|show))\b/i;
+
+export const POLITICAL_NOMINATION_RE = /\b(nominee|nomination|primary|primaries)\b/i;
+
+export function isNonLlmDeliveryExcluded(question: string | null | undefined): boolean {
+  const text = question ?? "";
+  return NON_FINANCIAL_RE.test(text) || POLITICAL_NOMINATION_RE.test(text);
+}
 
 // ---------------------------------------------------------------------------
 // Short-duration filter — weekly/daily price-target markets ("Will MSFT close
@@ -1047,6 +1050,9 @@ export async function runPolymarketFanout(
       "[polymarket] no eligible rotating candidates remained after filtering; preserving existing portfolio matches",
     );
   }
+  const volumeFallbackCandidates = rotatingCandidates.filter(
+    (market) => !isNonLlmDeliveryExcluded(market.question),
+  );
 
   const hasGrokKey = !!(
     env.GROK_MAIN_API_KEY ||
@@ -1127,7 +1133,7 @@ export async function runPolymarketFanout(
       if (!hasGrokKey) {
         curation.fallbacks++;
         errors.push(`portfolio ${portfolioId}: no Grok key available — using volume fallback`);
-        scored = rotatingCandidates.slice(0, 10).map((m) => ({
+        scored = volumeFallbackCandidates.slice(0, 10).map((m) => ({
           condition_id: m.condition_id,
           score: 0,
           reason: null,
@@ -1223,7 +1229,7 @@ export async function runPolymarketFanout(
           errors.push(
             `portfolio ${portfolioId}: Grok scoring returned 0 results — using volume fallback`,
           );
-          scored = rotatingCandidates.slice(0, 10).map((m) => ({
+          scored = volumeFallbackCandidates.slice(0, 10).map((m) => ({
             condition_id: m.condition_id,
             score: 0,
             reason: null,

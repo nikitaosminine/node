@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // Exercise the real Worker fetch handler for GET /api/polymarket/category with
 // a stubbed auth context and Supabase query builder, so the test proves the
-// endpoint itself applies the NON_FINANCIAL_RE backstop plus the shared
+// endpoint itself applies the non-LLM delivery backstop plus the shared
 // isEligibleMarket gate (end_date/duration/near-certain/liquidity) — not just
 // that the helpers work in isolation.
 
@@ -116,6 +116,10 @@ describe("GET /api/polymarket/category", () => {
       marketRow({
         condition_id: "non-financial",
         question: "Will the Super Bowl champion be decided by field goal?",
+      }),
+      marketRow({
+        condition_id: "nomination",
+        question: "Will Candidate X win the 2028 Democratic nomination?",
       }),
       marketRow({
         condition_id: "illiquid",
