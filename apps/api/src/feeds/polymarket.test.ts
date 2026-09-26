@@ -7,9 +7,7 @@ vi.mock("@supabase/supabase-js", () => ({
 }));
 
 import {
-  EXCLUDE_TAG_IDS,
   MIN_LIQUIDITY_USD,
-  TAG_IDS,
   buildPortfolioProfile,
   enqueueEtfConstituentsEnrichment,
   fetchCandidateMarkets,
@@ -265,21 +263,9 @@ describe("non-LLM Polymarket delivery filter", () => {
     expect(isNonLlmDeliveryExcluded("Will primary dealers absorb the new bond supply?")).toBe(
       false,
     );
-  });
-});
-
-describe("TAG_IDS", () => {
-  it("drops politics and stocks, keeping business ingested with no dedicated tab", () => {
-    expect(TAG_IDS).not.toHaveProperty("politics");
-    expect(TAG_IDS).not.toHaveProperty("stocks");
-    expect(TAG_IDS).toMatchObject({
-      geopolitics: 100265,
-      economy: 100328,
-      finance: 120,
-      crypto: 21,
-      business: 107,
-      tech: 1401,
-    });
+    expect(
+      isNonLlmDeliveryExcluded("Will Democratic Republic of Congo primary bond issuance rise?"),
+    ).toBe(false);
   });
 });
 
@@ -300,14 +286,24 @@ describe("fetchCandidateMarkets", () => {
     const markets = await fetchCandidateMarkets(env);
 
     expect(markets.size).toBe(1);
-    expect(requestedUrls).toHaveLength(Object.keys(TAG_IDS).length);
+    const expectedTagIds = [100265, 100328, 120, 21, 107, 1401];
+    expect(requestedUrls).toHaveLength(expectedTagIds.length);
+    expect(
+      requestedUrls
+        .map((requestedUrl) => Number(new URL(requestedUrl).searchParams.get("tag_id")))
+        .sort((a, b) => a - b),
+    ).toEqual([...expectedTagIds].sort((a, b) => a - b));
+    const expectedExcludeTagIds = [
+      102169, 102134, 102127, 104152, 102264, 102281, 103665, 101757, 102516, 1, 315, 596,
+      18,
+    ];
     for (const requestedUrl of requestedUrls) {
       const url = new URL(requestedUrl);
       expect(url.searchParams.get("order")).toBe("volume24hr");
       expect(url.searchParams.get("active")).toBe("true");
       expect(url.searchParams.get("closed")).toBe("false");
       expect(url.searchParams.getAll("exclude_tag_id").sort()).toEqual(
-        Object.values(EXCLUDE_TAG_IDS).map(String).sort(),
+        expectedExcludeTagIds.map(String).sort(),
       );
     }
   });
