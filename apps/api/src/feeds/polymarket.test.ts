@@ -264,6 +264,8 @@ describe("non-LLM Polymarket delivery filter", () => {
       false,
     );
     expect(isNonLlmDeliveryExcluded("Will the Fed be a primary dealer in 2028?")).toBe(false);
+    expect(isNonLlmDeliveryExcluded("Who will win the primary market?")).toBe(false);
+    expect(isNonLlmDeliveryExcluded("Who will win the Republican primary?")).toBe(true);
     expect(
       isNonLlmDeliveryExcluded("Will Democratic Republic of Congo primary bond issuance rise?"),
     ).toBe(false);
