@@ -39,8 +39,9 @@ npm run eval:curation          # Polymarket curation quality eval — docs: apps
 
 No monorepo-level build or test command exists; lint/build/test per-app.
 
-CI (`.github/workflows/ci.yml`) runs on every PR to `main`: `check-web` does lint + `tsc --noEmit`
-+ `npm test` in `apps/web`; `check-api` does `npm run typecheck` + `npm test` (vitest) in `apps/api`.
+CI (`.github/workflows/ci.yml`) runs on every PR to `main`: `check-web` runs lint, `tsc --noEmit`,
+and `npm test` in `apps/web`; `check-api` runs `npm run typecheck`, `npm test` (Vitest), and
+`npm run test:postgres` (PostgreSQL 17 integration) in `apps/api`.
 
 ## Deployment rules
 
