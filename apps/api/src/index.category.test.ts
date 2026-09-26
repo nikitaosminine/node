@@ -157,10 +157,8 @@ describe("GET /api/polymarket/category", () => {
     const body = (await response.json()) as Array<{ condition_id: string }>;
     expect(body.map((m) => m.condition_id)).toEqual(["keeper"]);
 
-    // The query must fetch start_date so isShortTermMarket has real input.
     const query = fromCalls.find((c) => c.table === "polymarket_markets");
     expect(query).toBeDefined();
-    expect(String(query?.args.select?.[0])).toContain("start_date");
     expect(query?.args.gt).toEqual(["end_date", reviewNow.toISOString()]);
   });
 

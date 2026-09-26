@@ -254,6 +254,8 @@ describe("non-LLM Polymarket delivery filter", () => {
     expect(isNonLlmDeliveryExcluded("Will Candidate X be the 2028 Democratic nominee?")).toBe(
       true,
     );
+    expect(isNonLlmDeliveryExcluded("Will Trump be the nominee for president?")).toBe(true);
+    expect(isNonLlmDeliveryExcluded("Will Trump win the nomination?")).toBe(true);
     expect(
       isNonLlmDeliveryExcluded("Will the 2028 presidential election be won by Candidate X?"),
     ).toBe(false);

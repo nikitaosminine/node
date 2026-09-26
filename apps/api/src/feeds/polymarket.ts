@@ -205,11 +205,18 @@ export const NON_FINANCIAL_RE =
   /\b(fifa|world cup|super bowl|nfl|nba|nhl|mlb|premier league|la liga|bundesliga|serie a|champions league|olympic|euro 202[0-9]|euros 202[0-9]|wimbledon|grand prix|formula.?1\b|f1 race|moto ?gp|cricket|rugby world|march madness|stanley cup|gold cup|copa am[eé]rica|esports|grammy|oscar|emmy|golden globe|box office|celebrity|reality (tv|show))\b/i;
 
 export const POLITICAL_NOMINATION_RE =
-  /\b(?:democratic|republican|gop|libertarian|green|party)\s+(?:party\s+)?(?:primary|primaries|nominee|nomination)\b|\b(?:presidential|president(?:ial)?|vice[- ]president|governor|senator|senate|congress(?:ional)?|representative|mayor)\b[^\n?]{0,60}\b(?:nominee|nomination)\b|\b(?:which candidate|candidate)\b[^\n?]{0,80}\b(?:win|wins|be|become|be named|secure|capture)\b[^\n?]{0,80}\b(?:nominee|nomination|primary|primaries)\b/i;
+  /\b(?:democratic|republican|gop|libertarian|green|party)\s+(?:party\s+)?(?:primary|primaries|nominee|nomination)\b|\b(?:presidential|president(?:ial)?|vice[- ]president|governor|senator|senate|congress(?:ional)?|representative|mayor)\b[^\n?]{0,60}\b(?:nominee|nomination)\b|\b(?:which candidate|candidate)\b[^\n?]{0,80}\b(?:win|wins|be|become|be named|secure|capture)\b[^\n?]{0,80}\b(?:nominee|nomination|primary|primaries)\b|\b(?:will|could|can)\b[^\n?]{0,80}\b(?:be|become|be named)\b[^\n?]{0,30}\b(?:the\s+)?(?:nominee|nomination)\b[^\n?]{0,30}\b(?:for|of)\b[^\n?]{0,30}\b(?:president(?:ial)?|vice[- ]president|governor|senator|mayor)\b/i;
+
+const NAMED_PERSON_NOMINATION_RE =
+  /\b(?:will|could|can)\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*[^\n?]{0,40}\b(?:win|wins|be|become|be named|secure|capture)\b[^\n?]{0,50}\b(?:nominee|nomination)\b/;
 
 export function isNonLlmDeliveryExcluded(question: string | null | undefined): boolean {
   const text = question ?? "";
-  return NON_FINANCIAL_RE.test(text) || POLITICAL_NOMINATION_RE.test(text);
+  return (
+    NON_FINANCIAL_RE.test(text) ||
+    POLITICAL_NOMINATION_RE.test(text) ||
+    NAMED_PERSON_NOMINATION_RE.test(text)
+  );
 }
 
 // ---------------------------------------------------------------------------
