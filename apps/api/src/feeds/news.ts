@@ -1227,6 +1227,7 @@ export async function runNewsFanout(
   expiredSwept: number;
   clustersScored: number;
   companiesRescored: number;
+  persistenceFailed: boolean;
   errors: string[];
 }> {
   const errors: string[] = [];
@@ -1672,6 +1673,7 @@ export async function runNewsFanout(
     );
   });
   let clustersUpserted = 0;
+  let persistenceFailed = false;
   const clusterMap = new Map<string, ClusterAccum>();
   const clusterKeyToId = new Map<string, string>();
 
@@ -1693,6 +1695,7 @@ export async function runNewsFanout(
     };
 
     if (clusterBatchError) {
+      persistenceFailed = true;
       errors.push(`batch cluster upsert: ${clusterBatchError.message}`);
       console.error("[news] batch cluster upsert failed:", clusterBatchError.message);
       continue;
@@ -1828,6 +1831,7 @@ export async function runNewsFanout(
       .upsert(matchRows, { onConflict: "portfolio_id,cluster_id" });
 
     if (matchBatchError) {
+      persistenceFailed = true;
       errors.push(`batch match upsert: ${matchBatchError.message}`);
       console.error("[news] batch match upsert failed:", matchBatchError.message);
     } else {
@@ -1871,6 +1875,7 @@ export async function runNewsFanout(
       (sentiments) => sentiments !== null && sentiments.length > 0,
     ).length,
     companiesRescored,
+    persistenceFailed,
     errors,
   };
 

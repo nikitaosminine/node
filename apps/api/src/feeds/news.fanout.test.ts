@@ -58,6 +58,7 @@ function stubFanoutHttp(options: {
   existingClusters?: Array<Record<string, unknown>>;
   emptyNews?: boolean;
   pendingRows?: Array<Record<string, unknown>>;
+  matchUpsertStatus?: number;
 }) {
   const captured: CapturedRequest[] = [];
   let nextClusterId = 1;
@@ -216,6 +217,9 @@ function stubFanoutHttp(options: {
       return jsonResponse(options.pendingRows ?? []);
     }
     if (url.pathname === "/rest/v1/portfolio_news_matches" && method === "POST") {
+      if (options.matchUpsertStatus) {
+        return jsonResponse({ message: "match upsert failed" }, options.matchUpsertStatus);
+      }
       return jsonResponse(null, 201);
     }
     if (url.pathname === "/rest/v1/rpc/try_acquire_company_sentiment_lock" && method === "POST") {
@@ -247,6 +251,17 @@ function clusterUpsertRows(captured: CapturedRequest[]): Array<Record<string, un
 }
 
 describe("runNewsFanout sentiment pipeline (end-to-end over stubbed HTTP)", () => {
+  it("marks a partial match persistence failure as retryable", async () => {
+    stubFanoutHttp({ grokStatus: 500, matchUpsertStatus: 503 });
+
+    const result = await runNewsFanout(env);
+
+    expect(result.clustersUpserted).toBe(2);
+    expect(result.matchesUpserted).toBe(0);
+    expect(result.persistenceFailed).toBe(true);
+    expect(result.errors).toContain("batch match upsert: match upsert failed");
+  });
+
   it("persists per-cluster sentiments and EWMA-updates the rolling company score", async () => {
     const { captured } = stubFanoutHttp({ grokStatus: 200 });
 

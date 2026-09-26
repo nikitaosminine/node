@@ -1,11 +1,19 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const { dbFrom, dbRpc } = vi.hoisted(() => ({ dbFrom: vi.fn(), dbRpc: vi.fn() }));
+const { dbFrom, dbRpc, newsFanoutMock } = vi.hoisted(() => ({
+  dbFrom: vi.fn(),
+  dbRpc: vi.fn(),
+  newsFanoutMock: vi.fn(),
+}));
 
 vi.mock("@supabase/supabase-js", () => ({
   createClient: vi.fn(() => ({ from: dbFrom, rpc: dbRpc })),
 }));
 vi.mock("./feeds/recaps", () => ({ generateRecap: vi.fn().mockResolvedValue(undefined) }));
+vi.mock("./feeds/news", () => ({
+  NEWS_CRON_SLOTS: ["30 6 * * 2-6", "30 16 * * 2-6", "0 21 * * 2-6"],
+  runNewsFanout: newsFanoutMock,
+}));
 
 import worker, {
   researchPortfolioEtfGeography,
@@ -108,6 +116,13 @@ function stubGrokGeographyResearch(payload: Record<string, unknown>) {
 beforeEach(() => {
   dbFrom.mockReset();
   dbRpc.mockReset();
+  newsFanoutMock.mockReset();
+  newsFanoutMock.mockResolvedValue({
+    clustersUpserted: 1,
+    matchesUpserted: 1,
+    persistenceFailed: false,
+    errors: [],
+  });
   vi.spyOn(console, "error").mockImplementation(() => undefined);
   vi.spyOn(console, "log").mockImplementation(() => undefined);
   vi.spyOn(console, "warn").mockImplementation(() => undefined);
@@ -249,6 +264,7 @@ describe("scheduled news queue handoff", () => {
   });
 
   it("retries a news queue delivery when the provider key is absent", async () => {
+    newsFanoutMock.mockRejectedValueOnce(new Error("FIRECRAWL_API_KEY not configured"));
     const ack = vi.fn();
     const retry = vi.fn();
     await worker.queue(
@@ -269,28 +285,6 @@ describe("scheduled news queue handoff", () => {
   });
 
   it("safely acknowledges duplicate successful deliveries", async () => {
-    const holdingsQuery = {
-      gt: vi.fn().mockResolvedValue({ data: [], error: null }),
-    };
-    dbFrom.mockImplementation((table: string) => {
-      if (table === "holdings") return { select: vi.fn(() => holdingsQuery) };
-      if (table === "news_clusters") {
-        return {
-          delete: vi.fn(() => ({
-            lt: vi.fn().mockResolvedValue({ count: 0, error: null }),
-          })),
-        };
-      }
-      if (table === "company_sentiment_pending") {
-        return { select: vi.fn(() => ({ order: vi.fn(() => ({ limit: vi.fn().mockResolvedValue({ data: [], error: null }) })) })) };
-      }
-      if (table === "company_sentiment_lock") {
-        return { delete: vi.fn(() => ({ eq: vi.fn(() => ({ eq: vi.fn().mockResolvedValue({ error: null }) })) })) };
-      }
-      throw new Error(`unexpected table ${table}`);
-    });
-    dbRpc.mockResolvedValue({ data: true, error: null });
-    const queueEnv = { ...env, FIRECRAWL_API_KEY: "fc-key" } as Env;
     const ack1 = vi.fn();
     const retry1 = vi.fn();
     const ack2 = vi.fn();
@@ -299,75 +293,75 @@ describe("scheduled news queue handoff", () => {
     const makeBatch = (ack: () => void, retry: () => void) =>
       ({ messages: [{ body, ack, retry }] }) as unknown as Parameters<typeof worker.queue>[0];
 
-    vi.useFakeTimers();
-    vi.setSystemTime(Date.UTC(2026, 8, 21, 21, 0));
-    try {
-      await worker.queue(makeBatch(ack1, retry1), queueEnv);
-      await worker.queue(makeBatch(ack2, retry2), queueEnv);
-    } finally {
-      vi.useRealTimers();
-    }
+    await worker.queue(makeBatch(ack1, retry1), env);
+    await worker.queue(makeBatch(ack2, retry2), env);
 
     expect(ack1).toHaveBeenCalledOnce();
     expect(ack2).toHaveBeenCalledOnce();
     expect(retry1).not.toHaveBeenCalled();
     expect(retry2).not.toHaveBeenCalled();
+    expect(newsFanoutMock).toHaveBeenCalledTimes(2);
+    expect(newsFanoutMock).toHaveBeenNthCalledWith(1, env, { scheduledTime: body.scheduledTime });
+    expect(newsFanoutMock).toHaveBeenNthCalledWith(2, env, { scheduledTime: body.scheduledTime });
   });
 
   it("retries a total provider failure instead of acknowledging it", async () => {
-    const holdingsQuery = {
-      gt: vi.fn().mockResolvedValue({
-        data: [
-          {
-            id: "holding-1",
-            ticker: "ACME",
-            isin: null,
-            asset_type: "EQUITY",
-            name: "Acme Corp",
-            quantity: 1,
-            portfolio_id: "portfolio-1",
-          },
-        ],
-        error: null,
-      }),
-    };
-    dbFrom.mockImplementation((table: string) => {
-      if (table === "holdings") return { select: vi.fn(() => holdingsQuery) };
-      if (table === "news_clusters") {
-        return {
-          delete: vi.fn(() => ({
-            lt: vi.fn().mockResolvedValue({ count: 0, error: null }),
-          })),
-        };
-      }
-      throw new Error(`unexpected table ${table}`);
+    newsFanoutMock.mockResolvedValueOnce({
+      clustersUpserted: 0,
+      matchesUpserted: 0,
+      persistenceFailed: false,
+      errors: ["provider unavailable"],
     });
-    vi.stubGlobal("fetch", vi.fn(async () => new Response("provider down", { status: 500 })));
     const ack = vi.fn();
     const retry = vi.fn();
 
-    vi.useFakeTimers();
-    try {
-      const delivery = worker.queue(
-        {
-          messages: [
-            {
-              body: { type: "news_fanout", scheduledTime: Date.UTC(2026, 8, 21, 16, 30) },
-              ack,
-              retry,
-            },
-          ],
-        } as unknown as Parameters<typeof worker.queue>[0],
-        { ...env, FIRECRAWL_API_KEY: "fc-key" } as Env,
-      );
-      await vi.runAllTimersAsync();
-      await delivery;
-    } finally {
-      vi.useRealTimers();
-    }
+    await worker.queue(
+      {
+        messages: [
+          {
+            body: { type: "news_fanout", scheduledTime: Date.UTC(2026, 8, 21, 16, 30) },
+            ack,
+            retry,
+          },
+        ],
+      } as unknown as Parameters<typeof worker.queue>[0],
+      env,
+    );
 
     expect(ack).not.toHaveBeenCalled();
     expect(retry).toHaveBeenCalledOnce();
+  });
+
+  it("retries partial persistence, then acknowledges a successful replay", async () => {
+    newsFanoutMock
+      .mockResolvedValueOnce({
+        clustersUpserted: 1,
+        matchesUpserted: 0,
+        persistenceFailed: true,
+        errors: ["batch match upsert: unavailable"],
+      })
+      .mockResolvedValueOnce({
+        clustersUpserted: 1,
+        matchesUpserted: 1,
+        persistenceFailed: false,
+        errors: [],
+      });
+    const body = { type: "news_fanout", scheduledTime: Date.UTC(2026, 8, 21, 16, 30) } as const;
+    const ack1 = vi.fn();
+    const retry1 = vi.fn();
+    const ack2 = vi.fn();
+    const retry2 = vi.fn();
+    const makeBatch = (ack: () => void, retry: () => void) =>
+      ({ messages: [{ body, ack, retry }] }) as unknown as Parameters<typeof worker.queue>[0];
+
+    await worker.queue(makeBatch(ack1, retry1), env);
+    await worker.queue(makeBatch(ack2, retry2), env);
+
+    expect(retry1).toHaveBeenCalledOnce();
+    expect(ack1).not.toHaveBeenCalled();
+    expect(ack2).toHaveBeenCalledOnce();
+    expect(retry2).not.toHaveBeenCalled();
+    expect(newsFanoutMock).toHaveBeenCalledTimes(2);
   });
 
   it("keeps recap queue messages on their existing acknowledgement path", async () => {
