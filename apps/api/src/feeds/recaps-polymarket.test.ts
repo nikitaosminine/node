@@ -103,6 +103,14 @@ describe("recap Polymarket watch filter", () => {
             score: 0.95,
             polymarket_markets: { ...eligibleMarket, liquidity: 333 },
           },
+          {
+            is_pinned: false,
+            score: 0.92,
+            polymarket_markets: {
+              ...eligibleMarket,
+              tags: [{ id: 104152, label: "Finance Up/Down" }],
+            },
+          },
           { is_pinned: false, score: 0.9, polymarket_markets: eligibleMarket },
         ];
         const builder = chainResult(watchRows);

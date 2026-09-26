@@ -41,7 +41,12 @@ import type {
   Direction,
 } from "./recap-types";
 import { NEWS_INCLUDE_DOMAINS, NEWS_INCLUDE_DOMAINS_SECONDARY } from "./news";
-import { isEligibleMarket, MIN_LIQUIDITY_USD, type MarketEligibilityInput } from "./polymarket";
+import {
+  hasExcludedPolymarketTag,
+  isEligibleMarket,
+  MIN_LIQUIDITY_USD,
+  type MarketEligibilityInput,
+} from "./polymarket";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnySupabaseClient = SupabaseClient<any, any, any>;
@@ -64,7 +69,7 @@ interface Env {
 }
 
 export interface PolymarketWatchRow {
-  polymarket_markets?: MarketEligibilityInput | null;
+  polymarket_markets?: (MarketEligibilityInput & { tags?: unknown }) | null;
 }
 
 export function filterEligiblePolymarketWatchRows<T extends PolymarketWatchRow>(
@@ -553,7 +558,7 @@ export async function gatherContext(
       .from("portfolio_polymarket_matches")
       .select(
         `is_pinned, score,
-         polymarket_markets!inner(question, event_slug, outcome_prices, end_date, start_date, liquidity, active)`,
+         polymarket_markets!inner(question, event_slug, outcome_prices, end_date, start_date, liquidity, active, tags)`,
       )
       .eq("portfolio_id", recap.portfolio_id)
       .eq("polymarket_markets.active", true)
@@ -565,7 +570,11 @@ export async function gatherContext(
       .range(page * watchPageSize, (page + 1) * watchPageSize - 1);
 
     const pageRowsTyped = (pageRows ?? []) as unknown as PolymarketWatchRow[];
-    watchRowsRaw.push(...pageRowsTyped);
+    watchRowsRaw.push(
+      ...pageRowsTyped.filter(
+        (row) => !hasExcludedPolymarketTag(row.polymarket_markets?.tags),
+      ),
+    );
     if (
       pageRowsTyped.length < watchPageSize ||
       filterEligiblePolymarketWatchRows(watchRowsRaw, watchEligibilityNow).length >= 5

@@ -119,6 +119,13 @@ describe("GET /api/feed/polymarket", () => {
       marketRow({
         polymarket_markets: {
           ...marketRow().polymarket_markets,
+          condition_id: "excluded-tag",
+          tags: [{ id: 104152, label: "Finance Up/Down" }],
+        },
+      }),
+      marketRow({
+        polymarket_markets: {
+          ...marketRow().polymarket_markets,
           condition_id: "eligible",
         },
       }),

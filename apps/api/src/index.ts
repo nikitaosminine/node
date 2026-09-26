@@ -5855,6 +5855,7 @@ ${JSON.stringify(holdingsPromptPayload, null, 2)}`;
         if (error) return json({ error: error.message }, 500);
 
         const pageRows = (data ?? []).filter((r) =>
+          !hasExcludedPolymarketTag((r as any).polymarket_markets?.tags) &&
           isEligibleMarket((r as any).polymarket_markets ?? {}, eligibilityNow),
         );
         rows.push(...pageRows);
