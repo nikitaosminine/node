@@ -679,6 +679,14 @@ describe("Polymarket Grok curation", () => {
           })),
         };
       }
+      if (table === "polymarket_price_history") {
+        return {
+          insert: vi.fn().mockResolvedValue({ error: null }),
+          delete: vi.fn(() => ({
+            lt: vi.fn().mockResolvedValue({ error: null }),
+          })),
+        };
+      }
       throw new Error(`Unexpected table: ${table}`);
     });
 
@@ -702,7 +710,7 @@ describe("Polymarket Grok curation", () => {
     expect(result).toMatchObject({
       portfoliosProcessed: 0,
       portfoliosSkipped: 1,
-      errors: [expect.stringContaining("profile lookup failed")],
+      errors: ["portfolio portfolio-profile-failure: profile lookup failed"],
     });
   });
 });
