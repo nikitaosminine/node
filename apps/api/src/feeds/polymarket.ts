@@ -153,6 +153,7 @@ export interface PolymarketFanoutResult {
 
 export const TAG_IDS = {
   geopolitics: 100265,
+  politics: 2,
   economy: 100328,
   finance: 120,
   crypto: 21,
@@ -208,7 +209,7 @@ export const POLITICAL_NOMINATION_RE =
   /\b(?:democratic|republican|gop|libertarian|green|party)\s+(?:party\s+)?(?:primary|primaries|nominee|nomination)\b|\b(?:presidential|president(?:ial)?|vice[- ]president|governor|senator|senate|congress(?:ional)?|representative|mayor)\b[^\n?]{0,60}\b(?:nominee|nomination)\b|\b(?:which candidate|candidate)\b[^\n?]{0,80}\b(?:win|wins|be|become|be named|secure|capture)\b[^\n?]{0,80}\b(?:nominee|nomination|primary|primaries)\b|\b(?:will|could|can)\b[^\n?]{0,80}\b(?:be|become|be named)\b[^\n?]{0,30}\b(?:the\s+)?(?:nominee|nomination)\b[^\n?]{0,30}\b(?:for|of)\b[^\n?]{0,30}\b(?:president(?:ial)?|vice[- ]president|governor|senator|mayor)\b|\b(?:will|could|can)\b[^\n?]{0,80}\b(?:nominate|nominated)\b[^\n?]{0,30}\b(?:for|as)\b[^\n?]{0,30}\b(?:president(?:ial)?|vice[- ]president|governor|senator|mayor)\b|\b(?:will|could|can)\b[^\n?]{0,80}\b(?:nominate|nominated)\b[^\n?]{0,30}\b(?:by|from)\b[^\n?]{0,30}\b(?:democratic|republican|gop|libertarian|green)\s+party\b/i;
 
 const NAMED_PERSON_NOMINATION_RE =
-  /\b(?:will|could|can)\s+(?:(?:[A-Z][a-z]+|(?:[A-Z]\.){1,3}))(?:\s+(?:[A-Z][a-z]+|(?:[A-Z]\.){1,3}))*[^\n?]{0,30}\b(?:win|wins)\b[^\n?]{0,30}\b(?:the\s+)?nomination\b/;
+  /\b(?:will|could|can)\s+(?:(?:[A-Z][a-z]+(?:['’][A-Z][a-z]+)?|(?:[A-Z]\.){1,3}))(?:\s+(?:(?:[A-Z][a-z]+(?:['’][A-Z][a-z]+)?|(?:[A-Z]\.){1,3})))*[^\n?]{0,30}\b(?:win|wins)\b[^\n?]{0,30}\b(?:the\s+)?nomination\b(?!\s+for\s+(?:an?\s+)?(?:award|prize)\b)/;
 
 export function isNonLlmDeliveryExcluded(question: string | null | undefined): boolean {
   const text = question ?? "";

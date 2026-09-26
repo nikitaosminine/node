@@ -264,9 +264,9 @@ describe("non-LLM Polymarket delivery filter", () => {
     );
     expect(isNonLlmDeliveryExcluded("Will J.D. Vance win the nomination?")).toBe(true);
     expect(isNonLlmDeliveryExcluded("Will the film be nominated for an award?")).toBe(false);
-    expect(isNonLlmDeliveryExcluded("Will Acme Corp be nominated for an innovation award?")).toBe(
-      false,
-    );
+    expect(isNonLlmDeliveryExcluded("Will Acme Corp be nominated for an innovation award?")).toBe(false);
+    expect(isNonLlmDeliveryExcluded("Will Acme win the nomination for an innovation award?")).toBe(false);
+    expect(isNonLlmDeliveryExcluded("Will O’Rourke win the nomination?")).toBe(true);
     expect(
       isNonLlmDeliveryExcluded("Will the 2028 presidential election be won by Candidate X?"),
     ).toBe(false);
@@ -309,7 +309,7 @@ describe("fetchCandidateMarkets", () => {
     const markets = await fetchCandidateMarkets(env);
 
     expect(markets.size).toBe(1);
-    const expectedTagIds = [100265, 100328, 120, 21, 107, 1401];
+    const expectedTagIds = [100265, 2, 100328, 120, 21, 107, 1401];
     expect(requestedUrls).toHaveLength(expectedTagIds.length);
     expect(
       requestedUrls
@@ -329,6 +329,31 @@ describe("fetchCandidateMarkets", () => {
         expectedExcludeTagIds.map(String).sort(),
       );
     }
+  });
+
+  it("ingests a broad election market available only through the politics tag", async () => {
+    const electionEvent = gammaEvent("0xpolitical-election", "event-election", "election-2028");
+    electionEvent.tags = [{ id: 2, label: "Politics" }];
+    electionEvent.markets[0].question =
+      "Will the 2028 presidential election be won by Candidate X?";
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = new URL(String(input));
+        const events = url.searchParams.get("tag_id") === "2" ? [electionEvent] : [];
+        return new Response(JSON.stringify(events), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }),
+    );
+
+    const markets = await fetchCandidateMarkets(env);
+
+    expect(markets.get("0xpolitical-election")?.question).toBe(
+      "Will the 2028 presidential election be won by Candidate X?",
+    );
   });
 
   it("rejects a completely failed candidate refresh before any database access", async () => {
